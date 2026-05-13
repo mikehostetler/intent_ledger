@@ -163,6 +163,16 @@ defmodule IntentLedger.CrossNodeStore do
     call(peer, __MODULE__, :recover_on_node, [context.store_name, context.ledger, normalize_attrs(attrs)])
   end
 
+  @spec shard_lease(PeerNodes.peer(), t(), IntentLedger.Store.shard_lease_operation(), map() | keyword()) :: term()
+  def shard_lease(peer, context, operation, attrs) do
+    call(peer, __MODULE__, :shard_lease_on_node, [
+      context.store_name,
+      context.ledger,
+      operation,
+      normalize_attrs(attrs)
+    ])
+  end
+
   @spec replay(PeerNodes.peer(), t(), atom(), String.t(), map()) :: term()
   def replay(peer, context, operation, command_id, command) do
     call(peer, __MODULE__, :replay_on_node, [context.store_name, context.ledger, operation, command_id, command])
@@ -432,6 +442,24 @@ defmodule IntentLedger.CrossNodeStore do
         writes: writes ++ [Write.put_idempotency(command_id, result)]
       )
     end
+  end
+
+  @spec shard_lease_on_node(GenServer.server(), atom(), IntentLedger.Store.shard_lease_operation(), map()) ::
+          IntentLedger.Store.result()
+  def shard_lease_on_node(store, ledger, operation, attrs) do
+    Bedrock.lease(
+      store,
+      ledger,
+      {:shard, operation,
+       %{
+         queue: attrs |> Map.get(:queue, "default") |> to_string(),
+         shard: Map.get(attrs, :shard, 0),
+         owner_id: attrs |> Map.get(:owner_id, "owner") |> to_string(),
+         lease_until: Map.get(attrs, :lease_until),
+         now: Map.get(attrs, :now, @default_now)
+       }},
+      []
+    )
   end
 
   @spec replay_on_node(GenServer.server(), atom(), atom(), String.t(), map()) :: IntentLedger.Store.commit_result()
