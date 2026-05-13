@@ -3,7 +3,7 @@ defmodule IntentLedger.Server do
 
   use GenServer
 
-  alias IntentLedger.{Intent, Lifecycle, Telemetry, Time}
+  alias IntentLedger.{Intent, Lifecycle, Notifier, Record, Telemetry, Time}
 
   require Logger
 
@@ -17,6 +17,7 @@ defmodule IntentLedger.Server do
           lifecycle: module() | nil,
           queues: map(),
           lease_ms: pos_integer(),
+          wakeups?: boolean(),
           telemetry: keyword(),
           command_results: %{optional(String.t()) => term()}
         }
@@ -28,6 +29,7 @@ defmodule IntentLedger.Server do
     :lifecycle,
     :queues,
     :lease_ms,
+    :wakeups?,
     :telemetry,
     command_results: %{}
   ]
@@ -67,6 +69,7 @@ defmodule IntentLedger.Server do
        lifecycle: Keyword.get(opts, :lifecycle),
        queues: normalize_queues(Keyword.get(opts, :queues, default: @default_queue_opts)),
        lease_ms: Keyword.get(opts, :lease_ms, @default_lease_ms),
+       wakeups?: Keyword.get(opts, :wakeups?, false),
        telemetry: Keyword.take(opts, [:telemetry_prefix])
      }}
   end
@@ -96,6 +99,7 @@ defmodule IntentLedger.Server do
              Keyword.put(opts, :now, now)
            ) do
       notify(state, signals, :submit, %{count: 1}, %{intent_id: record.intent.id})
+      wake_claimable(state, record)
       {:reply, {:ok, record}, state}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -114,6 +118,7 @@ defmodule IntentLedger.Server do
              Keyword.put(opts, :now, now)
            ) do
       notify(state, signals, :submit_many, %{count: length(records)}, %{})
+      wake_claimable(state, records)
       {:reply, {:ok, records}, state}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -289,6 +294,7 @@ defmodule IntentLedger.Server do
              Keyword.put(opts, :now, now)
            ) do
       notify(state, signals, :submit, %{count: 1}, %{intent_id: record.intent.id})
+      wake_claimable(state, record)
       {{:ok, record}, state}
     else
       {:error, reason} -> {{:error, reason}, state}
@@ -307,6 +313,7 @@ defmodule IntentLedger.Server do
              Keyword.put(opts, :now, now)
            ) do
       notify(state, signals, :submit_many, %{count: length(records)}, %{})
+      wake_claimable(state, records)
       {{:ok, records}, state}
     else
       {:error, reason} -> {{:error, reason}, state}
@@ -516,6 +523,7 @@ defmodule IntentLedger.Server do
 
   defp reply_commit(state, operation, {:ok, result, signals}, metadata) do
     notify(state, signals, operation, %{count: signal_count(signals)}, metadata)
+    wake_claimable(state, result)
     {:reply, {:ok, result}, state}
   end
 
@@ -555,6 +563,18 @@ defmodule IntentLedger.Server do
   end
 
   defp signal_count(signals) when is_list(signals), do: length(signals)
+
+  defp wake_claimable(state, records) when is_list(records) do
+    Enum.each(records, &wake_claimable(state, &1))
+  end
+
+  defp wake_claimable(state, %Record{} = record) do
+    if state.wakeups? and record.state.status in [:available, :retry_scheduled] do
+      Notifier.wake(state.name, record.state.queue, record.state.shard)
+    end
+  end
+
+  defp wake_claimable(_state, _result), do: :ok
 
   defp context(state, opts) do
     %{

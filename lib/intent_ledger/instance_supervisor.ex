@@ -21,6 +21,7 @@ defmodule IntentLedger.InstanceSupervisor do
           | {:claim_batch_size, pos_integer()}
           | {:recovery_interval_ms, pos_integer()}
           | {:recovery_limit, pos_integer()}
+          | {:wakeups?, boolean()}
           | {:lifecycle, module()}
           | {:telemetry_prefix, [atom()]}
           | {:shutdown, timeout()}
@@ -79,6 +80,7 @@ defmodule IntentLedger.InstanceSupervisor do
 
     children = [
       {Registry, keys: :unique, name: Names.registry(name)},
+      {IntentLedger.Notifier, name: name},
       store_module.child_spec(Keyword.put(store_opts, :name, store_name)),
       {IntentLedger.Server, server_opts},
       {IntentLedger.QueueSupervisor, queue_opts},

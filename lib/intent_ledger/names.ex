@@ -10,6 +10,10 @@ defmodule IntentLedger.Names do
   def registry(name), do: Module.concat(name, Registry)
 
   @doc false
+  @spec notifier(atom()) :: atom()
+  def notifier(name), do: Module.concat(name, Notifier)
+
+  @doc false
   @spec queue_supervisor(atom()) :: atom()
   def queue_supervisor(name), do: Module.concat(name, QueueSupervisor)
 

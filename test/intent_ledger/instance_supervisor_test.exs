@@ -28,6 +28,7 @@ defmodule IntentLedger.InstanceSupervisorTest do
 
     assert Process.whereis(Names.supervisor(name)) == supervisor
     assert Process.whereis(Names.registry(name))
+    assert Process.whereis(Names.notifier(name))
     assert Process.whereis(Names.store(name))
     assert Process.whereis(Names.queue_supervisor(name))
     assert Process.whereis(Names.recovery_server(name))

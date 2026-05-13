@@ -95,6 +95,10 @@ defmodule IntentLedger.QueueShardServer do
   @spec state(GenServer.server()) :: t()
   def state(server), do: GenServer.call(server, :state)
 
+  @doc false
+  @spec wake(GenServer.server()) :: :ok
+  def wake(server), do: GenServer.cast(server, :wake)
+
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
@@ -133,6 +137,11 @@ defmodule IntentLedger.QueueShardServer do
   @impl true
   def handle_call(:state, _from, %__MODULE__{} = state) do
     {:reply, state, state}
+  end
+
+  @impl true
+  def handle_cast(:wake, %__MODULE__{} = state) do
+    {:noreply, poll_due_intents(state)}
   end
 
   @impl true
