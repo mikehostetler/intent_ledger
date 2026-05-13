@@ -148,6 +148,11 @@ defmodule IntentLedger.CrossNodeStore do
     call(peer, __MODULE__, :complete_on_node, [context.store_name, context.ledger, normalize_attrs(attrs)])
   end
 
+  @spec release(PeerNodes.peer(), t(), map() | keyword()) :: term()
+  def release(peer, context, attrs) do
+    call(peer, __MODULE__, :release_on_node, [context.store_name, context.ledger, normalize_attrs(attrs)])
+  end
+
   @spec fail(PeerNodes.peer(), t(), map() | keyword()) :: term()
   def fail(peer, context, attrs) do
     call(peer, __MODULE__, :fail_on_node, [context.store_name, context.ledger, normalize_attrs(attrs)])
@@ -292,6 +297,43 @@ defmodule IntentLedger.CrossNodeStore do
         Write.delete_claim(claim_id),
         Write.put_idempotency(command_id, result),
         Write.put_outbox(outbox_key(command_id), %{stream: stream, signal: signal, inserted_at: now})
+      ]
+    )
+  end
+
+  @spec release_on_node(GenServer.server(), atom(), map()) :: IntentLedger.Store.commit_result()
+  def release_on_node(store, ledger, attrs) do
+    now = Map.get(attrs, :now, @default_now)
+    claim_id = Map.fetch!(attrs, :claim_id)
+    token = Map.fetch!(attrs, :token)
+    token_hash = Claim.token_hash(token)
+    intent_id = Map.fetch!(attrs, :intent_id)
+    stream = stream(intent_id)
+    stream_version = stream_version!(store, ledger, stream)
+    command_id = Map.get(attrs, :command_id, "cmd:release:#{claim_id}")
+    command = %{claim_id: claim_id}
+    signal = signal(intent_id, "released", now, %{claim_id: claim_id})
+    result = %{intent_id: intent_id, status: :available, command_id: command_id, command: command}
+
+    commit(store, ledger,
+      command_id: command_id,
+      operation: :release,
+      command: command,
+      preconditions: [
+        Precondition.command_absent(command_id),
+        Precondition.stream_version(stream, stream_version),
+        Precondition.claim_fence(claim_id, token_hash, metadata: %{now: now})
+      ],
+      writes: [
+        Write.new(:put_state,
+          key: intent_id,
+          value:
+            state(intent_id, attrs, now, :available)
+            |> merge_state(claim_id: nil, claim_token_hash: nil, lease_until: nil, updated_at: now)
+        ),
+        Write.append_signal(stream, signal),
+        Write.delete_claim(claim_id),
+        Write.put_idempotency(command_id, result)
       ]
     )
   end
