@@ -1,10 +1,11 @@
 defmodule IntentLedger.SignalDispatcher do
   @moduledoc """
-  Per-ledger durable outbox dispatcher scaffold.
+  Per-ledger durable outbox dispatcher.
 
   The dispatcher owns the supervised polling loop for lifecycle signal outbox
-  entries. Handler registration and ack/retry semantics are layered on top by
-  later runtime tasks.
+  entries. Registered `IntentLedger.SignalHandler` modules are invoked at least
+  once; entries are acknowledged after every handler succeeds and retried with
+  backoff when any handler fails.
   """
 
   use GenServer

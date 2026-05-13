@@ -27,6 +27,9 @@ Ecto/Postgres remains a planned local durable adapter.
   node.
 - `IntentLedger.RecoveryServer` periodically recovers expired claims and stale
   queue-shard leases supported by the configured store.
+- `IntentLedger.SignalDispatcher` polls the durable outbox and invokes
+  registered `IntentLedger.SignalHandler` modules for at-least-once lifecycle
+  signal delivery.
 - `IntentLedger.Projection` defines lightweight rebuild hooks for query models
   derived from replayed lifecycle signals.
 - `IntentLedger.Store` defines the persistence contract.
@@ -35,8 +38,9 @@ Ecto/Postgres remains a planned local durable adapter.
   backend.
 - `IntentLedger.Store.Bedrock` is the optional durable adapter for Bedrock-backed
   clustered deployments. See [Bedrock Adapter](docs/bedrock.md).
-- `IntentLedger.Lifecycle` provides optional hooks for submit enrichment and
-  post-transition observation.
+- `IntentLedger.Lifecycle` provides optional submit enrichment plus a
+  compatibility-only, best-effort `after_transition/2` observer. Use signal
+  handlers, not `after_transition/2`, for durable signal delivery.
 
 ## Installation
 

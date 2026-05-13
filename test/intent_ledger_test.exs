@@ -1,6 +1,8 @@
 defmodule IntentLedgerTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias IntentLedger.{Claim, Claimed, Error, Intent, IntentState, Names, Record, ShardState, Store, Time}
   alias IntentLedger.Store.Outbox
 
@@ -28,6 +30,19 @@ defmodule IntentLedgerTest do
       end
 
       :ok
+    end
+  end
+
+  defmodule FailingAfterTransitionLifecycle do
+    @behaviour IntentLedger.Lifecycle
+
+    @impl true
+    def after_transition(signal, _context) do
+      if pid = Process.whereis(:intent_ledger_failing_lifecycle_test) do
+        send(pid, {:failing_lifecycle_signal, signal.type})
+      end
+
+      {:error, :boom}
     end
   end
 
@@ -421,6 +436,43 @@ defmodule IntentLedgerTest do
   after
     if Process.whereis(:intent_ledger_lifecycle_test) == self() do
       Process.unregister(:intent_ledger_lifecycle_test)
+    end
+  end
+
+  test "keeps after_transition as best-effort compatibility observation", %{ledger: _ledger} do
+    Process.register(self(), :intent_ledger_failing_lifecycle_test)
+
+    name = Module.concat(__MODULE__, "FailingHookLedger#{System.unique_integer([:positive])}")
+
+    start_supervised!(
+      {IntentLedger, name: name, lifecycle: FailingAfterTransitionLifecycle, store: IntentLedger.Store.Memory}
+    )
+
+    parent = self()
+
+    log =
+      capture_log(fn ->
+        assert {:ok, record} = IntentLedger.submit(name, %{key: "job:failing-hook", kind: "job.run"})
+        send(parent, {:submitted_with_failing_hook, record})
+      end)
+
+    assert_receive {:submitted_with_failing_hook, record}
+    assert_receive {:failing_lifecycle_signal, "intent_ledger.intent.submitted"}
+    assert log =~ "intent ledger lifecycle hook failed"
+
+    assert {:ok, history} = IntentLedger.history(name, record.intent.id)
+    assert Enum.map(history, & &1.type) == ["intent_ledger.intent.submitted", "intent_ledger.intent.available"]
+
+    assert {:ok, outbox_entries} =
+             IntentLedger.Store.Memory.outbox(Names.store(name), name, Outbox.replay(cursor: 0, limit: 10), [])
+
+    assert Enum.map(outbox_entries, & &1.signal.type) == [
+             "intent_ledger.intent.submitted",
+             "intent_ledger.intent.available"
+           ]
+  after
+    if Process.whereis(:intent_ledger_failing_lifecycle_test) == self() do
+      Process.unregister(:intent_ledger_failing_lifecycle_test)
     end
   end
 

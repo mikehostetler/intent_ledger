@@ -3,9 +3,13 @@ defmodule IntentLedger.Lifecycle do
   Optional lifecycle hooks for ledger instances.
 
   A callback module can be supplied with `:lifecycle` when starting a ledger.
-  The first spike uses hooks for submit validation/enrichment and post-transition
-  observation. Failure classification is kept as part of the behaviour so
-  durable adapters can delegate retry policy without changing the public API.
+  `before_submit/2` remains a synchronous validation/enrichment boundary.
+
+  `after_transition/2` is retained as a synchronous, best-effort compatibility
+  observer. It runs on the local server process after a lifecycle commit has
+  succeeded; callback errors are logged by the server and must not be used for
+  durable delivery or correctness. Use `IntentLedger.SignalDispatcher` with
+  `IntentLedger.SignalHandler` modules for at-least-once signal delivery.
   """
 
   alias IntentLedger.{Intent, Record}
@@ -17,6 +21,14 @@ defmodule IntentLedger.Lifecycle do
               :retry | :fail | :ambiguous | {:retry, DateTime.t()} | {:error, term()}
   @callback classify_expired_claim(Record.t(), context()) ::
               :retry | :ambiguous | {:error, term()}
+
+  @doc """
+  Best-effort local observation hook for committed lifecycle signals.
+
+  This callback is compatibility-only. A return value of `{:error, reason}`
+  stops the local callback loop for the current commit, but the lifecycle commit
+  has already succeeded and is not rolled back.
+  """
   @callback after_transition(Jido.Signal.t(), context()) :: :ok | {:error, term()}
 
   @optional_callbacks before_submit: 2,
