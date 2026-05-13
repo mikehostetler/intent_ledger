@@ -71,6 +71,39 @@ defmodule IntentLedger do
   def history(ledger, intent_id), do: GenServer.call(ledger, {:history, intent_id})
 
   @doc """
+  Replays a window of lifecycle signals for one intent.
+  """
+  @spec replay_intent(ledger(), String.t(), keyword()) :: {:ok, [Jido.Signal.t() | map()]} | {:error, term()}
+  def replay_intent(ledger, intent_id, opts \\ []) do
+    GenServer.call(ledger, {:replay_intent, intent_id, opts})
+  end
+
+  @doc """
+  Replays a window of lifecycle signals for one queue shard.
+  """
+  @spec replay_queue(ledger(), String.t() | atom(), non_neg_integer(), keyword()) ::
+          {:ok, [Jido.Signal.t() | map()]} | {:error, term()}
+  def replay_queue(ledger, queue, shard, opts \\ []) do
+    GenServer.call(ledger, {:replay_queue, queue, shard, opts})
+  end
+
+  @doc """
+  Replays a window of lifecycle signals for the whole ledger stream.
+  """
+  @spec replay_ledger(ledger(), keyword()) :: {:ok, [Jido.Signal.t() | map()]} | {:error, term()}
+  def replay_ledger(ledger, opts \\ []) do
+    GenServer.call(ledger, {:replay_ledger, opts})
+  end
+
+  @doc """
+  Replays durable outbox entries without mutating acknowledgement state.
+  """
+  @spec replay_outbox(ledger(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def replay_outbox(ledger, opts \\ []) do
+    GenServer.call(ledger, {:replay_outbox, opts})
+  end
+
+  @doc """
   Executes a command signal against a ledger.
   """
   @spec command(ledger(), Jido.Signal.t(), keyword()) ::

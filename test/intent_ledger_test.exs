@@ -101,6 +101,42 @@ defmodule IntentLedgerTest do
     assert Enum.all?(entries, &is_integer(&1.sequence))
   end
 
+  test "replays intent queue ledger and outbox windows", %{ledger: ledger} do
+    {:ok, record} =
+      IntentLedger.submit(ledger, %{
+        key: "replay:1",
+        kind: "replay.test",
+        shard: 0
+      })
+
+    {:ok, claimed} = IntentLedger.claim(ledger, :default, "replay-worker")
+
+    assert {:ok, _completed} =
+             IntentLedger.complete(ledger, claimed.claim.id, claimed.claim.token, %{ok: true})
+
+    assert {:ok, intent_window} = IntentLedger.replay_intent(ledger, record.intent.id, cursor: 1, limit: 2)
+    assert Enum.map(intent_window, & &1.type) == ["intent_ledger.intent.available", "intent_ledger.intent.claimed"]
+
+    assert {:ok, queue_signals} = IntentLedger.replay_queue(ledger, :default, 0, limit: 10)
+
+    assert Enum.map(queue_signals, & &1.type) == [
+             "intent_ledger.intent.submitted",
+             "intent_ledger.intent.available",
+             "intent_ledger.intent.claimed",
+             "intent_ledger.intent.completed"
+           ]
+
+    assert {:ok, ledger_window} = IntentLedger.replay_ledger(ledger, cursor: 2, limit: 2)
+    assert Enum.map(ledger_window, & &1.type) == ["intent_ledger.intent.claimed", "intent_ledger.intent.completed"]
+
+    assert {:ok, outbox_entries} = IntentLedger.replay_outbox(ledger, cursor: 0, limit: 2)
+
+    assert Enum.map(outbox_entries, & &1.signal.type) == [
+             "intent_ledger.intent.submitted",
+             "intent_ledger.intent.available"
+           ]
+  end
+
   test "claims and completes an intent with token protection", %{ledger: ledger} do
     {:ok, record} =
       IntentLedger.submit(ledger, %{

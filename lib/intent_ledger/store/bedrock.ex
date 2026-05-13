@@ -109,12 +109,12 @@ defmodule IntentLedger.Store.Bedrock do
   end
 
   @impl true
-  def handle_call({:read, ledger, {:stream, stream, _read_opts}, opts}, _from, %__MODULE__{} = state) do
+  def handle_call({:read, ledger, {:stream, stream, read_opts}, opts}, _from, %__MODULE__{} = state) do
     result =
       transact(
         state.repo,
         fn repo ->
-          read_stream(repo, ledger, stream)
+          read_stream(repo, ledger, stream, read_opts)
         end,
         transaction_opts(state, opts)
       )
@@ -441,11 +441,11 @@ defmodule IntentLedger.Store.Bedrock do
   defp add_read_conflict_key(repo, key), do: apply(repo, :add_read_conflict_key, [key])
   defp add_write_conflict_range(repo, range), do: apply(repo, :add_write_conflict_range, [range])
 
-  defp read_stream(repo, ledger, stream) do
+  defp read_stream(repo, ledger, stream, opts) do
     entries = stream_entries(repo, ledger, stream)
 
     with {:ok, signals} <- decode_stream_signals(entries) do
-      {:ok, %{stream: stream, version: length(signals), signals: signals}}
+      {:ok, %{stream: stream, version: length(signals), signals: window(signals, opts)}}
     end
   end
 
@@ -465,6 +465,22 @@ defmodule IntentLedger.Store.Bedrock do
       end
     end)
   end
+
+  defp window(values, opts) do
+    opts = normalize_attrs(opts)
+    cursor = opts |> Map.get(:cursor, 0) |> non_negative_or(0)
+    limit = opts |> Map.get(:limit, length(values)) |> positive_or(length(values))
+
+    values
+    |> Enum.drop(cursor)
+    |> Enum.take(limit)
+  end
+
+  defp non_negative_or(value, _default) when is_integer(value) and value >= 0, do: value
+  defp non_negative_or(_value, default), do: default
+
+  defp positive_or(value, _default) when is_integer(value) and value > 0, do: value
+  defp positive_or(_value, default), do: default
 
   defp clear_previous_queue_index(repo, ledger, intent_id) do
     with {:ok, previous_state} <- fetch_state(repo, ledger, intent_id) do

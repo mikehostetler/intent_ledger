@@ -196,10 +196,10 @@ defmodule IntentLedger.Store.Memory do
     end
   end
 
-  def handle_call({:store_v1_read, _ledger, {:stream, stream, _read_opts}, _opts}, _from, state) do
+  def handle_call({:store_v1_read, _ledger, {:stream, stream, read_opts}, _opts}, _from, state) do
     signals = Map.get(state.streams, stream, [])
 
-    {:reply, {:ok, %{stream: stream, version: length(signals), signals: signals}}, state}
+    {:reply, {:ok, %{stream: stream, version: length(signals), signals: window(signals, read_opts)}}, state}
   end
 
   def handle_call({:store_v1_read, _ledger, request, _opts}, _from, state) do
@@ -1168,6 +1168,22 @@ defmodule IntentLedger.Store.Memory do
 
   defp store_lease_expired?(lease, now), do: DateTime.compare(store_field(lease, :lease_until), now) != :gt
   defp shard_key(queue, shard), do: "shard:" <> to_string(queue) <> ":" <> to_string(shard)
+
+  defp window(values, opts) do
+    opts = normalize_attrs(opts)
+    cursor = opts |> Map.get(:cursor, 0) |> non_negative_or(0)
+    limit = opts |> Map.get(:limit, length(values)) |> positive_or(length(values))
+
+    values
+    |> Enum.drop(cursor)
+    |> Enum.take(limit)
+  end
+
+  defp non_negative_or(value, _default) when is_integer(value) and value >= 0, do: value
+  defp non_negative_or(_value, default), do: default
+
+  defp positive_or(value, _default) when is_integer(value) and value > 0, do: value
+  defp positive_or(_value, default), do: default
 
   defp normalize_attrs(attrs) when is_list(attrs), do: Map.new(attrs)
   defp normalize_attrs(attrs) when is_map(attrs), do: attrs

@@ -4,6 +4,7 @@ defmodule IntentLedger.Server do
   use GenServer
 
   alias IntentLedger.{Intent, Lifecycle, Notifier, Record, Telemetry, Time}
+  alias IntentLedger.Store.Outbox
 
   require Logger
 
@@ -131,6 +132,22 @@ defmodule IntentLedger.Server do
 
   def handle_call({:history, intent_id}, _from, state) do
     {:reply, state.store_module.history(state.store_ref, to_string(intent_id)), state}
+  end
+
+  def handle_call({:replay_intent, intent_id, opts}, _from, state) do
+    {:reply, replay_stream(state, intent_stream(intent_id), opts), state}
+  end
+
+  def handle_call({:replay_queue, queue, shard, opts}, _from, state) do
+    {:reply, replay_stream(state, queue_stream(queue, shard), opts), state}
+  end
+
+  def handle_call({:replay_ledger, opts}, _from, state) do
+    {:reply, replay_stream(state, ledger_stream(state.name), opts), state}
+  end
+
+  def handle_call({:replay_outbox, opts}, _from, state) do
+    {:reply, state.store_module.outbox(state.store_ref, state.name, Outbox.replay(opts), []), state}
   end
 
   def handle_call({:claim, queue, owner_id, opts}, _from, state) do
@@ -576,6 +593,13 @@ defmodule IntentLedger.Server do
 
   defp wake_claimable(_state, _result), do: :ok
 
+  defp replay_stream(state, stream, opts) do
+    case state.store_module.read(state.store_ref, state.name, {:stream, stream, opts}, []) do
+      {:ok, %{signals: signals}} -> {:ok, signals}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp context(state, opts) do
     %{
       ledger: state.name,
@@ -610,4 +634,8 @@ defmodule IntentLedger.Server do
 
     {queue, %{shards: shards}}
   end
+
+  defp ledger_stream(ledger), do: "ledger:" <> inspect(ledger)
+  defp queue_stream(queue, shard), do: "queue:" <> to_string(queue) <> ":" <> to_string(shard)
+  defp intent_stream(intent_id), do: "intent:" <> to_string(intent_id)
 end
