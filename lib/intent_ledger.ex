@@ -183,7 +183,7 @@ defmodule IntentLedger do
 
   defp command_call(ledger, signal, message, opts) do
     case Command.normalize(signal) do
-      {:ok, _command} -> call(ledger, message, opts)
+      {:ok, command} -> call(ledger, {:command, command, message}, opts)
       {:error, reason} -> {:error, reason}
     end
   end

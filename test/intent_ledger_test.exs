@@ -287,6 +287,46 @@ defmodule IntentLedgerTest do
     assert :empty = IntentLedger.claim(ledger, :default, "worker-1")
   end
 
+  test "replays duplicate command ids without duplicate lifecycle commits", %{ledger: ledger} do
+    {:ok, first} =
+      IntentLedger.submit(ledger, %{key: "job:replay", kind: "job.run"}, command_id: "cmd_submit")
+
+    {:ok, replayed} =
+      IntentLedger.submit(ledger, %{key: "job:replay-other", kind: "job.run"}, command_id: "cmd_submit")
+
+    assert replayed.intent.id == first.intent.id
+    assert replayed.intent.key == "job:replay"
+
+    {:ok, history} = IntentLedger.history(ledger, first.intent.id)
+    assert Enum.map(history, & &1.type) == ["intent_ledger.intent.submitted", "intent_ledger.intent.available"]
+
+    {:ok, claimed} = IntentLedger.claim(ledger, :default, "worker-1")
+    assert claimed.intent.id == first.intent.id
+    assert :empty = IntentLedger.claim(ledger, :default, "worker-2")
+  end
+
+  test "replays duplicate completion command ids after the first commit", %{ledger: ledger} do
+    {:ok, record} = IntentLedger.submit(ledger, %{key: "job:complete-replay", kind: "job.run"})
+    {:ok, claimed} = IntentLedger.claim(ledger, :default, "worker-1")
+
+    {:ok, completed} =
+      IntentLedger.complete(ledger, claimed.claim.id, claimed.claim.token, %{ok: true}, command_id: "cmd_complete")
+
+    {:ok, replayed} =
+      IntentLedger.complete(ledger, claimed.claim.id, claimed.claim.token, %{ok: true}, command_id: "cmd_complete")
+
+    assert replayed == completed
+
+    {:ok, history} = IntentLedger.history(ledger, record.intent.id)
+
+    assert Enum.map(history, & &1.type) == [
+             "intent_ledger.intent.submitted",
+             "intent_ledger.intent.available",
+             "intent_ledger.intent.claimed",
+             "intent_ledger.intent.completed"
+           ]
+  end
+
   test "runs lifecycle hooks", %{ledger: _ledger} do
     Process.register(self(), :intent_ledger_lifecycle_test)
 

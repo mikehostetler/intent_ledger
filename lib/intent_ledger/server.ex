@@ -17,7 +17,8 @@ defmodule IntentLedger.Server do
           lifecycle: module() | nil,
           queues: map(),
           lease_ms: pos_integer(),
-          telemetry: keyword()
+          telemetry: keyword(),
+          command_results: %{optional(String.t()) => term()}
         }
 
   defstruct [
@@ -27,7 +28,8 @@ defmodule IntentLedger.Server do
     :lifecycle,
     :queues,
     :lease_ms,
-    :telemetry
+    :telemetry,
+    command_results: %{}
   ]
 
   @doc false
@@ -70,6 +72,17 @@ defmodule IntentLedger.Server do
   end
 
   @impl true
+  def handle_call({:command, %{command_id: command_id}, message}, _from, state) do
+    case Map.fetch(state.command_results, command_id) do
+      {:ok, reply} ->
+        {:reply, reply, state}
+
+      :error ->
+        {reply, next_state} = execute_public_command(message, state)
+        {:reply, reply, put_command_result(next_state, command_id, reply)}
+    end
+  end
+
   def handle_call({:submit, attrs, opts}, _from, state) do
     now = now(opts)
 
@@ -263,6 +276,209 @@ defmodule IntentLedger.Server do
     )
   end
 
+  defp execute_public_command({:submit, attrs, opts}, state) do
+    now = now(opts)
+
+    with {:ok, intent} <- build_intent(attrs, state, now),
+         {:ok, intent} <- Lifecycle.before_submit(state.lifecycle, intent, context(state, opts)),
+         {:ok, record, signals} <-
+           state.store_module.submit(
+             state.store_ref,
+             state.name,
+             intent,
+             Keyword.put(opts, :now, now)
+           ) do
+      notify(state, signals, :submit, %{count: 1}, %{intent_id: record.intent.id})
+      {{:ok, record}, state}
+    else
+      {:error, reason} -> {{:error, reason}, state}
+    end
+  end
+
+  defp execute_public_command({:submit_many, attrs_list, opts}, state) do
+    now = now(opts)
+
+    with {:ok, intents} <- build_intents(attrs_list, state, now, opts),
+         {:ok, records, signals} <-
+           state.store_module.submit_many(
+             state.store_ref,
+             state.name,
+             intents,
+             Keyword.put(opts, :now, now)
+           ) do
+      notify(state, signals, :submit_many, %{count: length(records)}, %{})
+      {{:ok, records}, state}
+    else
+      {:error, reason} -> {{:error, reason}, state}
+    end
+  end
+
+  defp execute_public_command({:claim, queue, owner_id, opts}, state) do
+    limit = Keyword.get(opts, :limit, 1)
+    opts = opts |> Keyword.put_new(:now, now(opts)) |> Keyword.put_new(:lease_ms, state.lease_ms)
+
+    case state.store_module.claim(
+           state.store_ref,
+           state.name,
+           to_string(queue),
+           to_string(owner_id),
+           opts
+         ) do
+      {:ok, [], signals} ->
+        notify(state, signals, :claim, %{count: 0}, %{queue: to_string(queue)})
+        {:empty, state}
+
+      {:ok, [claimed], signals} when limit == 1 ->
+        notify(state, signals, :claim, %{count: 1}, %{queue: to_string(queue)})
+        {{:ok, claimed}, state}
+
+      {:ok, claimed, signals} ->
+        notify(state, signals, :claim, %{count: length(claimed)}, %{queue: to_string(queue)})
+        {{:ok, claimed}, state}
+
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
+  end
+
+  defp execute_public_command({:heartbeat, claim_id, token, opts}, state) do
+    opts = opts |> Keyword.put_new(:now, now(opts)) |> Keyword.put_new(:lease_ms, state.lease_ms)
+
+    unwrap_reply(
+      reply_commit(
+        state,
+        :heartbeat,
+        state.store_module.heartbeat(
+          state.store_ref,
+          state.name,
+          to_string(claim_id),
+          to_string(token),
+          opts
+        ),
+        %{claim_id: to_string(claim_id)}
+      )
+    )
+  end
+
+  defp execute_public_command({:complete, claim_id, token, result, opts}, state) do
+    opts = Keyword.put_new(opts, :now, now(opts))
+
+    unwrap_reply(
+      reply_commit(
+        state,
+        :complete,
+        state.store_module.complete(
+          state.store_ref,
+          state.name,
+          to_string(claim_id),
+          to_string(token),
+          result,
+          opts
+        ),
+        %{claim_id: to_string(claim_id)}
+      )
+    )
+  end
+
+  defp execute_public_command({:fail, claim_id, token, error, opts}, state) do
+    opts = Keyword.put_new(opts, :now, now(opts))
+
+    unwrap_reply(
+      reply_commit(
+        state,
+        :fail,
+        state.store_module.fail(
+          state.store_ref,
+          state.name,
+          to_string(claim_id),
+          to_string(token),
+          error,
+          opts
+        ),
+        %{claim_id: to_string(claim_id)}
+      )
+    )
+  end
+
+  defp execute_public_command({:release, claim_id, token, opts}, state) do
+    opts = Keyword.put_new(opts, :now, now(opts))
+
+    unwrap_reply(
+      reply_commit(
+        state,
+        :release,
+        state.store_module.release(
+          state.store_ref,
+          state.name,
+          to_string(claim_id),
+          to_string(token),
+          opts
+        ),
+        %{claim_id: to_string(claim_id)}
+      )
+    )
+  end
+
+  defp execute_public_command({:cancel, intent_id, reason, opts}, state) do
+    opts = Keyword.put_new(opts, :now, now(opts))
+
+    unwrap_reply(
+      reply_commit(
+        state,
+        :cancel,
+        state.store_module.cancel(state.store_ref, state.name, to_string(intent_id), reason, opts),
+        %{intent_id: to_string(intent_id)}
+      )
+    )
+  end
+
+  defp execute_public_command({:requeue, intent_id, opts}, state) do
+    opts = Keyword.put_new(opts, :now, now(opts))
+
+    unwrap_reply(
+      reply_commit(
+        state,
+        :requeue,
+        state.store_module.requeue(state.store_ref, state.name, to_string(intent_id), opts),
+        %{intent_id: to_string(intent_id)}
+      )
+    )
+  end
+
+  defp execute_public_command({:mark_ambiguous, intent_id, reason, opts}, state) do
+    opts = Keyword.put_new(opts, :now, now(opts))
+
+    unwrap_reply(
+      reply_commit(
+        state,
+        :mark_ambiguous,
+        state.store_module.mark_ambiguous(
+          state.store_ref,
+          state.name,
+          to_string(intent_id),
+          reason,
+          opts
+        ),
+        %{intent_id: to_string(intent_id)}
+      )
+    )
+  end
+
+  defp execute_public_command({:recover, queue, opts}, state) do
+    opts = Keyword.put_new(opts, :now, now(opts))
+
+    unwrap_reply(
+      reply_commit(
+        state,
+        :recover,
+        state.store_module.recover(state.store_ref, state.name, to_string(queue), opts),
+        %{queue: to_string(queue)}
+      )
+    )
+  end
+
+  defp execute_public_command(message, state), do: {{:error, {:unknown_command, message}}, state}
+
   defp build_intents(attrs_list, state, now, opts) when is_list(attrs_list) do
     Enum.reduce_while(attrs_list, {:ok, []}, fn attrs, {:ok, acc} ->
       with {:ok, intent} <- build_intent(attrs, state, now),
@@ -305,6 +521,12 @@ defmodule IntentLedger.Server do
 
   defp reply_commit(state, _operation, {:error, reason}, _metadata) do
     {:reply, {:error, reason}, state}
+  end
+
+  defp unwrap_reply({:reply, reply, state}), do: {reply, state}
+
+  defp put_command_result(state, command_id, reply) do
+    %{state | command_results: Map.put(state.command_results, command_id, reply)}
   end
 
   defp notify(state, signals, operation, measurements, metadata) do
