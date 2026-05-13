@@ -24,6 +24,8 @@ defmodule IntentLedger.InstanceSupervisor do
           | {:dispatcher_interval_ms, pos_integer()}
           | {:dispatcher_batch_size, pos_integer()}
           | {:dispatcher_consumer, String.t() | atom()}
+          | {:dispatcher_retry_ms, pos_integer()}
+          | {:dispatcher_max_retry_ms, pos_integer()}
           | {:signal_handlers, [IntentLedger.SignalHandler.spec()]}
           | {:wakeups?, boolean()}
           | {:lifecycle, module()}
@@ -84,7 +86,15 @@ defmodule IntentLedger.InstanceSupervisor do
 
     dispatcher_opts =
       opts
-      |> Keyword.take([:name, :dispatcher_interval_ms, :dispatcher_batch_size, :dispatcher_consumer, :signal_handlers])
+      |> Keyword.take([
+        :name,
+        :dispatcher_interval_ms,
+        :dispatcher_batch_size,
+        :dispatcher_consumer,
+        :dispatcher_retry_ms,
+        :dispatcher_max_retry_ms,
+        :signal_handlers
+      ])
       |> Keyword.put(:store, {store_module, store_name})
 
     children = [
