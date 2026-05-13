@@ -94,8 +94,8 @@ defmodule IntentLedger.Store.Bedrock.Value do
   @doc """
   Encodes a materialized state value.
   """
-  @spec pack_state(IntentState.t()) :: binary()
-  def pack_state(%IntentState{} = state), do: pack(:state, state)
+  @spec pack_state(IntentState.t() | map()) :: binary()
+  def pack_state(state), do: pack(:state, state)
 
   @doc """
   Decodes a materialized state value.
@@ -178,6 +178,7 @@ defmodule IntentLedger.Store.Bedrock.Value do
 
   defp normalize_value!(:intent, %Intent{} = value), do: value
   defp normalize_value!(:state, %IntentState{} = value), do: value
+  defp normalize_value!(:state, value) when is_map(value), do: struct!(IntentState, value)
   defp normalize_value!(:signal, %Jido.Signal{} = value), do: value
   defp normalize_value!(:signal, value) when is_map(value), do: value
   defp normalize_value!(:claim, %Claim{} = value), do: value

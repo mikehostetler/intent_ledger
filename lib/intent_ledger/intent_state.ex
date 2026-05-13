@@ -23,6 +23,7 @@ defmodule IntentLedger.IntentState do
               |> Zoi.default(:available)
               |> Zoi.optional(),
             visible_at: Zoi.datetime() |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
+            priority: Zoi.integer() |> Zoi.default(0) |> Zoi.optional(),
             attempt: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(0) |> Zoi.optional(),
             max_attempts: Zoi.integer() |> Zoi.positive() |> Zoi.default(3) |> Zoi.optional(),
             claim_id: Zoi.string() |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
@@ -53,6 +54,7 @@ defmodule IntentLedger.IntentState do
       shard: intent.shard || 0,
       status: :available,
       visible_at: intent.visible_at,
+      priority: intent.priority,
       max_attempts: intent.max_attempts,
       idempotency_key: intent.idempotency_key,
       updated_at: now

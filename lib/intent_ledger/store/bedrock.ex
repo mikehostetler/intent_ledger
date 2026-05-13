@@ -14,7 +14,7 @@ defmodule IntentLedger.Store.Bedrock do
   use GenServer
 
   alias IntentLedger.{Error, IntentState, Store}
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Outbox}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Outbox}
   alias IntentLedger.Store.Bedrock.{Keyspace, Value}
 
   @dependency :bedrock
@@ -87,7 +87,7 @@ defmodule IntentLedger.Store.Bedrock do
   @doc false
   @impl true
   @spec listing(Store.ref(), atom(), Store.listing_request(), keyword()) :: Store.result()
-  def listing(_ref, _ledger, _request, _opts), do: unavailable()
+  def listing(ref, ledger, request, opts), do: GenServer.call(ref, {:listing, ledger, request, opts})
 
   @doc false
   @impl true
@@ -124,6 +124,20 @@ defmodule IntentLedger.Store.Bedrock do
 
   def handle_call({:read, _ledger, request, _opts}, _from, %__MODULE__{} = state) do
     {:reply, {:error, {:unsupported_store_v1_request, :read, request}}, state}
+  end
+
+  @impl true
+  def handle_call({:listing, ledger, request, opts}, _from, %__MODULE__{} = state) do
+    result =
+      transact(
+        state.repo,
+        fn repo ->
+          apply_listing_request(repo, ledger, request)
+        end,
+        transaction_opts(state, opts)
+      )
+
+    {:reply, normalize_transact_result(result), state}
   end
 
   @impl true
@@ -172,12 +186,6 @@ defmodule IntentLedger.Store.Bedrock do
            dependency: @dependency,
            missing_modules: missing_modules
          )}
-    end
-  end
-
-  defp unavailable do
-    with :ok <- ensure_available() do
-      {:error, adapter_error("Bedrock store adapter is not configured yet", reason: :not_configured)}
     end
   end
 
@@ -468,12 +476,20 @@ defmodule IntentLedger.Store.Bedrock do
     put(repo, Keyspace.state(ledger, intent_id), Value.pack_state(state))
   end
 
+  defp put_state_value(repo, ledger, intent_id, value) when is_map(value) do
+    put_state_value(repo, ledger, intent_id, struct!(IntentState, value))
+  end
+
   defp put_current_queue_index(repo, ledger, %IntentState{} = state) do
     if queue_indexed_state?(state) do
       put(repo, queue_index_key(ledger, state), Value.pack_state(state))
     else
       :ok
     end
+  end
+
+  defp put_current_queue_index(repo, ledger, value) when is_map(value) do
+    put_current_queue_index(repo, ledger, struct!(IntentState, value))
   end
 
   defp clear_queue_index(_repo, _ledger, nil), do: :ok
@@ -503,7 +519,7 @@ defmodule IntentLedger.Store.Bedrock do
       state.queue,
       state.shard,
       state.visible_at,
-      Map.get(state, :priority, 0),
+      state.priority,
       state.intent_id
     )
   end
@@ -751,6 +767,89 @@ defmodule IntentLedger.Store.Bedrock do
   defp value_field(value, key, default \\ nil)
   defp value_field(value, key, default) when is_map(value), do: Map.get(value, key, default)
   defp value_field(_value, _key, default), do: default
+
+  defp apply_listing_request(repo, ledger, %Listing{} = request), do: do_apply_listing_request(repo, ledger, request)
+
+  defp apply_listing_request(repo, ledger, {type, attrs})
+       when type in [:due_intents, :expired_claims] and (is_map(attrs) or is_list(attrs)) do
+    apply_listing_request(repo, ledger, Listing.new(type, attrs))
+  end
+
+  defp apply_listing_request(_repo, _ledger, request), do: {:error, {:unsupported_store_v1_request, :listing, request}}
+
+  defp do_apply_listing_request(repo, ledger, %Listing{type: :due_intents} = request) do
+    repo
+    |> get_range(queue_listing_range(ledger, request))
+    |> decode_state_rows("invalid Bedrock queue index value")
+    |> filter_sort_take_listing(request)
+  end
+
+  defp do_apply_listing_request(repo, ledger, %Listing{type: :expired_claims} = request) do
+    repo
+    |> get_range(Keyspace.table_range(ledger, :state))
+    |> decode_state_rows("invalid Bedrock state value")
+    |> filter_sort_take_listing(request)
+  end
+
+  defp do_apply_listing_request(_repo, _ledger, request),
+    do: {:error, {:unsupported_store_v1_request, :listing, request}}
+
+  defp queue_listing_range(ledger, %Listing{queue: queue, shard: nil}), do: Keyspace.queue_range(ledger, queue)
+  defp queue_listing_range(ledger, %Listing{queue: queue, shard: shard}), do: Keyspace.queue_range(ledger, queue, shard)
+
+  defp decode_state_rows(entries, error_message) do
+    entries
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.reduce_while({:ok, []}, fn {_key, encoded}, {:ok, states} ->
+      case Value.unpack_state(encoded) do
+        {:ok, state} -> {:cont, {:ok, states ++ [state]}}
+        {:error, reason} -> {:halt, {:error, adapter_error(error_message, reason: reason)}}
+      end
+    end)
+  end
+
+  defp filter_sort_take_listing({:ok, states}, %Listing{} = request) do
+    rows =
+      states
+      |> Enum.filter(&listing_match?(&1, request))
+      |> Enum.sort_by(&listing_sort_key(&1, request))
+      |> Enum.take(request.limit)
+
+    {:ok, rows}
+  end
+
+  defp filter_sort_take_listing({:error, reason}, _request), do: {:error, reason}
+
+  defp listing_match?(state, %Listing{type: :due_intents} = request) do
+    state_queue(state) == request.queue and shard_match?(state, request) and
+      value_field(state, :status) in [:available, :retry_scheduled] and
+      datetime_not_after?(value_field(state, :visible_at), request.at)
+  end
+
+  defp listing_match?(state, %Listing{type: :expired_claims} = request) do
+    state_queue(state) == request.queue and shard_match?(state, request) and value_field(state, :status) == :claimed and
+      datetime_not_after?(value_field(state, :lease_until), request.at)
+  end
+
+  defp shard_match?(_state, %Listing{shard: nil}), do: true
+  defp shard_match?(state, %Listing{shard: shard}), do: value_field(state, :shard) == shard
+
+  defp state_queue(state), do: state |> value_field(:queue, "default") |> to_string()
+
+  defp listing_sort_key(state, %Listing{type: :due_intents}) do
+    {-value_field(state, :priority, 0), datetime_sort_key(value_field(state, :visible_at)),
+     value_field(state, :intent_id)}
+  end
+
+  defp listing_sort_key(state, %Listing{type: :expired_claims}) do
+    {datetime_sort_key(value_field(state, :lease_until)), value_field(state, :intent_id)}
+  end
+
+  defp datetime_not_after?(%DateTime{} = value, %DateTime{} = at), do: DateTime.compare(value, at) != :gt
+  defp datetime_not_after?(_value, _at), do: false
+
+  defp datetime_sort_key(%DateTime{} = value), do: DateTime.to_unix(value, :microsecond)
+  defp datetime_sort_key(_value), do: 0
 
   defp apply_outbox_request(repo, ledger, %Outbox{} = request), do: do_apply_outbox_request(repo, ledger, request)
 
