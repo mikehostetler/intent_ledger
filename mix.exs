@@ -121,7 +121,12 @@ defmodule IntentLedger.MixProject do
           IntentLedger.InstanceSupervisor,
           IntentLedger.Lifecycle,
           IntentLedger.Store,
-          IntentLedger.Store.Memory
+          IntentLedger.Store.Commit,
+          IntentLedger.Store.CommitRequest,
+          IntentLedger.Store.Conflict,
+          IntentLedger.Store.Memory,
+          IntentLedger.Store.Precondition,
+          IntentLedger.Store.Write
         ]
       ]
     ]
