@@ -2,6 +2,7 @@ defmodule IntentLedger.QueueShardServerTest do
   use ExUnit.Case, async: false
 
   alias IntentLedger.{Names, QueueShardServer}
+  alias IntentLedger.Store.Outbox
 
   @store IntentLedger.Store.Memory
 
@@ -95,6 +96,13 @@ defmodule IntentLedger.QueueShardServerTest do
 
     [{shard_pid, _}] = Registry.lookup(Names.registry(name), Names.queue_shard(:default, 0))
     assert QueueShardServer.state(shard_pid).claimed_count >= 2
+
+    assert {:ok, entries} =
+             @store.outbox(Names.store(name), name, Outbox.read("dispatcher", cursor: 0, limit: 10), [])
+
+    claimed_entries = Enum.filter(entries, &(&1.signal.type == "intent_ledger.intent.claimed"))
+    assert length(claimed_entries) == 2
+    assert Enum.all?(claimed_entries, &String.starts_with?(&1.key, "sig:"))
   end
 
   test "polling recovers work when an early wakeup is lost before lease ownership" do

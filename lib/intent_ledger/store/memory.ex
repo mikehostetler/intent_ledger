@@ -17,6 +17,7 @@ defmodule IntentLedger.Store.Memory do
     Claimed,
     Intent,
     IntentState,
+    OutboxEntry,
     Record,
     Signal,
     Time
@@ -756,13 +757,19 @@ defmodule IntentLedger.Store.Memory do
   end
 
   defp append(state, ledger, %Intent{} = intent, signals) do
+    stream = intent_stream(intent.id)
+
     streams =
-      [ledger_stream(ledger), queue_stream(intent), intent_stream(intent.id)]
+      [ledger_stream(ledger), queue_stream(intent), stream]
       |> Enum.reduce(state.streams, fn stream, acc ->
         Map.update(acc, stream, signals, &(&1 ++ signals))
       end)
 
-    %{state | streams: streams}
+    signals
+    |> Enum.reduce(%{state | streams: streams}, fn signal, acc_state ->
+      {next_state, _entry} = put_outbox_entry(acc_state, OutboxEntry.key(signal), OutboxEntry.new(stream, signal))
+      next_state
+    end)
   end
 
   defp ledger_stream(ledger), do: "ledger:" <> inspect(ledger)

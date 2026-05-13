@@ -9,7 +9,7 @@ defmodule IntentLedger.QueueShardServer do
 
   use GenServer
 
-  alias IntentLedger.{Claim, ID, Names, Time}
+  alias IntentLedger.{Claim, ID, Names, OutboxEntry, Time}
   alias IntentLedger.Store.{CommitRequest, Listing, Precondition, Write}
 
   @type option ::
@@ -293,6 +293,7 @@ defmodule IntentLedger.QueueShardServer do
             lease_until: claim.lease_until
           }),
           Write.append_signal(stream, signal),
+          Write.put_outbox(OutboxEntry.key(signal), OutboxEntry.new(stream, signal)),
           Write.put_idempotency(command_id, result)
         ]
       ),

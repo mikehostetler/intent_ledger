@@ -1,7 +1,8 @@
 defmodule IntentLedgerTest do
   use ExUnit.Case, async: false
 
-  alias IntentLedger.{Claim, Claimed, Error, Intent, IntentState, Record, ShardState, Store, Time}
+  alias IntentLedger.{Claim, Claimed, Error, Intent, IntentState, Names, Record, ShardState, Store, Time}
+  alias IntentLedger.Store.Outbox
 
   @pre_release_namespace Enum.join(["Jido", "IntentLedger"], ".")
   @public_namespace_files [
@@ -70,6 +71,34 @@ defmodule IntentLedgerTest do
              "intent_ledger.intent.submitted",
              "intent_ledger.intent.available"
            ]
+  end
+
+  test "writes lifecycle signals to durable outbox entries", %{ledger: ledger} do
+    {:ok, record} =
+      IntentLedger.submit(ledger, %{
+        key: "outbox:1",
+        kind: "outbox.test"
+      })
+
+    {:ok, claimed} = IntentLedger.claim(ledger, :default, "outbox-worker")
+    assert claimed.intent.id == record.intent.id
+
+    assert {:ok, _completed} =
+             IntentLedger.complete(ledger, claimed.claim.id, claimed.claim.token, %{ok: true})
+
+    {:ok, history} = IntentLedger.history(ledger, record.intent.id)
+
+    assert {:ok, entries} =
+             IntentLedger.Store.Memory.outbox(
+               Names.store(ledger),
+               ledger,
+               Outbox.read("dispatcher", cursor: 0, limit: 10),
+               []
+             )
+
+    assert Enum.map(entries, & &1.signal.id) == Enum.map(history, & &1.id)
+    assert Enum.all?(entries, &(&1.stream == "intent:" <> record.intent.id))
+    assert Enum.all?(entries, &is_integer(&1.sequence))
   end
 
   test "claims and completes an intent with token protection", %{ledger: ledger} do
