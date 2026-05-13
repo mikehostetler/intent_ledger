@@ -304,4 +304,48 @@ defmodule IntentLedger.StoreContractTest do
     assert {:error, {:unsupported_store_v1_request, :outbox, {:read, %{}}}} =
              IntentLedger.Store.Memory.outbox(store, MyApp.IntentLedger, {:read, %{}}, [])
   end
+
+  test "memory adapter stores v1 command results for deterministic replay" do
+    store =
+      start_supervised!({IntentLedger.Store.Memory, name: :"store_v1_replay_#{System.unique_integer([:positive])}"})
+
+    result = %{intent_id: "int_1", status: :submitted}
+
+    request =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        operation: :submit,
+        command: %{key: "job:1"},
+        preconditions: [Precondition.command_absent("cmd_1")],
+        writes: [Write.put_idempotency("cmd_1", result)]
+      )
+
+    assert {:ok, %Commit{} = commit} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, request, [])
+    assert commit.result == result
+    refute commit.replayed
+
+    replay =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        operation: :submit,
+        command: %{key: "job:1"},
+        preconditions: [Precondition.command_replay("cmd_1")]
+      )
+
+    assert {:ok, %Commit{} = replayed} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, replay, [])
+    assert replayed.result == result
+    assert replayed.replayed
+    assert replayed.replay_of == "cmd_1"
+
+    conflicting_replay =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        operation: :complete,
+        command: %{claim_id: "clm_1"},
+        preconditions: [Precondition.command_replay("cmd_1")]
+      )
+
+    assert {:error, %Conflict{type: :command_conflict}} =
+             IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, conflicting_replay, [])
+  end
 end

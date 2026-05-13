@@ -21,12 +21,13 @@ defmodule IntentLedger.Store.Memory do
     Time
   }
 
-  alias IntentLedger.Store.{Commit, CommitRequest}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict}
 
   defstruct intents: %{},
             states: %{},
             claims: %{},
             idempotency: %{},
+            commands: %{},
             streams: %{}
 
   @type t :: %__MODULE__{
@@ -34,6 +35,7 @@ defmodule IntentLedger.Store.Memory do
           states: %{optional(String.t()) => IntentState.t()},
           claims: map(),
           idempotency: %{optional(String.t()) => String.t()},
+          commands: %{optional(String.t()) => map()},
           streams: %{optional(String.t()) => [Jido.Signal.t()]}
         }
 
@@ -147,7 +149,31 @@ defmodule IntentLedger.Store.Memory do
   end
 
   def handle_call({:store_v1_commit, _ledger, %CommitRequest{} = request, _opts}, _from, state) do
-    {:reply, unsupported_store_v1(:commit, request), state}
+    if command_commit?(request) do
+      case check_command_preconditions(state, request) do
+        {:replay, entry} ->
+          commit =
+            Commit.new(
+              command_id: request.command_id,
+              result: entry.result,
+              replayed: true,
+              replay_of: request.command_id
+            )
+
+          {:reply, {:ok, commit}, state}
+
+        :ok ->
+          {next_state, result} = put_command_results(state, request)
+          commit = Commit.new(command_id: request.command_id, result: result, writes: request.writes)
+
+          {:reply, {:ok, commit}, next_state}
+
+        {:error, conflict} ->
+          {:reply, {:error, conflict}, state}
+      end
+    else
+      {:reply, unsupported_store_v1(:commit, request), state}
+    end
   end
 
   def handle_call({:store_v1_read, _ledger, {:intent, intent_id}, _opts}, _from, state) do
@@ -724,6 +750,45 @@ defmodule IntentLedger.Store.Memory do
   defp ledger_stream(ledger), do: "ledger:" <> inspect(ledger)
   defp queue_stream(intent), do: "queue:" <> intent.queue <> ":" <> to_string(intent.shard)
   defp intent_stream(intent_id), do: "intent:" <> intent_id
+
+  defp command_commit?(%CommitRequest{} = request) do
+    Enum.all?(request.preconditions, &(&1.type in [:command_absent, :command_replay])) and
+      Enum.all?(request.writes, &(&1.type == :put_idempotency))
+  end
+
+  defp check_command_preconditions(state, %CommitRequest{} = request) do
+    Enum.reduce_while(request.preconditions, :ok, fn
+      %{type: :command_replay, key: command_id}, :ok ->
+        case Map.fetch(state.commands, command_id) do
+          {:ok, entry} ->
+            if entry.signature == command_signature(request) do
+              {:halt, {:replay, entry}}
+            else
+              {:halt, {:error, Conflict.command_conflict(command_id, entry.signature, command_signature(request))}}
+            end
+
+          :error ->
+            {:halt, {:error, Conflict.new(:command_replay, key: command_id, expected: :present, actual: :absent)}}
+        end
+
+      %{type: :command_absent, key: command_id}, :ok ->
+        if Map.has_key?(state.commands, command_id) do
+          {:halt, {:error, Conflict.command_conflict(command_id, :absent, :present)}}
+        else
+          {:cont, :ok}
+        end
+    end)
+  end
+
+  defp put_command_results(state, %CommitRequest{} = request) do
+    Enum.reduce(request.writes, {state, nil}, fn %{key: command_id, value: result}, {acc_state, _acc_result} ->
+      entry = %{signature: command_signature(request), result: result}
+
+      {%{acc_state | commands: Map.put(acc_state.commands, command_id, entry)}, result}
+    end)
+  end
+
+  defp command_signature(%CommitRequest{} = request), do: {request.operation, request.command}
 
   defp unsupported_store_v1(callback, request), do: {:error, {:unsupported_store_v1_request, callback, request}}
 end
