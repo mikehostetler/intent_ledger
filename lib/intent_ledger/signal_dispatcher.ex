@@ -9,7 +9,7 @@ defmodule IntentLedger.SignalDispatcher do
 
   use GenServer
 
-  alias IntentLedger.Names
+  alias IntentLedger.{Names, SignalHandler}
   alias IntentLedger.Store.Outbox
 
   @default_interval_ms 1_000
@@ -22,6 +22,7 @@ defmodule IntentLedger.SignalDispatcher do
           | {:dispatcher_interval_ms, pos_integer()}
           | {:dispatcher_batch_size, pos_integer()}
           | {:dispatcher_consumer, String.t() | atom()}
+          | {:signal_handlers, [SignalHandler.spec()]}
 
   @type t :: %__MODULE__{
           name: atom(),
@@ -30,10 +31,14 @@ defmodule IntentLedger.SignalDispatcher do
           interval_ms: pos_integer(),
           batch_size: pos_integer(),
           consumer: String.t(),
+          handlers: [SignalHandler.normalized()],
           timer_ref: reference() | nil,
           poll_count: non_neg_integer(),
           read_count: non_neg_integer(),
+          dispatched_count: non_neg_integer(),
+          failed_count: non_neg_integer(),
           last_entries: [map()],
+          last_errors: [term()],
           last_error: term()
         }
 
@@ -45,9 +50,13 @@ defmodule IntentLedger.SignalDispatcher do
     :batch_size,
     :consumer,
     :timer_ref,
+    handlers: [],
     poll_count: 0,
     read_count: 0,
+    dispatched_count: 0,
+    failed_count: 0,
     last_entries: [],
+    last_errors: [],
     last_error: nil
   ]
 
@@ -91,6 +100,7 @@ defmodule IntentLedger.SignalDispatcher do
       interval_ms: Keyword.get(opts, :dispatcher_interval_ms, @default_interval_ms),
       batch_size: Keyword.get(opts, :dispatcher_batch_size, @default_batch_size),
       consumer: opts |> Keyword.get(:dispatcher_consumer, @default_consumer) |> to_string(),
+      handlers: opts |> Keyword.get(:signal_handlers, []) |> SignalHandler.normalize(),
       timer_ref: nil
     }
 
@@ -122,11 +132,16 @@ defmodule IntentLedger.SignalDispatcher do
 
     case state.store_module.outbox(state.store_ref, state.name, request, []) do
       {:ok, entries} ->
+        {delivered_count, errors} = dispatch_entries(state, entries)
+
         next_state = %{
           state
           | poll_count: state.poll_count + 1,
             read_count: state.read_count + length(entries),
+            dispatched_count: state.dispatched_count + delivered_count,
+            failed_count: state.failed_count + length(errors),
             last_entries: entries,
+            last_errors: errors,
             last_error: nil
         }
 
@@ -136,6 +151,32 @@ defmodule IntentLedger.SignalDispatcher do
         next_state = %{state | poll_count: state.poll_count + 1, last_error: reason}
         {{:error, reason}, next_state}
     end
+  end
+
+  defp dispatch_entries(%__MODULE__{handlers: []}, _entries), do: {0, []}
+
+  defp dispatch_entries(%__MODULE__{} = state, entries) do
+    Enum.reduce(entries, {0, []}, fn entry, {delivered_count, errors} ->
+      Enum.reduce(state.handlers, {delivered_count, errors}, fn handler, {handler_delivered_count, handler_errors} ->
+        case dispatch_entry(state, handler, entry) do
+          :ok -> {handler_delivered_count + 1, handler_errors}
+          {:error, reason} -> {handler_delivered_count, [reason | handler_errors]}
+        end
+      end)
+    end)
+    |> then(fn {delivered_count, errors} -> {delivered_count, Enum.reverse(errors)} end)
+  end
+
+  defp dispatch_entry(%__MODULE__{} = state, %{module: module, opts: opts}, entry) do
+    context = %{ledger: state.name, consumer: state.consumer, handler: module, opts: opts}
+
+    case module.handle_signal(entry, context) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {module, reason}}
+      result -> {:error, {module, {:invalid_handler_result, result}}}
+    end
+  catch
+    kind, reason -> {:error, {module, {kind, reason}}}
   end
 
   defp schedule_poll(%__MODULE__{} = state) do
