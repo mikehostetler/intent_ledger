@@ -72,6 +72,8 @@ defmodule IntentLedger.MixProject do
 
       # Optional durable adapters
       {:bedrock, "~> 0.5.0", optional: true},
+      {:ecto_sql, "~> 3.13", optional: true},
+      {:postgrex, "~> 0.22.2", optional: true},
 
       # Dev/Test
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
@@ -143,6 +145,7 @@ defmodule IntentLedger.MixProject do
           IntentLedger.Store.Bedrock,
           IntentLedger.Store.Bedrock.Keyspace,
           IntentLedger.Store.Bedrock.Value,
+          IntentLedger.Store.Ecto,
           IntentLedger.Store.Conflict,
           IntentLedger.Store.Listing,
           IntentLedger.Store.Memory,
