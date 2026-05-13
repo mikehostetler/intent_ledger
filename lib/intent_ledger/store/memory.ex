@@ -21,6 +21,8 @@ defmodule IntentLedger.Store.Memory do
     Time
   }
 
+  alias IntentLedger.Store.{Commit, CommitRequest}
+
   defstruct intents: %{},
             states: %{},
             claims: %{},
@@ -61,19 +63,29 @@ defmodule IntentLedger.Store.Memory do
   def init(_opts), do: {:ok, %__MODULE__{}}
 
   @impl true
-  def commit(_ref, _ledger, _request, _opts), do: {:error, :store_v1_not_implemented}
+  def commit(ref, ledger, %CommitRequest{} = request, opts) do
+    GenServer.call(ref, {:store_v1_commit, ledger, request, opts})
+  end
 
   @impl true
-  def read(_ref, _ledger, _request, _opts), do: {:error, :store_v1_not_implemented}
+  def read(ref, ledger, request, opts) do
+    GenServer.call(ref, {:store_v1_read, ledger, request, opts})
+  end
 
   @impl true
-  def lease(_ref, _ledger, _request, _opts), do: {:error, :store_v1_not_implemented}
+  def lease(ref, ledger, request, opts) do
+    GenServer.call(ref, {:store_v1_lease, ledger, request, opts})
+  end
 
   @impl true
-  def listing(_ref, _ledger, _request, _opts), do: {:error, :store_v1_not_implemented}
+  def listing(ref, ledger, request, opts) do
+    GenServer.call(ref, {:store_v1_listing, ledger, request, opts})
+  end
 
   @impl true
-  def outbox(_ref, _ledger, _request, _opts), do: {:error, :store_v1_not_implemented}
+  def outbox(ref, ledger, request, opts) do
+    GenServer.call(ref, {:store_v1_outbox, ledger, request, opts})
+  end
 
   def submit(ref, ledger, intent, opts) do
     GenServer.call(ref, {:submit, ledger, intent, opts})
@@ -124,6 +136,54 @@ defmodule IntentLedger.Store.Memory do
   end
 
   @impl true
+  def handle_call(
+        {:store_v1_commit, _ledger, %CommitRequest{preconditions: [], writes: []} = request, _opts},
+        _from,
+        state
+      ) do
+    commit = Commit.new(command_id: request.command_id, result: nil, writes: [], signals: [])
+
+    {:reply, {:ok, commit}, state}
+  end
+
+  def handle_call({:store_v1_commit, _ledger, %CommitRequest{} = request, _opts}, _from, state) do
+    {:reply, unsupported_store_v1(:commit, request), state}
+  end
+
+  def handle_call({:store_v1_read, _ledger, {:intent, intent_id}, _opts}, _from, state) do
+    {:reply, fetch_record(state, intent_id), state}
+  end
+
+  def handle_call({:store_v1_read, _ledger, {:history, intent_id}, _opts}, _from, state) do
+    if Map.has_key?(state.intents, intent_id) do
+      {:reply, {:ok, Map.get(state.streams, intent_stream(intent_id), [])}, state}
+    else
+      {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:store_v1_read, _ledger, {:stream, stream, _read_opts}, _opts}, _from, state) do
+    signals = Map.get(state.streams, stream, [])
+
+    {:reply, {:ok, %{stream: stream, version: length(signals), signals: signals}}, state}
+  end
+
+  def handle_call({:store_v1_read, _ledger, request, _opts}, _from, state) do
+    {:reply, unsupported_store_v1(:read, request), state}
+  end
+
+  def handle_call({:store_v1_lease, _ledger, request, _opts}, _from, state) do
+    {:reply, unsupported_store_v1(:lease, request), state}
+  end
+
+  def handle_call({:store_v1_listing, _ledger, request, _opts}, _from, state) do
+    {:reply, unsupported_store_v1(:listing, request), state}
+  end
+
+  def handle_call({:store_v1_outbox, _ledger, request, _opts}, _from, state) do
+    {:reply, unsupported_store_v1(:outbox, request), state}
+  end
+
   def handle_call({:submit, ledger, %Intent{} = intent, opts}, _from, state) do
     case commit_submit(state, ledger, intent, opts) do
       {:ok, next_state, record, signals} -> {:reply, {:ok, record, signals}, next_state}
@@ -664,4 +724,6 @@ defmodule IntentLedger.Store.Memory do
   defp ledger_stream(ledger), do: "ledger:" <> inspect(ledger)
   defp queue_stream(intent), do: "queue:" <> intent.queue <> ":" <> to_string(intent.shard)
   defp intent_stream(intent_id), do: "intent:" <> intent_id
+
+  defp unsupported_store_v1(callback, request), do: {:error, {:unsupported_store_v1_request, callback, request}}
 end

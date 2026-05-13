@@ -283,20 +283,25 @@ defmodule IntentLedger.StoreContractTest do
     refute MapSet.member?(callbacks, {:recover, 4})
   end
 
-  test "memory adapter advertises store v1 callback placeholders" do
-    assert {:error, :store_v1_not_implemented} =
-             IntentLedger.Store.Memory.commit(:store, MyApp.IntentLedger, CommitRequest.new(), [])
+  test "memory adapter routes store v1 callbacks through the GenServer" do
+    store = start_supervised!({IntentLedger.Store.Memory, name: :"store_v1_#{System.unique_integer([:positive])}"})
 
-    assert {:error, :store_v1_not_implemented} =
-             IntentLedger.Store.Memory.read(:store, MyApp.IntentLedger, {:intent, "int_1"}, [])
+    assert {:ok, %Commit{writes: [], signals: []}} =
+             IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, CommitRequest.new(), [])
 
-    assert {:error, :store_v1_not_implemented} =
-             IntentLedger.Store.Memory.lease(:store, MyApp.IntentLedger, {:shard, :acquire, %{}}, [])
+    assert {:error, :not_found} =
+             IntentLedger.Store.Memory.read(store, MyApp.IntentLedger, {:intent, "int_1"}, [])
 
-    assert {:error, :store_v1_not_implemented} =
-             IntentLedger.Store.Memory.listing(:store, MyApp.IntentLedger, {:due_intents, %{}}, [])
+    assert {:ok, %{stream: "intent:int_1", version: 0, signals: []}} =
+             IntentLedger.Store.Memory.read(store, MyApp.IntentLedger, {:stream, "intent:int_1", []}, [])
 
-    assert {:error, :store_v1_not_implemented} =
-             IntentLedger.Store.Memory.outbox(:store, MyApp.IntentLedger, {:read, %{}}, [])
+    assert {:error, {:unsupported_store_v1_request, :lease, {:shard, :acquire, %{}}}} =
+             IntentLedger.Store.Memory.lease(store, MyApp.IntentLedger, {:shard, :acquire, %{}}, [])
+
+    assert {:error, {:unsupported_store_v1_request, :listing, {:due_intents, %{}}}} =
+             IntentLedger.Store.Memory.listing(store, MyApp.IntentLedger, {:due_intents, %{}}, [])
+
+    assert {:error, {:unsupported_store_v1_request, :outbox, {:read, %{}}}} =
+             IntentLedger.Store.Memory.outbox(store, MyApp.IntentLedger, {:read, %{}}, [])
   end
 end
