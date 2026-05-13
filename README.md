@@ -79,9 +79,42 @@ Submit and process work:
 Enum.map(history, & &1.type)
 ```
 
+## Signal Compatibility
+
+Public mutating APIs are normalized through `IntentLedger.Command` before they
+commit lifecycle state. Command envelopes are `Jido.Signal` structs with:
+
+- stable `intent_ledger.command.*` signal types;
+- `datacontenttype: "application/json"`;
+- a versioned `dataschema` URI;
+- `data.schema_version`;
+- command metadata fields for `command_id`, `idempotency_key`, `actor`,
+  `causation_id`, `correlation_id`, `root_intent_id`, `parent_intent_id`, and
+  `depth`.
+
+The current command signal types are:
+
+- `intent_ledger.command.submit`
+- `intent_ledger.command.submit_many`
+- `intent_ledger.command.claim`
+- `intent_ledger.command.heartbeat`
+- `intent_ledger.command.complete`
+- `intent_ledger.command.fail`
+- `intent_ledger.command.release`
+- `intent_ledger.command.cancel`
+- `intent_ledger.command.requeue`
+- `intent_ledger.command.mark_ambiguous`
+- `intent_ledger.command.recover`
+
+`command_id` is the replay key. Reusing the same `command_id` returns the first
+recorded result for the running ledger instance and does not append duplicate
+lifecycle signals. Omit it when replay is not required.
+
 ## Lifecycle Signals
 
-The spike emits these `Jido.Signal` types:
+Lifecycle facts are emitted as `Jido.Signal` structs with stable
+`intent_ledger.*` types, `datacontenttype: "application/json"`, a versioned
+`dataschema` URI, and `data.schema_version`. The current lifecycle types are:
 
 - `intent_ledger.intent.submitted`
 - `intent_ledger.intent.available`
