@@ -18,6 +18,15 @@ Ecto/Postgres remains a planned local durable adapter.
 - `IntentLedger` is the public API and child spec.
 - `IntentLedger.InstanceSupervisor` owns a named ledger instance.
 - The server process validates API calls and delegates atomic commits.
+- `IntentLedger.QueueSupervisor` starts one local shard worker for each
+  configured queue shard. Shard workers claim due work only while holding a
+  durable store lease for that queue/shard.
+- `IntentLedger.Notifier` provides local best-effort wakeups after newly
+  claimable work is committed. Periodic polling and recovery remain the
+  correctness path when wakeups are missed or work is submitted from another
+  node.
+- `IntentLedger.RecoveryServer` periodically recovers expired claims and stale
+  queue-shard leases supported by the configured store.
 - `IntentLedger.Store` defines the persistence contract.
 - `IntentLedger.Store.Memory` is the executable in-memory reference adapter for
   tests and local examples. It is not durable and is not a clustered production
@@ -60,6 +69,23 @@ children = [
 
 Supervisor.start_link(children, strategy: :one_for_one)
 ```
+
+In a host application, supervise the ledger after any durable store or cluster
+infrastructure it depends on and before application workers that submit,
+claim, complete, or recover intents. A named ledger instance starts its own
+private registry, notifier, store adapter process, API server, queue shard
+workers, and recovery server. Use a stable atom such as `MyApp.IntentLedger` as
+the `name`; the same name is local to each BEAM node and is also the logical
+ledger identifier used in durable store keys.
+
+For clustered operation, start the same named ledger configuration on every
+node that should participate in runtime claiming. Intent Ledger does not form
+or discover BEAM clusters by itself. The host release is responsible for node
+connectivity, durable store startup, and consistent queue/shard configuration
+across participating nodes. Queue-shard ownership is fenced by store lease
+rows, so only one local shard worker should claim a given queue/shard at a
+time. Keep node clocks synchronized because visibility times, claim leases,
+shard leases, and recovery decisions are time-based.
 
 Submit and process work:
 

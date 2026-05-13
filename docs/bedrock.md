@@ -155,6 +155,37 @@ the adapter process does not rebuild state from memory; all lifecycle history,
 queue state, command replay records, leases, and outbox entries must already be
 durably committed in Bedrock.
 
+## Cluster Formation Expectations
+
+Intent Ledger does not manage Bedrock or BEAM cluster membership. The host
+application must form the runtime topology before starting ledgers that depend
+on it:
+
+- start the Bedrock cluster, object-storage processes, and repo dependencies
+  before the `IntentLedger` child that uses `IntentLedger.Store.Bedrock`;
+- start the same named ledger, queue names, shard counts, lease settings, and
+  Bedrock repo module on every BEAM node that should participate in claiming;
+- keep nodes connected through the host release, deployment platform, or a
+  clustering library such as `libcluster`;
+- keep wall clocks synchronized across nodes because `visible_at`, claim lease,
+  shard lease, and recovery checks compare timestamps written by different
+  processes;
+- run application workers that claim and complete work after the ledger process
+  is available on that node.
+
+Cross-node coordination happens through Bedrock transactions and Intent
+Ledger's shard lease rows. The local notifier is intentionally best-effort and
+does not publish wakeups to other nodes; periodic shard polling and recovery are
+the progress mechanism when a submit happens on a different node, a wakeup is
+lost, or a worker restarts.
+
+If a node shuts down cleanly, its shard workers attempt to release their shard
+leases during termination. If a node dies or the release path cannot reach
+Bedrock, the lease remains fenced until it expires and the recovery loop or
+another shard worker can take over. Size `lease_ms`, `lease_renew_ms`,
+`lease_retry_ms`, `poll_interval_ms`, and `recovery_interval_ms` for the
+deployment's expected transaction latency and failover target.
+
 ## Compatibility Notes
 
 The key schema version is embedded in the root prefix so a future migration can
