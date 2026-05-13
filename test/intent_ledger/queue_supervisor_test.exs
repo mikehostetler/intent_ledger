@@ -9,6 +9,7 @@ defmodule IntentLedger.QueueSupervisorTest do
     specs =
       QueueSupervisor.shard_child_specs(
         name: name,
+        store: {IntentLedger.Store.Memory, :store_ref},
         queues: [default: [shards: 2], critical: [shards: 1]],
         lease_ms: 15_000
       )

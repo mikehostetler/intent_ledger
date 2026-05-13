@@ -53,11 +53,16 @@ defmodule IntentLedger.InstanceSupervisor do
       |> Keyword.delete(:store)
       |> Keyword.put(:store, {store_module, store_name})
 
+    queue_opts =
+      opts
+      |> Keyword.take([:name, :queues, :lease_ms])
+      |> Keyword.put(:store, {store_module, store_name})
+
     children = [
       {Registry, keys: :unique, name: Names.registry(name)},
       store_module.child_spec(Keyword.put(store_opts, :name, store_name)),
       {IntentLedger.Server, server_opts},
-      {IntentLedger.QueueSupervisor, Keyword.take(opts, [:name, :queues, :lease_ms])}
+      {IntentLedger.QueueSupervisor, queue_opts}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

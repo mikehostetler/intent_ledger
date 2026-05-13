@@ -12,8 +12,11 @@ defmodule IntentLedger.QueueSupervisor do
 
   @type option ::
           {:name, atom()}
+          | {:store, {module(), GenServer.server()}}
           | {:queues, keyword() | map()}
           | {:lease_ms, pos_integer()}
+          | {:lease_renew_ms, pos_integer()}
+          | {:lease_retry_ms, pos_integer()}
 
   @doc false
   @spec child_spec([option()]) :: Supervisor.child_spec()
@@ -40,12 +43,23 @@ defmodule IntentLedger.QueueSupervisor do
   @spec shard_child_specs([option()]) :: [Supervisor.child_spec()]
   def shard_child_specs(opts) do
     name = Keyword.fetch!(opts, :name)
+    store = Keyword.fetch!(opts, :store)
     queues = Keyword.get(opts, :queues, default: @default_queue_opts)
     lease_ms = Keyword.get(opts, :lease_ms, @default_lease_ms)
+    lease_renew_ms = Keyword.get(opts, :lease_renew_ms)
+    lease_retry_ms = Keyword.get(opts, :lease_retry_ms)
 
     for {queue, %{shards: shards}} <- normalize_queues(queues),
         shard <- 0..(shards - 1) do
-      QueueShardServer.child_spec(name: name, queue: queue, shard: shard, lease_ms: lease_ms)
+      QueueShardServer.child_spec(
+        name: name,
+        store: store,
+        queue: queue,
+        shard: shard,
+        lease_ms: lease_ms,
+        lease_renew_ms: lease_renew_ms,
+        lease_retry_ms: lease_retry_ms
+      )
     end
   end
 
