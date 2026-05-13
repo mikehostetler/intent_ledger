@@ -10,9 +10,8 @@ https://gist.github.com/mikehostetler/cc2f56822cf5611126f4462d7ed874c7
 ## Status
 
 This is a package spike. The public API, lifecycle structs, supervision shape,
-store behaviour, and in-memory adapter are in place. Durable adapters such as
-Ecto/Postgres or Bedrock can implement `IntentLedger.Store` without changing
-callers.
+store behaviour, in-memory adapter, and optional Bedrock adapter are in place.
+Ecto/Postgres remains a planned local durable adapter.
 
 ## Runtime Shape
 
@@ -23,6 +22,8 @@ callers.
 - `IntentLedger.Store.Memory` is the executable in-memory reference adapter for
   tests and local examples. It is not durable and is not a clustered production
   backend.
+- `IntentLedger.Store.Bedrock` is the optional durable adapter for Bedrock-backed
+  clustered deployments. See [Bedrock Adapter](docs/bedrock.md).
 - `IntentLedger.Lifecycle` provides optional hooks for submit enrichment and
   post-transition observation.
 

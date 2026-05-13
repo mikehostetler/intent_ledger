@@ -103,6 +103,7 @@ defmodule IntentLedger.MixProject do
       source_ref: "v#{@version}",
       extras: [
         "README.md",
+        "docs/bedrock.md",
         "CHANGELOG.md",
         "CONTRIBUTING.md",
         "LICENSE"
@@ -143,7 +144,7 @@ defmodule IntentLedger.MixProject do
   defp package do
     [
       name: :intent_ledger,
-      files: ["lib", "mix.exs", "README.md", "LICENSE", "CHANGELOG.md", "usage-rules.md"],
+      files: ["lib", "mix.exs", "README.md", "LICENSE", "CHANGELOG.md", "usage-rules.md", "docs"],
       maintainers: ["Mike Hostetler"],
       licenses: ["Apache-2.0"],
       links: %{
