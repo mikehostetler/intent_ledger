@@ -134,6 +134,7 @@ defmodule IntentLedger.MixProject do
           IntentLedger.QueueSupervisor,
           IntentLedger.QueueShardServer,
           IntentLedger.RecoveryServer,
+          IntentLedger.SignalDispatcher,
           IntentLedger.Store,
           IntentLedger.Store.Commit,
           IntentLedger.Store.CommitRequest,

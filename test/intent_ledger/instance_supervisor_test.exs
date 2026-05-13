@@ -34,6 +34,7 @@ defmodule IntentLedger.InstanceSupervisorTest do
     assert Process.whereis(Names.store(name))
     assert Process.whereis(Names.queue_supervisor(name))
     assert Process.whereis(Names.recovery_server(name))
+    assert Process.whereis(Names.signal_dispatcher(name))
     assert Process.whereis(name)
     assert [{_default_0, _}] = Registry.lookup(Names.registry(name), Names.queue_shard(:default, 0))
     assert [{_default_1, _}] = Registry.lookup(Names.registry(name), Names.queue_shard(:default, 1))

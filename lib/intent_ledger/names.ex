@@ -22,6 +22,10 @@ defmodule IntentLedger.Names do
   def recovery_server(name), do: Module.concat(name, RecoveryServer)
 
   @doc false
+  @spec signal_dispatcher(atom()) :: atom()
+  def signal_dispatcher(name), do: Module.concat(name, SignalDispatcher)
+
+  @doc false
   @spec store(atom()) :: atom()
   def store(name), do: Module.concat(name, Store)
 

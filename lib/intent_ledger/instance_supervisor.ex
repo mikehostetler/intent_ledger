@@ -21,6 +21,9 @@ defmodule IntentLedger.InstanceSupervisor do
           | {:claim_batch_size, pos_integer()}
           | {:recovery_interval_ms, pos_integer()}
           | {:recovery_limit, pos_integer()}
+          | {:dispatcher_interval_ms, pos_integer()}
+          | {:dispatcher_batch_size, pos_integer()}
+          | {:dispatcher_consumer, String.t() | atom()}
           | {:wakeups?, boolean()}
           | {:lifecycle, module()}
           | {:telemetry_prefix, [atom()]}
@@ -78,13 +81,19 @@ defmodule IntentLedger.InstanceSupervisor do
       |> Keyword.take([:name, :queues, :recovery_interval_ms, :recovery_limit])
       |> Keyword.put(:store, {store_module, store_name})
 
+    dispatcher_opts =
+      opts
+      |> Keyword.take([:name, :dispatcher_interval_ms, :dispatcher_batch_size, :dispatcher_consumer])
+      |> Keyword.put(:store, {store_module, store_name})
+
     children = [
       {Registry, keys: :unique, name: Names.registry(name)},
       {IntentLedger.Notifier, name: name},
       store_module.child_spec(Keyword.put(store_opts, :name, store_name)),
       {IntentLedger.Server, server_opts},
       {IntentLedger.QueueSupervisor, queue_opts},
-      {IntentLedger.RecoveryServer, recovery_opts}
+      {IntentLedger.RecoveryServer, recovery_opts},
+      {IntentLedger.SignalDispatcher, dispatcher_opts}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
