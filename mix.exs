@@ -127,6 +127,7 @@ defmodule IntentLedger.MixProject do
           IntentLedger.Store.Commit,
           IntentLedger.Store.CommitRequest,
           IntentLedger.Store.Bedrock,
+          IntentLedger.Store.Bedrock.Keyspace,
           IntentLedger.Store.Conflict,
           IntentLedger.Store.Listing,
           IntentLedger.Store.Memory,
