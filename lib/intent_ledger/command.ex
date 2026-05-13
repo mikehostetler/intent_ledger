@@ -30,6 +30,21 @@ defmodule IntentLedger.Command do
           required(:optional) => [field()]
         }
 
+  @type normalized :: %{
+          required(:operation) => operation(),
+          required(:type) => String.t(),
+          required(:schema_version) => pos_integer(),
+          required(:command_id) => String.t(),
+          required(:idempotency_key) => String.t() | nil,
+          required(:actor) => String.t() | nil,
+          required(:causation_id) => String.t() | nil,
+          required(:correlation_id) => String.t() | nil,
+          required(:root_intent_id) => String.t() | nil,
+          required(:parent_intent_id) => String.t() | nil,
+          required(:depth) => non_neg_integer(),
+          required(:data) => map()
+        }
+
   @common_metadata_fields [
     :command_id,
     :idempotency_key,
@@ -179,6 +194,45 @@ defmodule IntentLedger.Command do
   end
 
   @doc """
+  Parses a `Jido.Signal` command envelope into normalized command data.
+  """
+  @spec parse(Jido.Signal.t()) :: {:ok, normalized()} | {:error, term()}
+  def parse(%Jido.Signal{} = signal), do: normalize(signal)
+
+  @doc """
+  Normalizes a command signal.
+
+  The normalized command keeps operation data in atom-keyed form for catalogue
+  fields and extracts command id, idempotency, actor, causation, correlation,
+  lineage, and depth metadata.
+  """
+  @spec normalize(Jido.Signal.t()) :: {:ok, normalized()} | {:error, term()}
+  def normalize(%Jido.Signal{} = signal) do
+    with {:ok, definition} <- definition_for_signal(signal),
+         {:ok, data} <- signal_data(signal),
+         data <- canonicalize_data(data, definition),
+         {:ok, schema_version} <- normalize_schema_version(data, definition),
+         :ok <- require_fields(definition, data),
+         {:ok, metadata} <- normalize_metadata(data, signal) do
+      data =
+        data
+        |> Map.merge(metadata)
+        |> Map.put(:schema_version, schema_version)
+
+      {:ok,
+       metadata
+       |> Map.merge(%{
+         operation: definition.operation,
+         type: definition.type,
+         schema_version: schema_version,
+         data: data
+       })}
+    end
+  end
+
+  def normalize(value), do: {:error, {:invalid_command_signal, value}}
+
+  @doc """
   Builds a `Jido.Signal` command envelope for a catalogue operation.
   """
   @spec new(GenServer.server(), operation(), map() | keyword(), keyword()) :: Jido.Signal.t()
@@ -318,6 +372,143 @@ defmodule IntentLedger.Command do
   end
 
   defp normalize_value(value), do: value
+
+  defp definition_for_signal(%Jido.Signal{type: type}) do
+    case fetch(type) do
+      {:ok, definition} -> {:ok, definition}
+      :error -> {:error, {:unknown_command_type, type}}
+    end
+  end
+
+  defp signal_data(%Jido.Signal{data: data}) when is_map(data) or is_list(data) do
+    {:ok, normalize_payload(data)}
+  end
+
+  defp signal_data(%Jido.Signal{data: data}), do: {:error, {:invalid_command_data, data}}
+
+  defp canonicalize_data(data, definition) do
+    known_fields = MapSet.new([:schema_version | definition.required ++ definition.optional])
+
+    Map.new(data, fn {key, value} ->
+      {canonical_key(key, known_fields), value}
+    end)
+  end
+
+  defp canonical_key(key, known_fields) when is_binary(key) do
+    Enum.find(known_fields, key, &(Atom.to_string(&1) == key))
+  end
+
+  defp canonical_key(key, _known_fields), do: key
+
+  defp normalize_schema_version(data, definition) do
+    with {:ok, raw_version} <- fetch_required_field(data, :schema_version),
+         {:ok, version} <- normalize_positive_integer(raw_version, :schema_version) do
+      if version == definition.version do
+        {:ok, version}
+      else
+        {:error, {:unsupported_command_version, definition.operation, version}}
+      end
+    end
+  end
+
+  defp require_fields(definition, data) do
+    case Enum.find(definition.required, &(field(data, &1) == nil)) do
+      nil -> :ok
+      field -> {:error, {:required, field}}
+    end
+  end
+
+  defp fetch_required_field(data, key) do
+    case field(data, key) do
+      nil -> {:error, {:required, key}}
+      value -> {:ok, value}
+    end
+  end
+
+  defp normalize_metadata(data, %Jido.Signal{} = signal) do
+    with {:ok, command_id} <- normalize_command_id(field(data, :command_id), signal.id),
+         {:ok, idempotency_key} <- normalize_optional_string(field(data, :idempotency_key), :idempotency_key),
+         {:ok, actor} <- normalize_optional_string(field(data, :actor), :actor),
+         {:ok, causation_id} <- normalize_optional_string(field(data, :causation_id), :causation_id),
+         {:ok, correlation_id} <- normalize_optional_string(field(data, :correlation_id), :correlation_id),
+         {:ok, root_intent_id} <- normalize_optional_string(field(data, :root_intent_id), :root_intent_id),
+         {:ok, parent_intent_id} <- normalize_optional_string(field(data, :parent_intent_id), :parent_intent_id),
+         {:ok, depth} <- normalize_non_negative_integer(field(data, :depth), :depth) do
+      {:ok,
+       %{
+         command_id: command_id,
+         idempotency_key: idempotency_key,
+         actor: actor,
+         causation_id: causation_id,
+         correlation_id: correlation_id,
+         root_intent_id: root_intent_id,
+         parent_intent_id: parent_intent_id,
+         depth: depth
+       }}
+    end
+  end
+
+  defp normalize_command_id(nil, signal_id), do: normalize_required_string(signal_id, :command_id)
+
+  defp normalize_command_id(command_id, signal_id) do
+    with {:ok, command_id} <- normalize_required_string(command_id, :command_id),
+         {:ok, signal_id} <- normalize_required_string(signal_id, :command_id) do
+      if command_id == signal_id do
+        {:ok, command_id}
+      else
+        {:error, {:command_id_mismatch, signal_id, command_id}}
+      end
+    end
+  end
+
+  defp normalize_optional_string(nil, _field), do: {:ok, nil}
+
+  defp normalize_optional_string(value, field) do
+    case value |> to_string() |> String.trim() do
+      "" -> {:error, {:invalid_string, field, value}}
+      normalized -> {:ok, normalized}
+    end
+  end
+
+  defp normalize_required_string(value, field) do
+    case normalize_optional_string(value, field) do
+      {:ok, nil} -> {:error, {:required, field}}
+      result -> result
+    end
+  end
+
+  defp normalize_non_negative_integer(nil, _field), do: {:ok, 0}
+
+  defp normalize_non_negative_integer(value, field) do
+    with {:ok, integer} <- normalize_integer(value, field) do
+      if integer >= 0 do
+        {:ok, integer}
+      else
+        {:error, {:invalid_non_negative_integer, field, value}}
+      end
+    end
+  end
+
+  defp normalize_positive_integer(value, field) do
+    with {:ok, integer} <- normalize_integer(value, field) do
+      if integer > 0 do
+        {:ok, integer}
+      else
+        {:error, {:invalid_positive_integer, field, value}}
+      end
+    end
+  end
+
+  defp normalize_integer(value, _field) when is_integer(value), do: {:ok, value}
+
+  defp normalize_integer(value, field) when is_binary(value) do
+    case Integer.parse(value) do
+      {integer, ""} -> {:ok, integer}
+      _invalid -> {:error, {:invalid_integer, field, value}}
+    end
+  end
+
+  defp normalize_integer(value, field), do: {:error, {:invalid_integer, field, value}}
 
   defp maybe_put_signal_id(attrs, payload) do
     case field(payload, :command_id) do

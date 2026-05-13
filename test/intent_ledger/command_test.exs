@@ -139,4 +139,76 @@ defmodule IntentLedger.CommandTest do
     assert signal.subject == "custom:int_1"
     assert signal.data.retry_at == "2026-01-01T00:00:00Z"
   end
+
+  test "normalizes command metadata from a command signal" do
+    signal =
+      Command.claim(MyApp.IntentLedger, :default, "worker-1",
+        command_id: "cmd_claim",
+        idempotency_key: "idem_claim",
+        actor: :worker,
+        causation_id: 123,
+        correlation_id: "corr_1",
+        root_intent_id: "int_root",
+        parent_intent_id: "int_parent",
+        depth: "2"
+      )
+
+    assert {:ok, normalized} = Command.normalize(signal)
+    assert normalized.operation == :claim
+    assert normalized.type == "intent_ledger.command.claim"
+    assert normalized.schema_version == 1
+    assert normalized.command_id == "cmd_claim"
+    assert normalized.idempotency_key == "idem_claim"
+    assert normalized.actor == "worker"
+    assert normalized.causation_id == "123"
+    assert normalized.correlation_id == "corr_1"
+    assert normalized.root_intent_id == "int_root"
+    assert normalized.parent_intent_id == "int_parent"
+    assert normalized.depth == 2
+    assert normalized.data.command_id == "cmd_claim"
+    assert normalized.data.queue == :default
+    assert normalized.data.owner_id == "worker-1"
+  end
+
+  test "normalizer accepts string-keyed command data and falls back to the signal id" do
+    signal =
+      Jido.Signal.new!(
+        Command.type_for(:recover),
+        %{"schema_version" => "1", "queue" => "default"},
+        source: "/intent_ledger/MyApp.IntentLedger"
+      )
+
+    assert {:ok, normalized} = Command.parse(signal)
+    assert normalized.operation == :recover
+    assert normalized.command_id == signal.id
+    assert normalized.depth == 0
+    assert normalized.data.command_id == signal.id
+    assert normalized.data.queue == "default"
+  end
+
+  test "normalizer rejects invalid command signals" do
+    unknown =
+      Jido.Signal.new!("intent_ledger.command.unknown", %{schema_version: 1},
+        source: "/intent_ledger/MyApp.IntentLedger"
+      )
+
+    missing =
+      Jido.Signal.new!(Command.type_for(:complete), %{schema_version: 1}, source: "/intent_ledger/MyApp.IntentLedger")
+
+    mismatch =
+      Jido.Signal.new!(
+        Command.type_for(:claim),
+        %{schema_version: 1, command_id: "cmd_1", queue: "default", owner_id: "worker-1"},
+        id: "cmd_2",
+        source: "/intent_ledger/MyApp.IntentLedger"
+      )
+
+    invalid_depth =
+      Command.claim(MyApp.IntentLedger, :default, "worker-1", command_id: "cmd_depth", depth: -1)
+
+    assert Command.normalize(unknown) == {:error, {:unknown_command_type, "intent_ledger.command.unknown"}}
+    assert Command.normalize(missing) == {:error, {:required, :claim_id}}
+    assert Command.normalize(mismatch) == {:error, {:command_id_mismatch, "cmd_2", "cmd_1"}}
+    assert Command.normalize(invalid_depth) == {:error, {:invalid_non_negative_integer, :depth, -1}}
+  end
 end
