@@ -1,13 +1,17 @@
 defmodule IntentLedger.BedrockMultiNodeClaimOwnerDeathTest do
   use ExUnit.Case, async: false
 
+  @moduletag :integration
+  @moduletag :bedrock
+  @moduletag :multi_node
+  @moduletag :bedrock_multi_node
+
   alias IntentLedger.{BedrockClusterSetup, CrossNodeStore, PeerNodes}
 
   @now ~U[2026-01-01 00:00:00Z]
   @lease_until ~U[2026-01-01 00:00:10Z]
   @after_expiry ~U[2026-01-01 00:00:11Z]
 
-  @tag :bedrock_multi_node
   test "a surviving node recovers work after the claim owner node dies" do
     cluster = BedrockClusterSetup.start_cluster!(3, peer_opts: [prefix: :intent_ledger_owner_death])
     store = CrossNodeStore.start!(cluster)

@@ -1,10 +1,14 @@
 defmodule IntentLedger.BedrockClusterSetupTest do
   use ExUnit.Case, async: false
 
+  @moduletag :integration
+  @moduletag :bedrock
+  @moduletag :multi_node
+  @moduletag :bedrock_cluster
+
   alias IntentLedger.BedrockClusterSetup
   alias IntentLedger.PeerNodes
 
-  @tag :bedrock_cluster
   test "starts peer Bedrock nodes with a shared descriptor and object storage" do
     cluster =
       BedrockClusterSetup.start_cluster!(3,

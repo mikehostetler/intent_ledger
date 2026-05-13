@@ -108,6 +108,33 @@ Rollback is delegated to Bedrock transaction semantics. Tests cover failed
 preconditions preserving stream history, command replay rows, queue state, shard
 leases, and outbox entries across adapter/repo restarts.
 
+## Test Commands
+
+The Bedrock integration harness runs against temporary local Erlang nodes and
+local object storage. It does not require an external Bedrock service.
+
+The harness tests use these ExUnit tags:
+
+- `:integration` for local distributed-node tests;
+- `:bedrock` for tests that start a local Bedrock-backed store;
+- `:multi_node` for tests that start peer Erlang nodes;
+- `:bedrock_cluster` for cluster/setup helper tests;
+- `:bedrock_multi_node` for the Epic 9 Bedrock scenario matrix.
+
+Useful local and CI commands:
+
+```sh
+mix test
+mix test.integration
+mix test.bedrock
+mix test.multi_node
+mix test --exclude flaky --only bedrock_multi_node
+```
+
+`mix test` remains the complete non-flaky suite. The narrower aliases are useful
+when CI shards integration coverage separately from the faster unit and
+single-process store tests.
+
 ## Operational Requirements
 
 Production deployments must run a durable Bedrock cluster. At minimum:

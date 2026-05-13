@@ -44,7 +44,10 @@ defmodule IntentLedger.MixProject do
         coveralls: :test,
         "coveralls.github": :test,
         "coveralls.html": :test,
-        "coveralls.detail": :test
+        "coveralls.detail": :test,
+        "test.integration": :test,
+        "test.bedrock": :test,
+        "test.multi_node": :test
       ]
     ]
   end
@@ -86,6 +89,9 @@ defmodule IntentLedger.MixProject do
       setup: ["deps.get"],
       install_hooks: ["git_hooks.install"],
       test: "test --exclude flaky",
+      "test.integration": "test --exclude flaky --only integration",
+      "test.bedrock": "test --exclude flaky --only bedrock",
+      "test.multi_node": "test --exclude flaky --only multi_node",
       q: ["quality"],
       quality: [
         "format --check-formatted",

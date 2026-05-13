@@ -1,6 +1,11 @@
 defmodule IntentLedger.BedrockMultiNodeStaleOwnerTest do
   use ExUnit.Case, async: false
 
+  @moduletag :integration
+  @moduletag :bedrock
+  @moduletag :multi_node
+  @moduletag :bedrock_multi_node
+
   alias IntentLedger.Store.Conflict
   alias IntentLedger.{BedrockClusterSetup, CrossNodeStore}
 
@@ -9,7 +14,6 @@ defmodule IntentLedger.BedrockMultiNodeStaleOwnerTest do
   @after_release ~U[2026-01-01 00:00:01Z]
   @after_expiry ~U[2026-01-01 00:00:31Z]
 
-  @tag :bedrock_multi_node
   test "stale claim owner is rejected after release and after lease expiry" do
     cluster = BedrockClusterSetup.start_cluster!(3, peer_opts: [prefix: :intent_ledger_stale_owner])
     store = CrossNodeStore.start!(cluster)

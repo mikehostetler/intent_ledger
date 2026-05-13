@@ -1,13 +1,17 @@
 defmodule IntentLedger.CrossNodeStoreTest do
   use ExUnit.Case, async: false
 
+  @moduletag :integration
+  @moduletag :bedrock
+  @moduletag :multi_node
+  @moduletag :bedrock_cluster
+
   alias IntentLedger.{BedrockClusterSetup, CrossNodeStore}
 
   @now ~U[2026-01-01 00:00:00Z]
   @lease_until ~U[2026-01-01 00:00:30Z]
   @expired_at ~U[2026-01-01 00:00:31Z]
 
-  @tag :bedrock_cluster
   test "runs submit claim complete and replay helpers on separate nodes" do
     cluster = BedrockClusterSetup.start_cluster!(3, peer_opts: [prefix: :intent_ledger_cross_node])
     store = CrossNodeStore.start!(cluster)
@@ -58,7 +62,6 @@ defmodule IntentLedger.CrossNodeStoreTest do
     assert replayed.result == complete.result
   end
 
-  @tag :bedrock_cluster
   test "runs recover and fail helpers across nodes" do
     cluster = BedrockClusterSetup.start_cluster!(3, peer_opts: [prefix: :intent_ledger_cross_node_recover])
     store = CrossNodeStore.start!(cluster)

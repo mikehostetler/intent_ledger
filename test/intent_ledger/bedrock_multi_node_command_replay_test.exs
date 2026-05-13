@@ -1,12 +1,16 @@
 defmodule IntentLedger.BedrockMultiNodeCommandReplayTest do
   use ExUnit.Case, async: false
 
+  @moduletag :integration
+  @moduletag :bedrock
+  @moduletag :multi_node
+  @moduletag :bedrock_multi_node
+
   alias IntentLedger.Store.{Conflict, Outbox}
   alias IntentLedger.{BedrockClusterSetup, CrossNodeStore}
 
   @now ~U[2026-01-01 00:00:00Z]
 
-  @tag :bedrock_multi_node
   test "duplicate command replay returns the original result across nodes" do
     cluster = BedrockClusterSetup.start_cluster!(3, peer_opts: [prefix: :intent_ledger_command_replay])
     store = CrossNodeStore.start!(cluster)

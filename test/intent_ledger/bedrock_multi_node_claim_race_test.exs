@@ -1,13 +1,17 @@
 defmodule IntentLedger.BedrockMultiNodeClaimRaceTest do
   use ExUnit.Case, async: false
 
+  @moduletag :integration
+  @moduletag :bedrock
+  @moduletag :multi_node
+  @moduletag :bedrock_multi_node
+
   alias IntentLedger.Store.Conflict
   alias IntentLedger.{BedrockClusterSetup, CrossNodeStore}
 
   @now ~U[2026-01-01 00:00:00Z]
   @lease_until ~U[2026-01-01 00:00:30Z]
 
-  @tag :bedrock_multi_node
   test "only one of three nodes can claim the same available intent" do
     cluster = BedrockClusterSetup.start_cluster!(3, peer_opts: [prefix: :intent_ledger_claim_race])
     store = CrossNodeStore.start!(cluster)

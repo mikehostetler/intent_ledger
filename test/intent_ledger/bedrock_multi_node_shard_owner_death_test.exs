@@ -1,6 +1,11 @@
 defmodule IntentLedger.BedrockMultiNodeShardOwnerDeathTest do
   use ExUnit.Case, async: false
 
+  @moduletag :integration
+  @moduletag :bedrock
+  @moduletag :multi_node
+  @moduletag :bedrock_multi_node
+
   alias IntentLedger.Store.Conflict
   alias IntentLedger.{BedrockClusterSetup, CrossNodeStore, PeerNodes}
 
@@ -9,7 +14,6 @@ defmodule IntentLedger.BedrockMultiNodeShardOwnerDeathTest do
   @after_expiry ~U[2026-01-01 00:00:11Z]
   @takeover_until ~U[2026-01-01 00:00:41Z]
 
-  @tag :bedrock_multi_node
   test "a surviving node takes over an expired shard lease after owner death" do
     cluster = BedrockClusterSetup.start_cluster!(3, peer_opts: [prefix: :intent_ledger_shard_owner_death])
     store = CrossNodeStore.start!(cluster)

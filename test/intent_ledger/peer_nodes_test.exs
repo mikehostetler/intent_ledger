@@ -1,6 +1,9 @@
 defmodule IntentLedger.PeerNodesTest do
   use ExUnit.Case, async: false
 
+  @moduletag :integration
+  @moduletag :multi_node
+
   alias IntentLedger.PeerNodes
 
   test "starts peers with project code paths and tears them down" do

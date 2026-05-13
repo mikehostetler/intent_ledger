@@ -1,6 +1,11 @@
 defmodule IntentLedger.BedrockMultiNodeOutboxDispatcherTest do
   use ExUnit.Case, async: false
 
+  @moduletag :integration
+  @moduletag :bedrock
+  @moduletag :multi_node
+  @moduletag :bedrock_multi_node
+
   alias IntentLedger.Store.Outbox
   alias IntentLedger.{BedrockClusterSetup, CrossNodeStore}
 
@@ -8,7 +13,6 @@ defmodule IntentLedger.BedrockMultiNodeOutboxDispatcherTest do
   @lease_until ~U[2026-01-01 00:00:30Z]
   @acked_at ~U[2026-01-01 00:00:45Z]
 
-  @tag :bedrock_multi_node
   test "interrupted outbox dispatch resumes from unacked entries on another node" do
     cluster = BedrockClusterSetup.start_cluster!(3, peer_opts: [prefix: :intent_ledger_outbox_dispatch])
     store = CrossNodeStore.start!(cluster)
