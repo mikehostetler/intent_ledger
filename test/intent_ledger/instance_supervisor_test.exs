@@ -62,9 +62,17 @@ defmodule IntentLedger.InstanceSupervisorTest do
 
     queue_supervisor = Process.whereis(Names.queue_supervisor(name))
     child_id = {QueueShardServer, name, "default", 0}
+    ref = Process.monitor(shard_pid)
 
     assert :ok = Supervisor.terminate_child(queue_supervisor, child_id)
-    assert [] = Registry.lookup(Names.registry(name), Names.queue_shard(:default, 0))
+    assert_receive {:DOWN, ^ref, :process, ^shard_pid, _reason}, 1_000
+
+    wait_until(fn ->
+      case Registry.lookup(Names.registry(name), Names.queue_shard(:default, 0)) do
+        [] -> true
+        _still_registered -> nil
+      end
+    end)
 
     assert {:ok, probe_lease} = acquire_probe_lease(name)
     assert probe_lease.owner_id == "probe-owner"
