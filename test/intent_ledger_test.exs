@@ -368,6 +368,20 @@ defmodule IntentLedgerTest do
     assert Exception.message(Error.invalid("bad input", field: :key, value: nil)) == "bad input"
     assert Exception.message(Error.runtime("store failed", details: :boom)) == "store failed"
     assert Exception.message(Error.invalid("raw", :details)) == "raw"
+    assert %Error.ConflictError{reason: :idempotency_conflict} = Error.conflict(:idempotency_conflict)
+    assert %Error.StaleOwnerError{} = Error.stale_owner(claim_id: "clm_1")
+    assert %Error.ExpiredLeaseError{} = Error.expired_lease(claim_id: "clm_1")
+    assert %Error.FinalStateError{state: :cancelled} = Error.final_state(:cancelled)
+
+    assert %Error.AdapterRuntimeError{adapter: IntentLedger.Store.Memory} =
+             Error.adapter_runtime("store failed", adapter: IntentLedger.Store.Memory)
+
+    assert %Error.ConflictError{details: %{intent_id: "int_1"}} =
+             Error.from_reason({:idempotency_conflict, "int_1"})
+
+    assert %Error.StaleOwnerError{} = Error.from_reason(:stale_claim)
+    assert %Error.ExpiredLeaseError{} = Error.from_reason(:lease_expired)
+    assert %Error.FinalStateError{state: :failed} = Error.from_reason({:final_state, :failed})
     assert {IntentLedger.Store.Memory, []} = Store.normalize_spec(nil)
     assert {IntentLedger.Store.Memory, []} = Store.normalize_spec(IntentLedger.Store.Memory)
 
