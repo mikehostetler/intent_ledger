@@ -58,6 +58,28 @@ defmodule IntentLedger.Store.Write do
   end
 
   @doc """
+  Appends a lifecycle signal to a versioned stream.
+  """
+  @spec append_signal(String.t(), Jido.Signal.t() | map(), keyword() | map()) :: t()
+  def append_signal(stream, signal, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.merge(%{stream: stream, value: signal})
+    |> then(&new(:append_signal, &1))
+  end
+
+  @doc """
+  Writes a deterministic command result for idempotent replay.
+  """
+  @spec put_idempotency(String.t(), term(), keyword() | map()) :: t()
+  def put_idempotency(command_id, result, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.merge(%{key: command_id, value: result})
+    |> then(&new(:put_idempotency, &1))
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Write.t/0`.
   """
   @spec schema() :: Zoi.schema()

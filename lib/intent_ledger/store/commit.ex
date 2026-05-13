@@ -8,6 +8,8 @@ defmodule IntentLedger.Store.Commit do
   @schema Zoi.struct(__MODULE__, %{
             command_id: Zoi.string() |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
             result: Zoi.any() |> Zoi.default(nil) |> Zoi.optional(),
+            replayed: Zoi.boolean() |> Zoi.default(false) |> Zoi.optional(),
+            replay_of: Zoi.string() |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
             signals: Zoi.array(Zoi.any()) |> Zoi.default([]) |> Zoi.optional(),
             writes: Zoi.array(Zoi.struct(Write)) |> Zoi.default([]) |> Zoi.optional(),
             metadata: Zoi.map() |> Zoi.default(%{}) |> Zoi.optional()

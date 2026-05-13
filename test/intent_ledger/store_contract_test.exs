@@ -63,6 +63,37 @@ defmodule IntentLedger.StoreContractTest do
     assert :command_replay in Conflict.kinds()
   end
 
+  test "stream version helpers describe atomic compare-and-append semantics" do
+    precondition = Precondition.stream_version("intent:int_1", 3)
+    write = Write.append_signal("intent:int_1", %{type: "intent_ledger.intent.completed"})
+    conflict = Conflict.stream_version("intent:int_1", 3, 4)
+
+    assert precondition.type == :stream_version
+    assert precondition.stream == "intent:int_1"
+    assert precondition.expected == 3
+    assert write.type == :append_signal
+    assert write.stream == "intent:int_1"
+    assert conflict.key == "intent:int_1"
+    assert conflict.expected == 3
+    assert conflict.actual == 4
+  end
+
+  test "command idempotency helpers describe deterministic replay semantics" do
+    absent = Precondition.command_absent("cmd_1")
+    replay = Precondition.command_replay("cmd_1")
+    write = Write.put_idempotency("cmd_1", %{intent_id: "int_1"})
+    replayed = Commit.new(command_id: "cmd_1", result: %{intent_id: "int_1"}, replayed: true, replay_of: "cmd_1")
+    conflict = Conflict.command_conflict("cmd_1", %{operation: :submit}, %{operation: :complete})
+
+    assert absent.type == :command_absent
+    assert replay.type == :command_replay
+    assert write.type == :put_idempotency
+    assert write.key == "cmd_1"
+    assert replayed.replayed
+    assert replayed.replay_of == "cmd_1"
+    assert conflict.type == :command_conflict
+  end
+
   test "store behaviour exposes semantic v1 callbacks" do
     callbacks = IntentLedger.Store.behaviour_info(:callbacks) |> MapSet.new()
 

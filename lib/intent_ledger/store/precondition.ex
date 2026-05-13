@@ -52,6 +52,30 @@ defmodule IntentLedger.Store.Precondition do
   end
 
   @doc """
+  Requires a stream to still be at the expected version.
+  """
+  @spec stream_version(String.t(), non_neg_integer()) :: t()
+  def stream_version(stream, expected_version) do
+    new(:stream_version, stream: stream, expected: expected_version)
+  end
+
+  @doc """
+  Requires a command id to be absent before writing a new result.
+  """
+  @spec command_absent(String.t()) :: t()
+  def command_absent(command_id) do
+    new(:command_absent, key: command_id)
+  end
+
+  @doc """
+  Requires a command id to replay an existing deterministic result.
+  """
+  @spec command_replay(String.t()) :: t()
+  def command_replay(command_id) do
+    new(:command_replay, key: command_id)
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Precondition.t/0`.
   """
   @spec schema() :: Zoi.schema()

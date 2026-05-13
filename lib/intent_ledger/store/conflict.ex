@@ -53,6 +53,44 @@ defmodule IntentLedger.Store.Conflict do
   end
 
   @doc """
+  Builds a stream-version conflict.
+  """
+  @spec stream_version(String.t(), non_neg_integer(), non_neg_integer()) :: t()
+  def stream_version(stream, expected, actual) do
+    new(:stream_version,
+      key: stream,
+      expected: expected,
+      actual: actual,
+      message: "stream version conflict"
+    )
+  end
+
+  @doc """
+  Builds a command replay marker for an existing deterministic result.
+  """
+  @spec command_replay(String.t(), term()) :: t()
+  def command_replay(command_id, result) do
+    new(:command_replay,
+      key: command_id,
+      actual: result,
+      message: "command result already recorded"
+    )
+  end
+
+  @doc """
+  Builds a command conflict for a command id reused with different semantics.
+  """
+  @spec command_conflict(String.t(), term(), term()) :: t()
+  def command_conflict(command_id, expected, actual) do
+    new(:command_conflict,
+      key: command_id,
+      expected: expected,
+      actual: actual,
+      message: "command id reused for a different command"
+    )
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Conflict.t/0`.
   """
   @spec schema() :: Zoi.schema()
