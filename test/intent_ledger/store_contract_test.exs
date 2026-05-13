@@ -62,4 +62,34 @@ defmodule IntentLedger.StoreContractTest do
     assert :put_outbox in Write.kinds()
     assert :command_replay in Conflict.kinds()
   end
+
+  test "store behaviour exposes semantic v1 callbacks" do
+    callbacks = IntentLedger.Store.behaviour_info(:callbacks) |> MapSet.new()
+
+    assert MapSet.subset?(
+             MapSet.new(child_spec: 1, commit: 4, read: 4, lease: 4, listing: 4, outbox: 4),
+             callbacks
+           )
+
+    refute MapSet.member?(callbacks, {:submit, 4})
+    refute MapSet.member?(callbacks, {:complete, 6})
+    refute MapSet.member?(callbacks, {:recover, 4})
+  end
+
+  test "memory adapter advertises store v1 callback placeholders" do
+    assert {:error, :store_v1_not_implemented} =
+             IntentLedger.Store.Memory.commit(:store, MyApp.IntentLedger, CommitRequest.new(), [])
+
+    assert {:error, :store_v1_not_implemented} =
+             IntentLedger.Store.Memory.read(:store, MyApp.IntentLedger, {:intent, "int_1"}, [])
+
+    assert {:error, :store_v1_not_implemented} =
+             IntentLedger.Store.Memory.lease(:store, MyApp.IntentLedger, {:shard, :acquire, %{}}, [])
+
+    assert {:error, :store_v1_not_implemented} =
+             IntentLedger.Store.Memory.listing(:store, MyApp.IntentLedger, {:due_intents, %{}}, [])
+
+    assert {:error, :store_v1_not_implemented} =
+             IntentLedger.Store.Memory.outbox(:store, MyApp.IntentLedger, {:read, %{}}, [])
+  end
 end

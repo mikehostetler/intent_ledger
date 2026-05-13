@@ -61,62 +61,64 @@ defmodule IntentLedger.Store.Memory do
   def init(_opts), do: {:ok, %__MODULE__{}}
 
   @impl true
+  def commit(_ref, _ledger, _request, _opts), do: {:error, :store_v1_not_implemented}
+
+  @impl true
+  def read(_ref, _ledger, _request, _opts), do: {:error, :store_v1_not_implemented}
+
+  @impl true
+  def lease(_ref, _ledger, _request, _opts), do: {:error, :store_v1_not_implemented}
+
+  @impl true
+  def listing(_ref, _ledger, _request, _opts), do: {:error, :store_v1_not_implemented}
+
+  @impl true
+  def outbox(_ref, _ledger, _request, _opts), do: {:error, :store_v1_not_implemented}
+
   def submit(ref, ledger, intent, opts) do
     GenServer.call(ref, {:submit, ledger, intent, opts})
   end
 
-  @impl true
   def submit_many(ref, ledger, intents, opts) do
     GenServer.call(ref, {:submit_many, ledger, intents, opts})
   end
 
-  @impl true
   def get(ref, intent_id), do: GenServer.call(ref, {:get, intent_id})
 
-  @impl true
   def history(ref, intent_id), do: GenServer.call(ref, {:history, intent_id})
 
-  @impl true
   def claim(ref, ledger, queue, owner_id, opts) do
     GenServer.call(ref, {:claim, ledger, queue, owner_id, opts})
   end
 
-  @impl true
   def heartbeat(ref, ledger, claim_id, token, opts) do
     GenServer.call(ref, {:heartbeat, ledger, claim_id, token, opts})
   end
 
-  @impl true
   def complete(ref, ledger, claim_id, token, result, opts) do
     GenServer.call(ref, {:complete, ledger, claim_id, token, result, opts})
   end
 
-  @impl true
   def fail(ref, ledger, claim_id, token, error, opts) do
     GenServer.call(ref, {:fail, ledger, claim_id, token, error, opts})
   end
 
-  @impl true
   def release(ref, ledger, claim_id, token, opts) do
     GenServer.call(ref, {:release, ledger, claim_id, token, opts})
   end
 
-  @impl true
   def cancel(ref, ledger, intent_id, reason, opts) do
     GenServer.call(ref, {:cancel, ledger, intent_id, reason, opts})
   end
 
-  @impl true
   def requeue(ref, ledger, intent_id, opts) do
     GenServer.call(ref, {:requeue, ledger, intent_id, opts})
   end
 
-  @impl true
   def mark_ambiguous(ref, ledger, intent_id, reason, opts) do
     GenServer.call(ref, {:mark_ambiguous, ledger, intent_id, reason, opts})
   end
 
-  @impl true
   def recover(ref, ledger, queue, opts) do
     GenServer.call(ref, {:recover, ledger, queue, opts})
   end
