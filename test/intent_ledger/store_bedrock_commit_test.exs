@@ -29,6 +29,14 @@ defmodule IntentLedger.StoreBedrockCommitTest do
       Map.get(Process.get(:values, %{}), key)
     end
 
+    def get_range({start_key, end_key} = range) do
+      record({:get_range, range})
+
+      Process.get(:values, %{})
+      |> Enum.filter(fn {key, _value} -> key >= start_key and key < end_key end)
+      |> Enum.sort_by(fn {key, _value} -> key end)
+    end
+
     defp record(op) do
       Process.put(:ops, [op | Process.get(:ops, [])])
       :ok
@@ -205,12 +213,68 @@ defmodule IntentLedger.StoreBedrockCommitTest do
              Bedrock.commit(store, @ledger, request, transaction_opts: [values: %{command_key => existing}])
   end
 
+  test "checks stream version and derives append versions", %{store: store} do
+    signal = Signal.lifecycle(:intent_available, @ledger, "int_1", %{visible_at: @now})
+
+    request =
+      CommitRequest.new(
+        preconditions: [Precondition.stream_version("intent:int_1", 0)],
+        writes: [Write.append_signal("intent:int_1", signal)]
+      )
+
+    assert {:ok, %Commit{signals: [^signal]}} = Bedrock.commit(store, @ledger, request, [])
+
+    stream_range = Keyspace.stream_range(@ledger, "intent:int_1")
+    stream_key = Keyspace.stream(@ledger, "intent:int_1", 1)
+
+    assert_receive {:transact, []}
+    assert_receive {:ops, [{:get_range, ^stream_range}, {:put, ^stream_key, encoded}]}
+    assert {:ok, ^signal} = Value.unpack_signal(encoded)
+  end
+
+  test "rejects stale stream version preconditions without appending", %{store: store} do
+    stream_key_1 = Keyspace.stream(@ledger, "intent:int_1", 1)
+    stream_key_2 = Keyspace.stream(@ledger, "intent:int_1", 2)
+    signal_1 = Value.pack_signal(%{id: "sig_1"})
+    signal_2 = Value.pack_signal(%{id: "sig_2"})
+
+    request =
+      CommitRequest.new(
+        preconditions: [Precondition.stream_version("intent:int_1", 1)],
+        writes: [Write.append_signal("intent:int_1", %{id: "sig_3"})]
+      )
+
+    values = %{stream_key_1 => signal_1, stream_key_2 => signal_2}
+
+    assert {:error, %IntentLedger.Store.Conflict{type: :stream_version, expected: 1, actual: 2}} =
+             Bedrock.commit(store, @ledger, request, transaction_opts: [values: values])
+
+    stream_range = Keyspace.stream_range(@ledger, "intent:int_1")
+
+    assert_receive {:transact, [values: ^values]}
+    assert_receive {:ops, [{:get_range, ^stream_range}]}
+  end
+
+  test "reads ordered lifecycle streams", %{store: store} do
+    signal_1 = %{id: "sig_1", type: "intent_ledger.intent.submitted"}
+    signal_2 = %{id: "sig_2", type: "intent_ledger.intent.available"}
+
+    values = %{
+      Keyspace.stream(@ledger, "intent:int_1", 2) => Value.pack_signal(signal_2),
+      Keyspace.stream(@ledger, "intent:int_1", 1) => Value.pack_signal(signal_1),
+      Keyspace.stream(@ledger, "intent:int_2", 1) => Value.pack_signal(%{id: "other"})
+    }
+
+    assert {:ok, %{stream: "intent:int_1", version: 2, signals: [^signal_1, ^signal_2]}} =
+             Bedrock.read(store, @ledger, {:stream, "intent:int_1", []}, transaction_opts: [values: values])
+  end
+
   test "rejects preconditions reserved for later semantic compilers", %{store: store} do
-    request = CommitRequest.new(preconditions: [Precondition.stream_version("intent:int_1", 0)])
+    request = CommitRequest.new(preconditions: [Precondition.intent_status("int_1", [:available])])
 
     assert {:error,
             %IntentLedger.Error.AdapterRuntimeError{
-              details: %{reason: :unsupported_precondition, precondition_type: :stream_version}
+              details: %{reason: :unsupported_precondition, precondition_type: :intent_status}
             }} =
              Bedrock.commit(store, @ledger, request, [])
 

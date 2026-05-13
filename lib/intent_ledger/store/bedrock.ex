@@ -77,7 +77,7 @@ defmodule IntentLedger.Store.Bedrock do
   @doc false
   @impl true
   @spec read(Store.ref(), atom(), Store.read_request(), keyword()) :: Store.result()
-  def read(_ref, _ledger, _request, _opts), do: unavailable()
+  def read(ref, ledger, request, opts), do: GenServer.call(ref, {:read, ledger, request, opts})
 
   @doc false
   @impl true
@@ -106,6 +106,24 @@ defmodule IntentLedger.Store.Bedrock do
       )
 
     {:reply, normalize_transact_result(result), state}
+  end
+
+  @impl true
+  def handle_call({:read, ledger, {:stream, stream, _read_opts}, opts}, _from, %__MODULE__{} = state) do
+    result =
+      transact(
+        state.repo,
+        fn repo ->
+          read_stream(repo, ledger, stream)
+        end,
+        transaction_opts(state, opts)
+      )
+
+    {:reply, normalize_transact_result(result), state}
+  end
+
+  def handle_call({:read, _ledger, request, _opts}, _from, %__MODULE__{} = state) do
+    {:reply, {:error, {:unsupported_store_v1_request, :read, request}}, state}
   end
 
   @doc false
@@ -155,6 +173,7 @@ defmodule IntentLedger.Store.Bedrock do
   end
 
   defp normalize_transact_result({:ok, %Commit{} = commit}), do: {:ok, commit}
+  defp normalize_transact_result({:ok, result}), do: {:ok, result}
   defp normalize_transact_result({:error, reason}), do: {:error, reason}
   defp normalize_transact_result(:ok), do: {:ok, Commit.new()}
 
@@ -215,6 +234,16 @@ defmodule IntentLedger.Store.Bedrock do
     end
   end
 
+  defp check_precondition(repo, ledger, _request, %{type: :stream_version, stream: stream, expected: expected}) do
+    actual = stream_version(repo, ledger, stream)
+
+    if actual == expected do
+      :ok
+    else
+      {:error, Conflict.stream_version(stream, expected, actual)}
+    end
+  end
+
   defp check_precondition(_repo, _ledger, _request, precondition) do
     {:error,
      adapter_error("Bedrock commit precondition is not implemented yet",
@@ -224,7 +253,9 @@ defmodule IntentLedger.Store.Bedrock do
   end
 
   defp compile_writes(repo, ledger, %CommitRequest{} = request) do
-    Enum.reduce_while(request.writes, {:ok, %{result: nil, signals: []}}, fn write, {:ok, acc} ->
+    initial_acc = %{result: nil, signals: [], stream_versions: stream_precondition_versions(request)}
+
+    Enum.reduce_while(request.writes, {:ok, initial_acc}, fn write, {:ok, acc} ->
       case compile_write(repo, ledger, request, write, acc) do
         {:ok, next_acc} -> {:cont, {:ok, next_acc}}
         {:error, reason} -> {:halt, {:error, reason}}
@@ -263,9 +294,9 @@ defmodule IntentLedger.Store.Bedrock do
          %{type: :append_signal, stream: stream, value: signal, metadata: metadata},
          acc
        ) do
-    with {:ok, version} <- fetch_metadata_version(metadata) do
+    with {:ok, version} <- next_stream_version(stream, metadata, acc) do
       put(repo, Keyspace.stream(ledger, stream, version), Value.pack_signal(signal))
-      {:ok, %{acc | signals: acc.signals ++ [signal]}}
+      {:ok, %{acc | signals: acc.signals ++ [signal], stream_versions: Map.put(acc.stream_versions, stream, version)}}
     end
   end
 
@@ -319,7 +350,33 @@ defmodule IntentLedger.Store.Bedrock do
 
   defp put(repo, key, value), do: apply(repo, :put, [key, value])
   defp get(repo, key), do: apply(repo, :get, [key])
+  defp get_range(repo, range), do: apply(repo, :get_range, [range])
   defp clear(repo, key), do: apply(repo, :clear, [key])
+
+  defp read_stream(repo, ledger, stream) do
+    entries = stream_entries(repo, ledger, stream)
+
+    with {:ok, signals} <- decode_stream_signals(entries) do
+      {:ok, %{stream: stream, version: length(signals), signals: signals}}
+    end
+  end
+
+  defp stream_version(repo, ledger, stream), do: repo |> stream_entries(ledger, stream) |> length()
+
+  defp stream_entries(repo, ledger, stream) do
+    repo
+    |> get_range(Keyspace.stream_range(ledger, stream))
+    |> Enum.sort_by(fn {key, _value} -> key end)
+  end
+
+  defp decode_stream_signals(entries) do
+    Enum.reduce_while(entries, {:ok, []}, fn {_key, encoded}, {:ok, signals} ->
+      case Value.unpack_signal(encoded) do
+        {:ok, signal} -> {:cont, {:ok, signals ++ [signal]}}
+        {:error, reason} -> {:halt, {:error, adapter_error("invalid Bedrock stream signal value", reason: reason)}}
+      end
+    end)
+  end
 
   defp fetch_command(repo, ledger, command_id) do
     case get(repo, Keyspace.command(ledger, command_id)) do
@@ -330,6 +387,25 @@ defmodule IntentLedger.Store.Bedrock do
         case Value.unpack_command(encoded) do
           {:ok, entry} -> {:ok, entry}
           {:error, reason} -> {:error, adapter_error("invalid Bedrock command replay value", reason: reason)}
+        end
+    end
+  end
+
+  defp next_stream_version(stream, metadata, acc) do
+    case fetch_metadata_version(metadata) do
+      {:ok, version} ->
+        {:ok, version}
+
+      {:error, _reason} ->
+        case Map.fetch(acc.stream_versions, stream) do
+          {:ok, version} ->
+            {:ok, version + 1}
+
+          :error ->
+            {:error,
+             adapter_error("append_signal writes require metadata.version or stream_version precondition",
+               reason: :missing_stream_version
+             )}
         end
     end
   end
@@ -346,6 +422,18 @@ defmodule IntentLedger.Store.Bedrock do
 
   defp fetch_metadata_version(_metadata) do
     {:error, adapter_error("append_signal writes require metadata.version", reason: :missing_stream_version)}
+  end
+
+  defp stream_precondition_versions(%CommitRequest{} = request) do
+    request.preconditions
+    |> Enum.reduce(%{}, fn
+      %{type: :stream_version, stream: stream, expected: expected}, acc
+      when is_binary(stream) and is_integer(expected) ->
+        Map.put(acc, stream, expected)
+
+      _precondition, acc ->
+        acc
+    end)
   end
 
   defp fetch_outbox_sequence(value) when is_map(value) do
