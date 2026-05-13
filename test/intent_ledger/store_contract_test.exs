@@ -569,4 +569,79 @@ defmodule IntentLedger.StoreContractTest do
                []
              )
   end
+
+  test "memory adapter lists due intents and expired claims through store v1 listing" do
+    store =
+      start_supervised!({IntentLedger.Store.Memory, name: :"store_v1_listing_#{System.unique_integer([:positive])}"})
+
+    now = ~U[2026-01-01 00:00:00Z]
+    future = ~U[2026-01-01 00:01:00Z]
+    expired = ~U[2025-12-31 23:59:59Z]
+
+    seed =
+      CommitRequest.new(
+        command_id: "cmd_listing_seed",
+        operation: :seed,
+        writes: [
+          Write.new(:put_state,
+            key: "int_low",
+            value: %{intent_id: "int_low", queue: "default", shard: 0, status: :available, visible_at: now, priority: 1}
+          ),
+          Write.new(:put_state,
+            key: "int_high",
+            value: %{
+              intent_id: "int_high",
+              queue: "default",
+              shard: 0,
+              status: :available,
+              visible_at: now,
+              priority: 10
+            }
+          ),
+          Write.new(:put_state,
+            key: "int_future",
+            value: %{
+              intent_id: "int_future",
+              queue: "default",
+              shard: 0,
+              status: :available,
+              visible_at: future,
+              priority: 20
+            }
+          ),
+          Write.new(:put_state,
+            key: "int_other_shard",
+            value: %{
+              intent_id: "int_other_shard",
+              queue: "default",
+              shard: 1,
+              status: :available,
+              visible_at: now,
+              priority: 30
+            }
+          ),
+          Write.new(:put_state,
+            key: "int_expired",
+            value: %{intent_id: "int_expired", queue: "default", shard: 0, status: :claimed, lease_until: expired}
+          )
+        ]
+      )
+
+    assert {:ok, %Commit{}} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, seed, [])
+
+    assert {:ok, due} =
+             IntentLedger.Store.Memory.listing(store, MyApp.IntentLedger, Listing.due_intents(:default, 0, now), [])
+
+    assert Enum.map(due, & &1.intent_id) == ["int_high", "int_low"]
+
+    assert {:ok, expired_claims} =
+             IntentLedger.Store.Memory.listing(
+               store,
+               MyApp.IntentLedger,
+               {:expired_claims, %{queue: :default, shard: nil, at: now}},
+               []
+             )
+
+    assert Enum.map(expired_claims, & &1.intent_id) == ["int_expired"]
+  end
 end

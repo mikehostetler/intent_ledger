@@ -21,7 +21,7 @@ defmodule IntentLedger.Store.Memory do
     Time
   }
 
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing}
 
   defstruct intents: %{},
             states: %{},
@@ -209,7 +209,10 @@ defmodule IntentLedger.Store.Memory do
   end
 
   def handle_call({:store_v1_listing, _ledger, request, _opts}, _from, state) do
-    {:reply, unsupported_store_v1(:listing, request), state}
+    case normalize_listing_request(request) do
+      {:ok, listing} -> {:reply, {:ok, list_store_v1(state, listing)}, state}
+      :unsupported -> {:reply, unsupported_store_v1(:listing, request), state}
+    end
   end
 
   def handle_call({:store_v1_outbox, _ledger, request, _opts}, _from, state) do
@@ -1005,6 +1008,54 @@ defmodule IntentLedger.Store.Memory do
   end
 
   defp apply_shard_lease_request(_state, _request), do: :unsupported
+
+  defp normalize_listing_request(%Listing{} = listing), do: {:ok, listing}
+
+  defp normalize_listing_request({type, attrs})
+       when type in [:due_intents, :expired_claims] and (is_map(attrs) or is_list(attrs)) do
+    attrs = normalize_attrs(attrs)
+
+    with {:ok, queue} <- Map.fetch(attrs, :queue),
+         {:ok, %DateTime{} = at} <- Map.fetch(attrs, :at) do
+      {:ok, Listing.new(type, Map.merge(attrs, %{queue: to_string(queue), at: at}))}
+    else
+      _error -> :unsupported
+    end
+  end
+
+  defp normalize_listing_request(_request), do: :unsupported
+
+  defp list_store_v1(state, %Listing{} = listing) do
+    state.states
+    |> Map.values()
+    |> Enum.filter(&listing_match?(&1, listing))
+    |> Enum.sort_by(&listing_sort_key(&1, listing))
+    |> Enum.take(listing.limit)
+  end
+
+  defp listing_match?(state, %Listing{type: :due_intents} = listing) do
+    store_field(state, :queue) == listing.queue and shard_match?(state, listing) and
+      store_field(state, :status) in [:available, :retry_scheduled] and
+      DateTime.compare(store_field(state, :visible_at), listing.at) != :gt
+  end
+
+  defp listing_match?(state, %Listing{type: :expired_claims} = listing) do
+    store_field(state, :queue) == listing.queue and shard_match?(state, listing) and
+      store_field(state, :status) == :claimed and
+      DateTime.compare(store_field(state, :lease_until), listing.at) != :gt
+  end
+
+  defp shard_match?(_state, %Listing{shard: nil}), do: true
+  defp shard_match?(state, %Listing{shard: shard}), do: store_field(state, :shard) == shard
+
+  defp listing_sort_key(state, %Listing{type: :due_intents}) do
+    {-store_field(state, :priority, 0), DateTime.to_unix(store_field(state, :visible_at), :microsecond),
+     store_field(state, :intent_id)}
+  end
+
+  defp listing_sort_key(state, %Listing{type: :expired_claims}) do
+    {DateTime.to_unix(store_field(state, :lease_until), :microsecond), store_field(state, :intent_id)}
+  end
 
   defp shard_lease_value(attrs) do
     %{
