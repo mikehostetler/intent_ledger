@@ -97,6 +97,116 @@ defmodule IntentLedger.QueueShardServerTest do
     assert QueueShardServer.state(shard_pid).claimed_count >= 2
   end
 
+  test "polling recovers work when an early wakeup is lost before lease ownership" do
+    name = Module.concat(__MODULE__, "LostWakeupLedger#{System.unique_integer([:positive])}")
+    store_name = Names.store(name)
+
+    start_supervised!({Registry, keys: :unique, name: Names.registry(name)})
+    start_supervised!({@store, name: store_name})
+
+    start_supervised!(
+      {IntentLedger.Server, name: name, store: {@store, store_name}, queues: [default: [shards: 1]], lease_ms: 250}
+    )
+
+    assert {:ok, _lease} = shard_lease(name, :acquire, "other-owner")
+
+    shard_pid =
+      start_supervised!(
+        {QueueShardServer,
+         name: name,
+         store: {@store, store_name},
+         queue: :default,
+         shard: 0,
+         owner_id: "runtime-owner",
+         lease_ms: 250,
+         lease_retry_ms: 10,
+         poll_interval_ms: 10}
+      )
+
+    wait_until(fn ->
+      case QueueShardServer.state(shard_pid).lease_until do
+        nil -> true
+        _lease_until -> nil
+      end
+    end)
+
+    assert {:ok, record} =
+             IntentLedger.submit(name, %{
+               key: "runtime-lost-wakeup",
+               kind: "test.runtime_lost_wakeup",
+               shard: 0
+             })
+
+    QueueShardServer.wake(shard_pid)
+    QueueShardServer.state(shard_pid)
+
+    assert {:ok, available} = IntentLedger.get(name, record.intent.id)
+    assert available.state.status == :available
+
+    assert {:ok, _released} = shard_lease(name, :release, "other-owner")
+
+    claimed =
+      wait_until(fn ->
+        case IntentLedger.get(name, record.intent.id) do
+          {:ok, record} when record.state.status == :claimed -> record
+          _not_claimed_yet -> nil
+        end
+      end)
+
+    assert claimed.state.claim_id
+
+    shard_state = QueueShardServer.state(shard_pid)
+    assert shard_state.claimed_count >= 1
+    assert [%{owner_id: "runtime-owner"} | _rest] = shard_state.last_claimed
+  end
+
+  test "delayed visibility is not claimed before its visible time" do
+    name = Module.concat(__MODULE__, "DelayedVisibilityLedger#{System.unique_integer([:positive])}")
+
+    start_supervised!(
+      {IntentLedger,
+       name: name,
+       queues: [default: [shards: 1]],
+       lease_ms: 250,
+       lease_renew_ms: 50,
+       poll_interval_ms: 10,
+       wakeups?: true}
+    )
+
+    [{shard_pid, _}] = Registry.lookup(Names.registry(name), Names.queue_shard(:default, 0))
+    wait_until(fn -> QueueShardServer.state(shard_pid).lease_until end)
+
+    visible_at = DateTime.add(DateTime.utc_now(), 250, :millisecond)
+
+    assert {:ok, record} =
+             IntentLedger.submit(name, %{
+               key: "runtime-delayed-visibility",
+               kind: "test.runtime_delayed_visibility",
+               shard: 0,
+               visible_at: visible_at
+             })
+
+    QueueShardServer.wake(shard_pid)
+    QueueShardServer.state(shard_pid)
+
+    assert {:ok, available} = IntentLedger.get(name, record.intent.id)
+    assert available.state.status == :available
+
+    claimed =
+      wait_until(
+        fn ->
+          case IntentLedger.get(name, record.intent.id) do
+            {:ok, record} when record.state.status == :claimed -> record
+            _not_claimed_yet -> nil
+          end
+        end,
+        150
+      )
+
+    assert DateTime.compare(claimed.state.updated_at, visible_at) in [:eq, :gt]
+    assert claimed.state.claim_id
+  end
+
   defp wait_until(fun, attempts \\ 50)
 
   defp wait_until(fun, attempts) when attempts > 0 do
@@ -111,4 +221,22 @@ defmodule IntentLedger.QueueShardServerTest do
   end
 
   defp wait_until(_fun, 0), do: flunk("timed out waiting for queue shard server")
+
+  defp shard_lease(name, operation, owner_id) do
+    now = DateTime.utc_now()
+
+    @store.lease(
+      Names.store(name),
+      name,
+      {:shard, operation,
+       %{
+         queue: :default,
+         shard: 0,
+         owner_id: owner_id,
+         lease_until: DateTime.add(now, 250, :millisecond),
+         now: now
+       }},
+      []
+    )
+  end
 end
