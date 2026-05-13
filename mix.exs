@@ -67,6 +67,9 @@ defmodule IntentLedger.MixProject do
       {:telemetry, "~> 1.0"},
       {:zoi, "~> 0.17.1"},
 
+      # Optional durable adapters
+      {:bedrock, "~> 0.5.0", optional: true},
+
       # Dev/Test
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
@@ -123,6 +126,7 @@ defmodule IntentLedger.MixProject do
           IntentLedger.Store,
           IntentLedger.Store.Commit,
           IntentLedger.Store.CommitRequest,
+          IntentLedger.Store.Bedrock,
           IntentLedger.Store.Conflict,
           IntentLedger.Store.Listing,
           IntentLedger.Store.Memory,
