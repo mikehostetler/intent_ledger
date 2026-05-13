@@ -134,10 +134,8 @@ defmodule IntentLedger.MixProject do
       licenses: ["Apache-2.0"],
       links: %{
         "Changelog" => "https://hexdocs.pm/intent_ledger/changelog.html",
-        "Discord" => "https://jido.run/discord",
         "Documentation" => "https://hexdocs.pm/intent_ledger",
-        "GitHub" => @source_url,
-        "Website" => "https://jido.run"
+        "GitHub" => @source_url
       }
     ]
   end
