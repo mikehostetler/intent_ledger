@@ -217,5 +217,7 @@ defmodule IntentLedger.StoreBedrockPersistenceTest do
       nil -> :ok
       pid -> GenServer.stop(pid)
     end
+  catch
+    :exit, _reason -> :ok
   end
 end
