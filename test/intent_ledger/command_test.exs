@@ -78,4 +78,65 @@ defmodule IntentLedger.CommandTest do
     assert Command.fetch!(:mark_ambiguous).required == [:intent_id, :reason]
     assert Command.fetch!(:recover).required == [:queue]
   end
+
+  test "generic builder creates a Jido signal envelope from the catalogue" do
+    signal =
+      Command.new(
+        MyApp.IntentLedger,
+        :submit,
+        %{intent: %{id: "int_1", key: "job:1", kind: "job.run"}, command_id: "cmd_1", actor: "user:1"}
+      )
+
+    assert %Jido.Signal{} = signal
+    assert signal.id == "cmd_1"
+    assert signal.type == Command.type_for(:submit)
+    assert signal.source == "/intent_ledger/MyApp.IntentLedger"
+    assert signal.subject == "intent:int_1"
+    assert signal.datacontenttype == "application/json"
+    assert signal.dataschema == "https://hexdocs.pm/intent_ledger/commands/submit/v1.json"
+    assert signal.data.schema_version == 1
+    assert signal.data.command_id == "cmd_1"
+    assert signal.data.actor == "user:1"
+  end
+
+  test "operation builders publish command-specific payloads" do
+    assert Command.submit(MyApp.IntentLedger, %{key: "job:1", kind: "job.run"}).type ==
+             "intent_ledger.command.submit"
+
+    assert Command.submit_many(MyApp.IntentLedger, [%{key: "job:1", kind: "job.run"}]).data.intents == [
+             %{key: "job:1", kind: "job.run"}
+           ]
+
+    assert Command.claim(MyApp.IntentLedger, :default, "worker-1", limit: 2).data == %{
+             queue: :default,
+             owner_id: "worker-1",
+             limit: 2,
+             schema_version: 1
+           }
+
+    assert Command.heartbeat(MyApp.IntentLedger, "clm_1", "tok_1").subject == "claim:clm_1"
+    assert Command.complete(MyApp.IntentLedger, "clm_1", "tok_1", :ok).data.result == :ok
+    assert Command.fail(MyApp.IntentLedger, "clm_1", "tok_1", :boom).data.error == :boom
+    assert Command.release(MyApp.IntentLedger, "clm_1", "tok_1").data.token == "tok_1"
+    assert Command.cancel(MyApp.IntentLedger, "int_1", :because).subject == "intent:int_1"
+    assert Command.requeue(MyApp.IntentLedger, "int_1").type == "intent_ledger.command.requeue"
+
+    assert Command.mark_ambiguous(MyApp.IntentLedger, "int_1", :manual_review).data.reason ==
+             :manual_review
+
+    assert Command.recover(MyApp.IntentLedger, :default, limit: 100).subject == "queue:default"
+  end
+
+  test "builder normalizes DateTime values for JSON command data" do
+    now = ~U[2026-01-01 00:00:00Z]
+
+    signal =
+      Command.requeue(MyApp.IntentLedger, "int_1",
+        retry_at: now,
+        signal_attrs: [subject: "custom:int_1"]
+      )
+
+    assert signal.subject == "custom:int_1"
+    assert signal.data.retry_at == "2026-01-01T00:00:00Z"
+  end
 end
