@@ -149,8 +149,8 @@ defmodule IntentLedger.Store.Memory do
   end
 
   def handle_call({:store_v1_commit, _ledger, %CommitRequest{} = request, _opts}, _from, state) do
-    if command_commit?(request) do
-      case check_command_preconditions(state, request) do
+    if supported_commit?(request) do
+      case check_commit_preconditions(state, request) do
         {:replay, entry} ->
           commit =
             Commit.new(
@@ -163,8 +163,8 @@ defmodule IntentLedger.Store.Memory do
           {:reply, {:ok, commit}, state}
 
         :ok ->
-          {next_state, result} = put_command_results(state, request)
-          commit = Commit.new(command_id: request.command_id, result: result, writes: request.writes)
+          {next_state, result, signals} = apply_commit_writes(state, request)
+          commit = Commit.new(command_id: request.command_id, result: result, writes: request.writes, signals: signals)
 
           {:reply, {:ok, commit}, next_state}
 
@@ -751,12 +751,12 @@ defmodule IntentLedger.Store.Memory do
   defp queue_stream(intent), do: "queue:" <> intent.queue <> ":" <> to_string(intent.shard)
   defp intent_stream(intent_id), do: "intent:" <> intent_id
 
-  defp command_commit?(%CommitRequest{} = request) do
-    Enum.all?(request.preconditions, &(&1.type in [:command_absent, :command_replay])) and
-      Enum.all?(request.writes, &(&1.type == :put_idempotency))
+  defp supported_commit?(%CommitRequest{} = request) do
+    Enum.all?(request.preconditions, &(&1.type in [:command_absent, :command_replay, :stream_version])) and
+      Enum.all?(request.writes, &(&1.type in [:append_signal, :put_idempotency]))
   end
 
-  defp check_command_preconditions(state, %CommitRequest{} = request) do
+  defp check_commit_preconditions(state, %CommitRequest{} = request) do
     Enum.reduce_while(request.preconditions, :ok, fn
       %{type: :command_replay, key: command_id}, :ok ->
         case Map.fetch(state.commands, command_id) do
@@ -777,16 +777,33 @@ defmodule IntentLedger.Store.Memory do
         else
           {:cont, :ok}
         end
+
+      %{type: :stream_version, stream: stream, expected: expected}, :ok ->
+        actual = stream_version(state, stream)
+
+        if actual == expected do
+          {:cont, :ok}
+        else
+          {:halt, {:error, Conflict.stream_version(stream, expected, actual)}}
+        end
     end)
   end
 
-  defp put_command_results(state, %CommitRequest{} = request) do
-    Enum.reduce(request.writes, {state, nil}, fn %{key: command_id, value: result}, {acc_state, _acc_result} ->
-      entry = %{signature: command_signature(request), result: result}
+  defp apply_commit_writes(state, %CommitRequest{} = request) do
+    Enum.reduce(request.writes, {state, nil, []}, fn
+      %{type: :append_signal, stream: stream, value: signal}, {acc_state, result, signals} ->
+        next_state = %{acc_state | streams: Map.update(acc_state.streams, stream, [signal], &(&1 ++ [signal]))}
 
-      {%{acc_state | commands: Map.put(acc_state.commands, command_id, entry)}, result}
+        {next_state, result, signals ++ [signal]}
+
+      %{type: :put_idempotency, key: command_id, value: result}, {acc_state, _old_result, signals} ->
+        entry = %{signature: command_signature(request), result: result}
+
+        {%{acc_state | commands: Map.put(acc_state.commands, command_id, entry)}, result, signals}
     end)
   end
+
+  defp stream_version(state, stream), do: state.streams |> Map.get(stream, []) |> length()
 
   defp command_signature(%CommitRequest{} = request), do: {request.operation, request.command}
 

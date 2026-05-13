@@ -348,4 +348,48 @@ defmodule IntentLedger.StoreContractTest do
     assert {:error, %Conflict{type: :command_conflict}} =
              IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, conflicting_replay, [])
   end
+
+  test "memory adapter enforces v1 stream versions and appends lifecycle signals" do
+    store =
+      start_supervised!({IntentLedger.Store.Memory, name: :"store_v1_stream_#{System.unique_integer([:positive])}"})
+
+    signal = %{type: "intent_ledger.intent.submitted", id: "sig_1"}
+    stream = "intent:int_1"
+
+    request =
+      CommitRequest.new(
+        command_id: "cmd_stream_1",
+        operation: :submit,
+        preconditions: [Precondition.stream_version(stream, 0)],
+        writes: [Write.append_signal(stream, signal)]
+      )
+
+    assert {:ok, %Commit{} = commit} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, request, [])
+    assert commit.signals == [signal]
+
+    assert {:ok, %{version: 1, signals: [^signal]}} =
+             IntentLedger.Store.Memory.read(store, MyApp.IntentLedger, {:stream, stream, []}, [])
+
+    stale =
+      CommitRequest.new(
+        command_id: "cmd_stream_stale",
+        operation: :submit,
+        preconditions: [Precondition.stream_version(stream, 0)],
+        writes: [Write.append_signal(stream, %{id: "sig_stale"})]
+      )
+
+    assert {:error, %Conflict{type: :stream_version, expected: 0, actual: 1}} =
+             IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, stale, [])
+
+    next =
+      CommitRequest.new(
+        command_id: "cmd_stream_2",
+        operation: :submit,
+        preconditions: [Precondition.stream_version(stream, 1)],
+        writes: [Write.append_signal(stream, %{id: "sig_2"})]
+      )
+
+    assert {:ok, %Commit{}} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, next, [])
+    assert {:ok, %{version: 2}} = IntentLedger.Store.Memory.read(store, MyApp.IntentLedger, {:stream, stream, []}, [])
+  end
 end
