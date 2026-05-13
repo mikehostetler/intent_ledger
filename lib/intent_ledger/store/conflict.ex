@@ -91,6 +91,32 @@ defmodule IntentLedger.Store.Conflict do
   end
 
   @doc """
+  Builds an intent-status conflict for conditional lifecycle transitions.
+  """
+  @spec intent_status(String.t(), atom() | [atom()], atom()) :: t()
+  def intent_status(intent_id, expected, actual) do
+    new(:intent_status,
+      key: intent_id,
+      expected: List.wrap(expected),
+      actual: actual,
+      message: "intent status conflict"
+    )
+  end
+
+  @doc """
+  Builds a claim-fence conflict for stale owners, tokens, or leases.
+  """
+  @spec claim_fence(String.t(), term(), term()) :: t()
+  def claim_fence(claim_id, expected, actual) do
+    new(:claim_fence,
+      key: claim_id,
+      expected: expected,
+      actual: actual,
+      message: "claim fence conflict"
+    )
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Conflict.t/0`.
   """
   @spec schema() :: Zoi.schema()

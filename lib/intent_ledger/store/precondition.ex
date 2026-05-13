@@ -76,6 +76,36 @@ defmodule IntentLedger.Store.Precondition do
   end
 
   @doc """
+  Requires an intent lifecycle state to have one of the expected statuses.
+
+  Claim acquisition uses this precondition to fence the transition from an
+  available or retry-scheduled state into a claimed state.
+  """
+  @spec intent_status(String.t(), atom() | [atom()], keyword() | map()) :: t()
+  def intent_status(intent_id, expected_statuses, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.merge(%{key: intent_id, expected: List.wrap(expected_statuses)})
+    |> then(&new(:intent_status, &1))
+  end
+
+  @doc """
+  Requires a claim row to match the expected fencing token hash.
+
+  Heartbeat, complete, fail, and release operations use this precondition to
+  reject stale claim owners after release, expiry, or takeover.
+  """
+  @spec claim_fence(String.t(), String.t(), keyword() | map()) :: t()
+  def claim_fence(claim_id, token_hash, attrs \\ %{}) do
+    expected = %{status: :claimed, token_hash: token_hash}
+
+    attrs
+    |> normalize_attrs()
+    |> Map.merge(%{key: claim_id, expected: expected})
+    |> then(&new(:claim_fence, &1))
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Precondition.t/0`.
   """
   @spec schema() :: Zoi.schema()

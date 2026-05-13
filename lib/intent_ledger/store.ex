@@ -28,6 +28,27 @@ defmodule IntentLedger.Store do
   the command id exists for different command semantics, the adapter returns
   `IntentLedger.Store.Conflict.command_conflict/3`.
 
+  ## Claim Fencing Semantics
+
+  Claim ownership is fenced by a durable claim row keyed by `claim_id` and by
+  the matching token hash copied onto intent state. Claim acquisition uses
+  `IntentLedger.Store.Precondition.intent_status/3` to compare-and-set an
+  eligible `:available` or `:retry_scheduled` intent into `:claimed`, then writes
+  the claim row with `IntentLedger.Store.Write.put_claim/3` in the same commit
+  as the state and signal writes.
+
+  Heartbeat, complete, fail, and release operations must include
+  `IntentLedger.Store.Precondition.claim_fence/3`. The adapter checks that the
+  claim row exists, points at a `:claimed` intent, matches the expected token
+  hash, and has not expired at the operation time. A stale token, missing claim,
+  released claim, final intent, or expired lease must return
+  `IntentLedger.Store.Conflict.claim_fence/3` without applying writes.
+
+  Successful heartbeat commits update the claim lease and append a heartbeat
+  signal atomically. Successful complete, fail, and release commits delete the
+  claim row with `IntentLedger.Store.Write.delete_claim/2` in the same atomic
+  commit as the state transition and lifecycle signals.
+
   The bundled `IntentLedger.Store.Memory` adapter is intended for tests, local
   development, and as the executable contract for durable adapters.
   """

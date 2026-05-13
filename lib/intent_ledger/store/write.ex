@@ -80,6 +80,28 @@ defmodule IntentLedger.Store.Write do
   end
 
   @doc """
+  Writes or replaces a durable claim fence.
+  """
+  @spec put_claim(String.t(), map(), keyword() | map()) :: t()
+  def put_claim(claim_id, claim_info, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.merge(%{key: claim_id, value: claim_info})
+    |> then(&new(:put_claim, &1))
+  end
+
+  @doc """
+  Deletes a durable claim fence after complete, fail, release, or expiry.
+  """
+  @spec delete_claim(String.t(), keyword() | map()) :: t()
+  def delete_claim(claim_id, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.put(:key, claim_id)
+    |> then(&new(:delete_claim, &1))
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Write.t/0`.
   """
   @spec schema() :: Zoi.schema()

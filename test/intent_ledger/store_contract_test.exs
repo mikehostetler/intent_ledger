@@ -94,6 +94,56 @@ defmodule IntentLedger.StoreContractTest do
     assert conflict.type == :command_conflict
   end
 
+  test "claim fencing helpers describe acquire and owner-checked lifecycle semantics" do
+    claim_gate =
+      Precondition.intent_status("int_1", [:available, :retry_scheduled],
+        metadata: %{operation: :claim, queue: "default", shard: 0}
+      )
+
+    claim_write =
+      Write.put_claim("clm_1", %{
+        intent_id: "int_1",
+        owner_id: "worker-1",
+        token_hash: "hash_1",
+        attempt: 1,
+        lease_until: ~U[2026-01-01 00:01:00Z]
+      })
+
+    assert claim_gate.type == :intent_status
+    assert claim_gate.key == "int_1"
+    assert claim_gate.expected == [:available, :retry_scheduled]
+    assert claim_gate.metadata.operation == :claim
+    assert claim_write.type == :put_claim
+    assert claim_write.key == "clm_1"
+    assert claim_write.value.token_hash == "hash_1"
+
+    for operation <- [:heartbeat, :complete, :fail, :release] do
+      fence =
+        Precondition.claim_fence("clm_1", "hash_1",
+          metadata: %{operation: operation, intent_id: "int_1", lease_required: true}
+        )
+
+      request =
+        CommitRequest.new(
+          command_id: "cmd_#{operation}",
+          operation: operation,
+          preconditions: [fence],
+          writes: [Write.append_signal("intent:int_1", %{type: "intent_ledger.#{operation}"})]
+        )
+
+      assert fence.type == :claim_fence
+      assert fence.key == "clm_1"
+      assert fence.expected == %{status: :claimed, token_hash: "hash_1"}
+      assert fence.metadata.operation == operation
+      assert request.preconditions == [fence]
+    end
+
+    assert Write.delete_claim("clm_1").type == :delete_claim
+
+    assert Conflict.intent_status("int_1", [:available], :claimed).type == :intent_status
+    assert Conflict.claim_fence("clm_1", %{token_hash: "hash_1"}, %{token_hash: "hash_2"}).type == :claim_fence
+  end
+
   test "store behaviour exposes semantic v1 callbacks" do
     callbacks = IntentLedger.Store.behaviour_info(:callbacks) |> MapSet.new()
 
