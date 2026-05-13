@@ -17,6 +17,8 @@ defmodule IntentLedger.QueueSupervisor do
           | {:lease_ms, pos_integer()}
           | {:lease_renew_ms, pos_integer()}
           | {:lease_retry_ms, pos_integer()}
+          | {:poll_interval_ms, pos_integer()}
+          | {:claim_batch_size, pos_integer()}
 
   @doc false
   @spec child_spec([option()]) :: Supervisor.child_spec()
@@ -48,6 +50,8 @@ defmodule IntentLedger.QueueSupervisor do
     lease_ms = Keyword.get(opts, :lease_ms, @default_lease_ms)
     lease_renew_ms = Keyword.get(opts, :lease_renew_ms)
     lease_retry_ms = Keyword.get(opts, :lease_retry_ms)
+    poll_interval_ms = Keyword.get(opts, :poll_interval_ms)
+    claim_batch_size = Keyword.get(opts, :claim_batch_size)
 
     for {queue, %{shards: shards}} <- normalize_queues(queues),
         shard <- 0..(shards - 1) do
@@ -58,7 +62,9 @@ defmodule IntentLedger.QueueSupervisor do
         shard: shard,
         lease_ms: lease_ms,
         lease_renew_ms: lease_renew_ms,
-        lease_retry_ms: lease_retry_ms
+        lease_retry_ms: lease_retry_ms,
+        poll_interval_ms: poll_interval_ms,
+        claim_batch_size: claim_batch_size
       )
     end
   end

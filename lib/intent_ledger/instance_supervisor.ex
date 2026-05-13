@@ -15,6 +15,10 @@ defmodule IntentLedger.InstanceSupervisor do
           | {:store, module() | {module(), keyword()}}
           | {:queues, keyword() | map()}
           | {:lease_ms, pos_integer()}
+          | {:lease_renew_ms, pos_integer()}
+          | {:lease_retry_ms, pos_integer()}
+          | {:poll_interval_ms, pos_integer()}
+          | {:claim_batch_size, pos_integer()}
           | {:lifecycle, module()}
           | {:telemetry_prefix, [atom()]}
           | {:shutdown, timeout()}
@@ -55,7 +59,15 @@ defmodule IntentLedger.InstanceSupervisor do
 
     queue_opts =
       opts
-      |> Keyword.take([:name, :queues, :lease_ms])
+      |> Keyword.take([
+        :name,
+        :queues,
+        :lease_ms,
+        :lease_renew_ms,
+        :lease_retry_ms,
+        :poll_interval_ms,
+        :claim_batch_size
+      ])
       |> Keyword.put(:store, {store_module, store_name})
 
     children = [
