@@ -14,6 +14,10 @@ defmodule IntentLedger.Names do
   def queue_supervisor(name), do: Module.concat(name, QueueSupervisor)
 
   @doc false
+  @spec recovery_server(atom()) :: atom()
+  def recovery_server(name), do: Module.concat(name, RecoveryServer)
+
+  @doc false
   @spec store(atom()) :: atom()
   def store(name), do: Module.concat(name, Store)
 

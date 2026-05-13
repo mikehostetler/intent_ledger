@@ -19,6 +19,8 @@ defmodule IntentLedger.InstanceSupervisor do
           | {:lease_retry_ms, pos_integer()}
           | {:poll_interval_ms, pos_integer()}
           | {:claim_batch_size, pos_integer()}
+          | {:recovery_interval_ms, pos_integer()}
+          | {:recovery_limit, pos_integer()}
           | {:lifecycle, module()}
           | {:telemetry_prefix, [atom()]}
           | {:shutdown, timeout()}
@@ -70,11 +72,17 @@ defmodule IntentLedger.InstanceSupervisor do
       ])
       |> Keyword.put(:store, {store_module, store_name})
 
+    recovery_opts =
+      opts
+      |> Keyword.take([:name, :queues, :recovery_interval_ms, :recovery_limit])
+      |> Keyword.put(:store, {store_module, store_name})
+
     children = [
       {Registry, keys: :unique, name: Names.registry(name)},
       store_module.child_spec(Keyword.put(store_opts, :name, store_name)),
       {IntentLedger.Server, server_opts},
-      {IntentLedger.QueueSupervisor, queue_opts}
+      {IntentLedger.QueueSupervisor, queue_opts},
+      {IntentLedger.RecoveryServer, recovery_opts}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
