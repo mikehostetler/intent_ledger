@@ -280,6 +280,13 @@ defmodule IntentLedgerTest do
              IntentLedger.submit(ledger, %{key: "bad:time", kind: "job.run", visible_at: "not-a-date"})
   end
 
+  test "normalizes public API commands before lifecycle commits", %{ledger: ledger} do
+    assert {:error, {:invalid_non_negative_integer, :depth, -1}} =
+             IntentLedger.submit(ledger, %{key: "job:bad-command", kind: "job.run"}, depth: -1)
+
+    assert :empty = IntentLedger.claim(ledger, :default, "worker-1")
+  end
+
   test "runs lifecycle hooks", %{ledger: _ledger} do
     Process.register(self(), :intent_ledger_lifecycle_test)
 

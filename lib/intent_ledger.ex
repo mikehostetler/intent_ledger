@@ -30,6 +30,8 @@ defmodule IntentLedger do
       {:ok, _record} = IntentLedger.complete(MyApp.IntentLedger, claimed.claim.id, claimed.claim.token, :ok)
   """
 
+  alias IntentLedger.Command
+
   @type ledger :: GenServer.server()
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
@@ -44,7 +46,7 @@ defmodule IntentLedger do
   @spec submit(ledger(), IntentLedger.Intent.t() | map() | keyword(), keyword()) ::
           {:ok, IntentLedger.Record.t()} | {:error, term()}
   def submit(ledger, intent, opts \\ []) do
-    call(ledger, {:submit, intent, opts}, opts)
+    command_call(ledger, Command.submit(ledger, intent, opts), {:submit, intent, opts}, opts)
   end
 
   @doc """
@@ -53,7 +55,7 @@ defmodule IntentLedger do
   @spec submit_many(ledger(), [IntentLedger.Intent.t() | map() | keyword()], keyword()) ::
           {:ok, [IntentLedger.Record.t()]} | {:error, term()}
   def submit_many(ledger, intents, opts \\ []) do
-    call(ledger, {:submit_many, intents, opts}, opts)
+    command_call(ledger, Command.submit_many(ledger, intents, opts), {:submit_many, intents, opts}, opts)
   end
 
   @doc """
@@ -74,7 +76,7 @@ defmodule IntentLedger do
   @spec claim(ledger(), String.t() | atom(), String.t(), keyword()) ::
           {:ok, IntentLedger.Claimed.t() | [IntentLedger.Claimed.t()]} | :empty | {:error, term()}
   def claim(ledger, queue, owner_id, opts \\ []) do
-    call(ledger, {:claim, queue, owner_id, opts}, opts)
+    command_call(ledger, Command.claim(ledger, queue, owner_id, opts), {:claim, queue, owner_id, opts}, opts)
   end
 
   @doc """
@@ -83,7 +85,12 @@ defmodule IntentLedger do
   @spec heartbeat(ledger(), String.t(), String.t(), keyword()) ::
           {:ok, IntentLedger.Claim.t()} | {:error, term()}
   def heartbeat(ledger, claim_id, token, opts \\ []) do
-    call(ledger, {:heartbeat, claim_id, token, opts}, opts)
+    command_call(
+      ledger,
+      Command.heartbeat(ledger, claim_id, token, opts),
+      {:heartbeat, claim_id, token, opts},
+      opts
+    )
   end
 
   @doc """
@@ -92,7 +99,12 @@ defmodule IntentLedger do
   @spec complete(ledger(), String.t(), String.t(), term(), keyword()) ::
           {:ok, IntentLedger.Record.t()} | {:error, term()}
   def complete(ledger, claim_id, token, result, opts \\ []) do
-    call(ledger, {:complete, claim_id, token, result, opts}, opts)
+    command_call(
+      ledger,
+      Command.complete(ledger, claim_id, token, result, opts),
+      {:complete, claim_id, token, result, opts},
+      opts
+    )
   end
 
   @doc """
@@ -101,7 +113,12 @@ defmodule IntentLedger do
   @spec fail(ledger(), String.t(), String.t(), term(), keyword()) ::
           {:ok, IntentLedger.Record.t()} | {:error, term()}
   def fail(ledger, claim_id, token, error, opts \\ []) do
-    call(ledger, {:fail, claim_id, token, error, opts}, opts)
+    command_call(
+      ledger,
+      Command.fail(ledger, claim_id, token, error, opts),
+      {:fail, claim_id, token, error, opts},
+      opts
+    )
   end
 
   @doc """
@@ -110,7 +127,12 @@ defmodule IntentLedger do
   @spec release(ledger(), String.t(), String.t(), keyword()) ::
           {:ok, IntentLedger.Record.t()} | {:error, term()}
   def release(ledger, claim_id, token, opts \\ []) do
-    call(ledger, {:release, claim_id, token, opts}, opts)
+    command_call(
+      ledger,
+      Command.release(ledger, claim_id, token, opts),
+      {:release, claim_id, token, opts},
+      opts
+    )
   end
 
   @doc """
@@ -119,7 +141,12 @@ defmodule IntentLedger do
   @spec cancel(ledger(), String.t(), term(), keyword()) ::
           {:ok, IntentLedger.Record.t()} | {:error, term()}
   def cancel(ledger, intent_id, reason, opts \\ []) do
-    call(ledger, {:cancel, intent_id, reason, opts}, opts)
+    command_call(
+      ledger,
+      Command.cancel(ledger, intent_id, reason, opts),
+      {:cancel, intent_id, reason, opts},
+      opts
+    )
   end
 
   @doc """
@@ -128,7 +155,7 @@ defmodule IntentLedger do
   @spec requeue(ledger(), String.t(), keyword()) ::
           {:ok, IntentLedger.Record.t()} | {:error, term()}
   def requeue(ledger, intent_id, opts \\ []) do
-    call(ledger, {:requeue, intent_id, opts}, opts)
+    command_call(ledger, Command.requeue(ledger, intent_id, opts), {:requeue, intent_id, opts}, opts)
   end
 
   @doc """
@@ -137,7 +164,12 @@ defmodule IntentLedger do
   @spec mark_ambiguous(ledger(), String.t(), term(), keyword()) ::
           {:ok, IntentLedger.Record.t()} | {:error, term()}
   def mark_ambiguous(ledger, intent_id, reason, opts \\ []) do
-    call(ledger, {:mark_ambiguous, intent_id, reason, opts}, opts)
+    command_call(
+      ledger,
+      Command.mark_ambiguous(ledger, intent_id, reason, opts),
+      {:mark_ambiguous, intent_id, reason, opts},
+      opts
+    )
   end
 
   @doc """
@@ -146,7 +178,14 @@ defmodule IntentLedger do
   @spec recover(ledger(), String.t() | atom(), keyword()) ::
           {:ok, [IntentLedger.Record.t()]} | {:error, term()}
   def recover(ledger, queue, opts \\ []) do
-    call(ledger, {:recover, queue, opts}, opts)
+    command_call(ledger, Command.recover(ledger, queue, opts), {:recover, queue, opts}, opts)
+  end
+
+  defp command_call(ledger, signal, message, opts) do
+    case Command.normalize(signal) do
+      {:ok, _command} -> call(ledger, message, opts)
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp call(ledger, message, opts) do
