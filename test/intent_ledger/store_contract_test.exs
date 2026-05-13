@@ -644,4 +644,54 @@ defmodule IntentLedger.StoreContractTest do
 
     assert Enum.map(expired_claims, & &1.intent_id) == ["int_expired"]
   end
+
+  test "memory adapter reads acks and replays store v1 outbox entries" do
+    store =
+      start_supervised!({IntentLedger.Store.Memory, name: :"store_v1_outbox_#{System.unique_integer([:positive])}"})
+
+    now = ~U[2026-01-01 00:00:00Z]
+    signal = %{type: "intent_ledger.intent.completed", id: "sig_1"}
+
+    seed =
+      CommitRequest.new(
+        command_id: "cmd_outbox_seed",
+        operation: :complete,
+        writes: [Write.put_outbox("out_1", %{stream: "intent:int_1", signal: signal, inserted_at: now})]
+      )
+
+    assert {:ok, %Commit{}} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, seed, [])
+
+    assert {:ok, [entry]} = IntentLedger.Store.Memory.outbox(store, MyApp.IntentLedger, Outbox.read("dispatcher"), [])
+    assert entry.key == "out_1"
+    assert entry.sequence == 1
+    assert entry.signal == signal
+
+    assert {:ok, acked} =
+             IntentLedger.Store.Memory.outbox(
+               store,
+               MyApp.IntentLedger,
+               Outbox.ack("out_1", "dispatcher", metadata: %{acked_at: now}),
+               []
+             )
+
+    assert acked.key == "out_1"
+    assert acked.acked_at == now
+    assert acked.consumer == "dispatcher"
+
+    assert {:ok, []} = IntentLedger.Store.Memory.outbox(store, MyApp.IntentLedger, Outbox.read("dispatcher"), [])
+
+    assert {:ok, [replayed]} =
+             IntentLedger.Store.Memory.outbox(store, MyApp.IntentLedger, Outbox.replay(cursor: 0), [])
+
+    assert replayed.key == "out_1"
+    assert replayed.acked_at == now
+
+    assert {:error, %Conflict{type: :outbox}} =
+             IntentLedger.Store.Memory.outbox(
+               store,
+               MyApp.IntentLedger,
+               Outbox.ack("out_1", "dispatcher", metadata: %{acked_at: now}),
+               []
+             )
+  end
 end

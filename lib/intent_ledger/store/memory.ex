@@ -21,7 +21,7 @@ defmodule IntentLedger.Store.Memory do
     Time
   }
 
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Outbox}
 
   defstruct intents: %{},
             states: %{},
@@ -29,6 +29,8 @@ defmodule IntentLedger.Store.Memory do
             idempotency: %{},
             commands: %{},
             shard_leases: %{},
+            outbox: %{},
+            next_outbox_sequence: 1,
             streams: %{}
 
   @type t :: %__MODULE__{
@@ -38,6 +40,8 @@ defmodule IntentLedger.Store.Memory do
           idempotency: %{optional(String.t()) => String.t()},
           commands: %{optional(String.t()) => map()},
           shard_leases: %{optional(String.t()) => map()},
+          outbox: %{optional(String.t()) => map()},
+          next_outbox_sequence: pos_integer(),
           streams: %{optional(String.t()) => [Jido.Signal.t()]}
         }
 
@@ -216,7 +220,11 @@ defmodule IntentLedger.Store.Memory do
   end
 
   def handle_call({:store_v1_outbox, _ledger, request, _opts}, _from, state) do
-    {:reply, unsupported_store_v1(:outbox, request), state}
+    case apply_outbox_request(state, request) do
+      {:ok, reply, next_state} -> {:reply, {:ok, reply}, next_state}
+      {:error, conflict} -> {:reply, {:error, conflict}, state}
+      :unsupported -> {:reply, unsupported_store_v1(:outbox, request), state}
+    end
   end
 
   def handle_call({:submit, ledger, %Intent{} = intent, opts}, _from, state) do
@@ -763,7 +771,15 @@ defmodule IntentLedger.Store.Memory do
   defp supported_commit?(%CommitRequest{} = request) do
     Enum.all?(
       request.preconditions,
-      &(&1.type in [:command_absent, :command_replay, :stream_version, :intent_status, :claim_fence, :shard_lease])
+      &(&1.type in [
+          :command_absent,
+          :command_replay,
+          :stream_version,
+          :intent_status,
+          :claim_fence,
+          :shard_lease,
+          :outbox_unacked
+        ])
     ) and
       Enum.all?(
         request.writes,
@@ -774,7 +790,9 @@ defmodule IntentLedger.Store.Memory do
             :put_claim,
             :delete_claim,
             :put_shard_lease,
-            :delete_shard_lease
+            :delete_shard_lease,
+            :put_outbox,
+            :ack_outbox
           ])
       )
   end
@@ -830,6 +848,19 @@ defmodule IntentLedger.Store.Memory do
           nil -> {:cont, :ok}
           conflict -> {:halt, {:error, conflict}}
         end
+
+      %{type: :outbox_unacked, key: entry_id}, :ok ->
+        case Map.fetch(state.outbox, entry_id) do
+          {:ok, entry} ->
+            if is_nil(store_field(entry, :acked_at)) do
+              {:cont, :ok}
+            else
+              {:halt, {:error, Conflict.outbox(entry_id, :unacked, entry)}}
+            end
+
+          :error ->
+            {:halt, {:error, Conflict.outbox(entry_id, :unacked, :missing)}}
+        end
     end)
   end
 
@@ -859,6 +890,13 @@ defmodule IntentLedger.Store.Memory do
 
       %{type: :delete_shard_lease, key: key}, {acc_state, result, signals} ->
         {%{acc_state | shard_leases: Map.delete(acc_state.shard_leases, key)}, result, signals}
+
+      %{type: :put_outbox, key: key, value: value}, {acc_state, result, signals} ->
+        {next_state, _entry} = put_outbox_entry(acc_state, key, value)
+        {next_state, result, signals}
+
+      %{type: :ack_outbox, key: key, metadata: metadata}, {acc_state, result, signals} ->
+        {ack_outbox_entry(acc_state, key, metadata), result, signals}
     end)
   end
 
@@ -1057,6 +1095,60 @@ defmodule IntentLedger.Store.Memory do
     {DateTime.to_unix(store_field(state, :lease_until), :microsecond), store_field(state, :intent_id)}
   end
 
+  defp apply_outbox_request(state, %Outbox{} = request), do: do_apply_outbox_request(state, request)
+
+  defp apply_outbox_request(state, {type, attrs})
+       when type in [:insert, :read, :ack, :replay] and (is_map(attrs) or is_list(attrs)) do
+    apply_outbox_request(state, Outbox.new(type, attrs))
+  end
+
+  defp apply_outbox_request(_state, _request), do: :unsupported
+
+  defp do_apply_outbox_request(state, %Outbox{type: :insert, key: key, value: value}) when not is_nil(key) do
+    {next_state, entry} = put_outbox_entry(state, key, value)
+    {:ok, entry, next_state}
+  end
+
+  defp do_apply_outbox_request(state, %Outbox{type: :read, consumer: consumer} = request) when not is_nil(consumer) do
+    entries =
+      state.outbox
+      |> Map.values()
+      |> Enum.filter(&(is_nil(store_field(&1, :acked_at)) and outbox_after_cursor?(&1, request.cursor)))
+      |> Enum.sort_by(&store_field(&1, :sequence))
+      |> Enum.take(request.limit)
+
+    {:ok, entries, state}
+  end
+
+  defp do_apply_outbox_request(state, %Outbox{type: :replay} = request) do
+    entries =
+      state.outbox
+      |> Map.values()
+      |> Enum.filter(&outbox_after_cursor?(&1, request.cursor))
+      |> Enum.sort_by(&store_field(&1, :sequence))
+      |> Enum.take(request.limit)
+
+    {:ok, entries, state}
+  end
+
+  defp do_apply_outbox_request(state, %Outbox{type: :ack, key: key, consumer: consumer, metadata: metadata})
+       when not is_nil(key) and not is_nil(consumer) do
+    case Map.fetch(state.outbox, key) do
+      {:ok, entry} ->
+        if is_nil(store_field(entry, :acked_at)) do
+          acked = acked_outbox_entry(entry, Map.put(metadata, :consumer, consumer))
+          {:ok, acked, %{state | outbox: Map.put(state.outbox, key, acked)}}
+        else
+          {:error, Conflict.outbox(key, :unacked, entry)}
+        end
+
+      :error ->
+        {:error, Conflict.outbox(key, :unacked, :missing)}
+    end
+  end
+
+  defp do_apply_outbox_request(_state, _request), do: :unsupported
+
   defp shard_lease_value(attrs) do
     %{
       queue: to_string(Map.fetch!(attrs, :queue)),
@@ -1071,6 +1163,36 @@ defmodule IntentLedger.Store.Memory do
 
   defp normalize_attrs(attrs) when is_list(attrs), do: Map.new(attrs)
   defp normalize_attrs(attrs) when is_map(attrs), do: attrs
+
+  defp put_outbox_entry(state, key, value) do
+    sequence = store_field(value, :sequence, state.next_outbox_sequence)
+
+    entry =
+      value
+      |> Map.put(:key, key)
+      |> Map.put(:sequence, sequence)
+      |> Map.put_new(:acked_at, nil)
+
+    next_sequence = max(state.next_outbox_sequence, sequence + 1)
+    next_state = %{state | outbox: Map.put(state.outbox, key, entry), next_outbox_sequence: next_sequence}
+
+    {next_state, entry}
+  end
+
+  defp ack_outbox_entry(state, key, metadata) do
+    outbox = Map.update!(state.outbox, key, &acked_outbox_entry(&1, metadata))
+    %{state | outbox: outbox}
+  end
+
+  defp acked_outbox_entry(entry, metadata) do
+    entry
+    |> Map.put(:acked_at, Map.get(metadata, :acked_at))
+    |> Map.put(:consumer, Map.get(metadata, :consumer))
+  end
+
+  defp outbox_after_cursor?(_entry, nil), do: true
+  defp outbox_after_cursor?(entry, cursor) when is_integer(cursor), do: store_field(entry, :sequence) > cursor
+  defp outbox_after_cursor?(_entry, _cursor), do: true
 
   defp command_signature(%CommitRequest{} = request), do: {request.operation, request.command}
 
