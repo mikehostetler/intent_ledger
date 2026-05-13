@@ -106,10 +106,53 @@ defmodule IntentLedger.Store.Precondition do
   end
 
   @doc """
+  Requires a queue shard lease to be absent or expired at `now`.
+
+  Shard acquire uses this precondition before writing a new lease owner.
+  """
+  @spec shard_available(String.t() | atom(), non_neg_integer(), DateTime.t(), keyword() | map()) :: t()
+  def shard_available(queue, shard, %DateTime{} = now, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.merge(%{key: shard_key(queue, shard), expected: %{available_at: now}})
+    |> then(&new(:shard_lease, &1))
+  end
+
+  @doc """
+  Requires a queue shard lease to be current and owned by `owner_id`.
+
+  Shard renew and release use this precondition to prevent stale shard owners
+  from extending or releasing leases they no longer own.
+  """
+  @spec shard_lease(String.t() | atom(), non_neg_integer(), String.t(), keyword() | map()) :: t()
+  def shard_lease(queue, shard, owner_id, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.merge(%{key: shard_key(queue, shard), expected: %{owner_id: to_string(owner_id), status: :current}})
+    |> then(&new(:shard_lease, &1))
+  end
+
+  @doc """
+  Requires a queue shard lease to be expired at or before `now`.
+
+  Shard expiry and takeover use this precondition to make ownership transfer
+  deterministic across competing nodes.
+  """
+  @spec shard_expired(String.t() | atom(), non_neg_integer(), DateTime.t(), keyword() | map()) :: t()
+  def shard_expired(queue, shard, %DateTime{} = now, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.merge(%{key: shard_key(queue, shard), expected: %{expired_at_or_before: now}})
+    |> then(&new(:shard_lease, &1))
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Precondition.t/0`.
   """
   @spec schema() :: Zoi.schema()
   def schema, do: @schema
+
+  defp shard_key(queue, shard), do: "shard:" <> to_string(queue) <> ":" <> to_string(shard)
 
   defp normalize_attrs(attrs) when is_list(attrs), do: Map.new(attrs)
   defp normalize_attrs(attrs) when is_map(attrs), do: attrs

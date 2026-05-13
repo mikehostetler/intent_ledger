@@ -49,6 +49,27 @@ defmodule IntentLedger.Store do
   claim row with `IntentLedger.Store.Write.delete_claim/2` in the same atomic
   commit as the state transition and lifecycle signals.
 
+  ## Shard Lease Semantics
+
+  Queue shard ownership is represented by a durable lease row keyed by queue and
+  shard. Lease requests use the `{:shard, operation, attrs}` shape where
+  operation is `:acquire`, `:renew`, `:release`, `:expire`, or `:takeover`.
+  A lease is current only when its `lease_until` is strictly greater than the
+  operation time.
+
+  Acquire uses `IntentLedger.Store.Precondition.shard_available/4` and succeeds
+  only when the lease row is absent or expired. Renew and release use
+  `IntentLedger.Store.Precondition.shard_lease/4` and require the current owner
+  to match. Expire and takeover use
+  `IntentLedger.Store.Precondition.shard_expired/4`; takeover then writes the
+  new owner lease in the same atomic operation.
+
+  Failed acquire, renew, release, expire, or takeover requests return
+  `IntentLedger.Store.Conflict.shard_lease/4` without changing ownership.
+  Successful acquire, renew, and takeover write a lease row with
+  `IntentLedger.Store.Write.put_shard_lease/4`; successful release and expiry
+  delete it with `IntentLedger.Store.Write.delete_shard_lease/3`.
+
   The bundled `IntentLedger.Store.Memory` adapter is intended for tests, local
   development, and as the executable contract for durable adapters.
   """
@@ -63,7 +84,8 @@ defmodule IntentLedger.Store do
           | {:history, String.t()}
           | {:stream, String.t(), keyword()}
           | map()
-  @type lease_request :: {:shard, atom(), map()} | map()
+  @type shard_lease_operation :: :acquire | :renew | :release | :expire | :takeover
+  @type lease_request :: {:shard, shard_lease_operation(), map()} | map()
   @type listing_request :: {:due_intents, map()} | {:expired_claims, map()} | map()
   @type outbox_request :: {:insert, map()} | {:read, map()} | {:ack, map()} | {:replay, map()} | map()
 

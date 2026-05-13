@@ -117,10 +117,25 @@ defmodule IntentLedger.Store.Conflict do
   end
 
   @doc """
+  Builds a shard-lease conflict for stale, unexpired, or owner-mismatched leases.
+  """
+  @spec shard_lease(String.t() | atom(), non_neg_integer(), term(), term()) :: t()
+  def shard_lease(queue, shard, expected, actual) do
+    new(:shard_lease,
+      key: shard_key(queue, shard),
+      expected: expected,
+      actual: actual,
+      message: "shard lease conflict"
+    )
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Conflict.t/0`.
   """
   @spec schema() :: Zoi.schema()
   def schema, do: @schema
+
+  defp shard_key(queue, shard), do: "shard:" <> to_string(queue) <> ":" <> to_string(shard)
 
   defp normalize_attrs(attrs) when is_list(attrs), do: Map.new(attrs)
   defp normalize_attrs(attrs) when is_map(attrs), do: attrs

@@ -102,10 +102,34 @@ defmodule IntentLedger.Store.Write do
   end
 
   @doc """
+  Writes or replaces a durable queue shard lease.
+  """
+  @spec put_shard_lease(String.t() | atom(), non_neg_integer(), map(), keyword() | map()) :: t()
+  def put_shard_lease(queue, shard, lease, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.merge(%{key: shard_key(queue, shard), value: lease})
+    |> then(&new(:put_shard_lease, &1))
+  end
+
+  @doc """
+  Deletes a durable queue shard lease after release or expiry.
+  """
+  @spec delete_shard_lease(String.t() | atom(), non_neg_integer(), keyword() | map()) :: t()
+  def delete_shard_lease(queue, shard, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.put(:key, shard_key(queue, shard))
+    |> then(&new(:delete_shard_lease, &1))
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Write.t/0`.
   """
   @spec schema() :: Zoi.schema()
   def schema, do: @schema
+
+  defp shard_key(queue, shard), do: "shard:" <> to_string(queue) <> ":" <> to_string(shard)
 
   defp normalize_attrs(attrs) when is_list(attrs), do: Map.new(attrs)
   defp normalize_attrs(attrs) when is_map(attrs), do: attrs

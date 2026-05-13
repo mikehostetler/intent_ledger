@@ -59,6 +59,8 @@ defmodule IntentLedger.StoreContractTest do
 
   test "store v1 structs publish supported semantic kinds" do
     assert :claim_fence in Precondition.kinds()
+    assert :shard_lease in Precondition.kinds()
+    assert :put_shard_lease in Write.kinds()
     assert :put_outbox in Write.kinds()
     assert :command_replay in Conflict.kinds()
   end
@@ -142,6 +144,55 @@ defmodule IntentLedger.StoreContractTest do
 
     assert Conflict.intent_status("int_1", [:available], :claimed).type == :intent_status
     assert Conflict.claim_fence("clm_1", %{token_hash: "hash_1"}, %{token_hash: "hash_2"}).type == :claim_fence
+  end
+
+  test "shard lease helpers describe acquire renew release expiry and takeover semantics" do
+    now = ~U[2026-01-01 00:00:00Z]
+    lease_until = ~U[2026-01-01 00:00:30Z]
+
+    acquire =
+      Precondition.shard_available(:default, 0, now, metadata: %{operation: :acquire, owner_id: "node-a"})
+
+    lease =
+      Write.put_shard_lease(:default, 0, %{
+        owner_id: "node-a",
+        acquired_at: now,
+        lease_until: lease_until
+      })
+
+    assert acquire.type == :shard_lease
+    assert acquire.key == "shard:default:0"
+    assert acquire.expected == %{available_at: now}
+    assert acquire.metadata.operation == :acquire
+    assert lease.type == :put_shard_lease
+    assert lease.value.owner_id == "node-a"
+
+    for operation <- [:renew, :release] do
+      owner_gate =
+        Precondition.shard_lease("default", 0, "node-a", metadata: %{operation: operation, now: now})
+
+      assert owner_gate.type == :shard_lease
+      assert owner_gate.expected == %{owner_id: "node-a", status: :current}
+      assert owner_gate.metadata.operation == operation
+    end
+
+    for operation <- [:expire, :takeover] do
+      expired_gate =
+        Precondition.shard_expired(:default, 0, now, metadata: %{operation: operation, previous_owner_id: "node-a"})
+
+      assert expired_gate.type == :shard_lease
+      assert expired_gate.expected == %{expired_at_or_before: now}
+      assert expired_gate.metadata.operation == operation
+    end
+
+    assert Write.delete_shard_lease("default", 0).type == :delete_shard_lease
+
+    conflict =
+      Conflict.shard_lease(:default, 0, %{owner_id: "node-a", status: :current}, %{owner_id: "node-b"})
+
+    assert conflict.type == :shard_lease
+    assert conflict.key == "shard:default:0"
+    assert conflict.message == "shard lease conflict"
   end
 
   test "store behaviour exposes semantic v1 callbacks" do
