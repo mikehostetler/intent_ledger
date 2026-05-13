@@ -14,7 +14,7 @@ defmodule IntentLedger.Store.Bedrock do
   use GenServer
 
   alias IntentLedger.{Error, IntentState, Store}
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Outbox}
   alias IntentLedger.Store.Bedrock.{Keyspace, Value}
 
   @dependency :bedrock
@@ -92,7 +92,7 @@ defmodule IntentLedger.Store.Bedrock do
   @doc false
   @impl true
   @spec outbox(Store.ref(), atom(), Store.outbox_request(), keyword()) :: Store.result()
-  def outbox(_ref, _ledger, _request, _opts), do: unavailable()
+  def outbox(ref, ledger, request, opts), do: GenServer.call(ref, {:outbox, ledger, request, opts})
 
   @impl true
   def handle_call({:commit, ledger, %CommitRequest{} = request, opts}, _from, %__MODULE__{} = state) do
@@ -133,6 +133,20 @@ defmodule IntentLedger.Store.Bedrock do
         state.repo,
         fn repo ->
           apply_lease_request(repo, ledger, request)
+        end,
+        transaction_opts(state, opts)
+      )
+
+    {:reply, normalize_transact_result(result), state}
+  end
+
+  @impl true
+  def handle_call({:outbox, ledger, request, opts}, _from, %__MODULE__{} = state) do
+    result =
+      transact(
+        state.repo,
+        fn repo ->
+          apply_outbox_request(repo, ledger, request)
         end,
         transaction_opts(state, opts)
       )
@@ -298,6 +312,10 @@ defmodule IntentLedger.Store.Bedrock do
     shard_lease_check(repo, ledger, key, expected, metadata)
   end
 
+  defp check_precondition(repo, ledger, _request, %{type: :outbox_unacked, key: entry_id}) do
+    outbox_unacked_check(repo, ledger, entry_id)
+  end
+
   defp check_precondition(_repo, _ledger, _request, precondition) do
     {:error,
      adapter_error("Bedrock commit precondition is not implemented yet",
@@ -389,10 +407,13 @@ defmodule IntentLedger.Store.Bedrock do
   end
 
   defp compile_write(repo, ledger, _request, %{type: :put_outbox, key: key, value: value}, acc) do
-    with {:ok, sequence} <- fetch_outbox_sequence(value) do
-      entry = Map.put_new(value, :key, key)
+    with {:ok, _entry} <- put_outbox_entry(repo, ledger, key, value) do
+      {:ok, acc}
+    end
+  end
 
-      put(repo, Keyspace.outbox(ledger, sequence), Value.pack_outbox(entry))
+  defp compile_write(repo, ledger, _request, %{type: :ack_outbox, key: key, metadata: metadata}, acc) do
+    with {:ok, _entry} <- ack_outbox_entry(repo, ledger, key, metadata) do
       {:ok, acc}
     end
   end
@@ -410,6 +431,7 @@ defmodule IntentLedger.Store.Bedrock do
   defp get_range(repo, range), do: apply(repo, :get_range, [range])
   defp clear(repo, key), do: apply(repo, :clear, [key])
   defp add_read_conflict_key(repo, key), do: apply(repo, :add_read_conflict_key, [key])
+  defp add_write_conflict_range(repo, range), do: apply(repo, :add_write_conflict_range, [range])
 
   defp read_stream(repo, ledger, stream) do
     entries = stream_entries(repo, ledger, stream)
@@ -730,6 +752,170 @@ defmodule IntentLedger.Store.Bedrock do
   defp value_field(value, key, default) when is_map(value), do: Map.get(value, key, default)
   defp value_field(_value, _key, default), do: default
 
+  defp apply_outbox_request(repo, ledger, %Outbox{} = request), do: do_apply_outbox_request(repo, ledger, request)
+
+  defp apply_outbox_request(repo, ledger, {type, attrs})
+       when type in [:insert, :read, :ack, :replay] and (is_map(attrs) or is_list(attrs)) do
+    apply_outbox_request(repo, ledger, Outbox.new(type, attrs))
+  end
+
+  defp apply_outbox_request(_repo, _ledger, request), do: {:error, {:unsupported_store_v1_request, :outbox, request}}
+
+  defp do_apply_outbox_request(repo, ledger, %Outbox{type: :insert, key: key, value: value}) when not is_nil(key) do
+    put_outbox_entry(repo, ledger, key, value)
+  end
+
+  defp do_apply_outbox_request(repo, ledger, %Outbox{type: :read, consumer: consumer} = request)
+       when not is_nil(consumer) do
+    with {:ok, entries} <- outbox_entries(repo, ledger) do
+      entries =
+        entries
+        |> Enum.filter(&(is_nil(value_field(&1, :acked_at)) and outbox_after_cursor?(&1, request.cursor)))
+        |> Enum.take(request.limit)
+
+      {:ok, entries}
+    end
+  end
+
+  defp do_apply_outbox_request(repo, ledger, %Outbox{type: :ack, key: key, consumer: consumer, metadata: metadata})
+       when not is_nil(key) and not is_nil(consumer) do
+    ack_outbox_entry(repo, ledger, key, Map.put(metadata, :consumer, consumer))
+  end
+
+  defp do_apply_outbox_request(repo, ledger, %Outbox{type: :replay} = request) do
+    with {:ok, entries} <- outbox_entries(repo, ledger) do
+      entries =
+        entries
+        |> Enum.filter(&outbox_after_cursor?(&1, request.cursor))
+        |> Enum.take(request.limit)
+
+      {:ok, entries}
+    end
+  end
+
+  defp do_apply_outbox_request(_repo, _ledger, request), do: {:error, {:unsupported_store_v1_request, :outbox, request}}
+
+  defp outbox_unacked_check(repo, ledger, entry_id) do
+    case fetch_outbox_entry(repo, ledger, entry_id) do
+      {:ok, nil} ->
+        {:error, Conflict.outbox(entry_id, :unacked, :missing)}
+
+      {:ok, {storage_key, entry}} ->
+        add_read_conflict_key(repo, storage_key)
+
+        if is_nil(value_field(entry, :acked_at)) do
+          :ok
+        else
+          {:error, Conflict.outbox(entry_id, :unacked, entry)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp put_outbox_entry(repo, ledger, key, value) when is_map(value) do
+    entry =
+      value
+      |> Map.put(:key, key)
+      |> Map.put_new(:acked_at, nil)
+
+    with {:ok, sequence} <- resolve_outbox_sequence(repo, ledger, entry) do
+      entry = Map.put(entry, :sequence, sequence)
+      put(repo, Keyspace.outbox(ledger, sequence), Value.pack_outbox(entry))
+      {:ok, entry}
+    end
+  end
+
+  defp put_outbox_entry(_repo, _ledger, key, value) do
+    {:error, adapter_error("outbox value must be a map", reason: :invalid_outbox_value, key: key, value: value)}
+  end
+
+  defp ack_outbox_entry(repo, ledger, key, metadata) do
+    case fetch_outbox_entry(repo, ledger, key) do
+      {:ok, nil} ->
+        {:error, Conflict.outbox(key, :unacked, :missing)}
+
+      {:ok, {storage_key, entry}} ->
+        add_read_conflict_key(repo, storage_key)
+
+        if is_nil(value_field(entry, :acked_at)) do
+          acked =
+            entry
+            |> Map.put(:acked_at, Map.get(metadata, :acked_at))
+            |> Map.put(:consumer, Map.get(metadata, :consumer))
+
+          put(repo, storage_key, Value.pack_outbox(acked))
+          {:ok, acked}
+        else
+          {:error, Conflict.outbox(key, :unacked, entry)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp resolve_outbox_sequence(repo, ledger, entry) do
+    case Map.fetch(entry, :sequence) do
+      {:ok, sequence} when is_integer(sequence) and sequence >= 0 ->
+        {:ok, sequence}
+
+      {:ok, sequence} ->
+        {:error,
+         adapter_error("outbox sequence must be a non-negative integer",
+           reason: :invalid_outbox_sequence,
+           sequence: sequence
+         )}
+
+      :error ->
+        next_outbox_sequence(repo, ledger)
+    end
+  end
+
+  defp next_outbox_sequence(repo, ledger) do
+    range = Keyspace.outbox_range(ledger)
+    add_write_conflict_range(repo, range)
+
+    with {:ok, entries} <- outbox_entries(repo, ledger) do
+      next_sequence =
+        entries
+        |> Enum.map(&value_field(&1, :sequence, 0))
+        |> Enum.max(fn -> 0 end)
+        |> Kernel.+(1)
+
+      {:ok, next_sequence}
+    end
+  end
+
+  defp fetch_outbox_entry(repo, ledger, entry_id) do
+    with {:ok, entries} <- outbox_storage_entries(repo, ledger) do
+      {:ok, Enum.find(entries, fn {_storage_key, entry} -> value_field(entry, :key) == entry_id end)}
+    end
+  end
+
+  defp outbox_entries(repo, ledger) do
+    with {:ok, entries} <- outbox_storage_entries(repo, ledger) do
+      {:ok, Enum.map(entries, fn {_storage_key, entry} -> entry end)}
+    end
+  end
+
+  defp outbox_storage_entries(repo, ledger) do
+    repo
+    |> get_range(Keyspace.outbox_range(ledger))
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.reduce_while({:ok, []}, fn {storage_key, encoded}, {:ok, entries} ->
+      case Value.unpack_outbox(encoded) do
+        {:ok, entry} -> {:cont, {:ok, entries ++ [{storage_key, entry}]}}
+        {:error, reason} -> {:halt, {:error, adapter_error("invalid Bedrock outbox value", reason: reason)}}
+      end
+    end)
+  end
+
+  defp outbox_after_cursor?(_entry, nil), do: true
+  defp outbox_after_cursor?(entry, cursor) when is_integer(cursor), do: value_field(entry, :sequence, 0) > cursor
+  defp outbox_after_cursor?(_entry, _cursor), do: true
+
   defp next_stream_version(stream, metadata, acc) do
     case fetch_metadata_version(metadata) do
       {:ok, version} ->
@@ -773,20 +959,6 @@ defmodule IntentLedger.Store.Bedrock do
       _precondition, acc ->
         acc
     end)
-  end
-
-  defp fetch_outbox_sequence(value) when is_map(value) do
-    case Map.fetch(value, :sequence) do
-      {:ok, sequence} when is_integer(sequence) and sequence >= 0 ->
-        {:ok, sequence}
-
-      _missing_or_invalid ->
-        {:error, adapter_error("put_outbox writes require value.sequence", reason: :missing_outbox_sequence)}
-    end
-  end
-
-  defp fetch_outbox_sequence(_value) do
-    {:error, adapter_error("put_outbox writes require value.sequence", reason: :missing_outbox_sequence)}
   end
 
   defp parse_shard_key("shard:" <> rest) do

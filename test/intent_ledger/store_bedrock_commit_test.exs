@@ -2,7 +2,7 @@ defmodule IntentLedger.StoreBedrockCommitTest do
   use ExUnit.Case, async: true
 
   alias IntentLedger.{Intent, IntentState, Signal}
-  alias IntentLedger.Store.{Bedrock, Commit, CommitRequest, Precondition, Write}
+  alias IntentLedger.Store.{Bedrock, Commit, CommitRequest, Outbox, Precondition, Write}
   alias IntentLedger.Store.Bedrock.{Keyspace, Value}
 
   defmodule FakeRepo do
@@ -34,6 +34,7 @@ defmodule IntentLedger.StoreBedrockCommitTest do
     end
 
     def add_read_conflict_key(key), do: record({:read_conflict, key})
+    def add_write_conflict_range(range), do: record({:write_conflict, range})
 
     def get(key) do
       record({:get, key})
@@ -188,6 +189,138 @@ defmodule IntentLedger.StoreBedrockCommitTest do
     assert {:ok, ^claim} = Value.unpack_claim(claim_value)
     assert {:ok, ^lease} = Value.unpack_shard_lease(lease_value)
     assert {:ok, %{key: "out_1", sequence: 1}} = Value.unpack_outbox(outbox_value)
+  end
+
+  test "allocates outbox sequences when commit omits sequence", %{store: store} do
+    existing = %{key: "out_1", sequence: 1, stream: "intent:int_1", signal: %{id: "sig_1"}, acked_at: nil}
+    outbox_key = Keyspace.outbox(@ledger, 1)
+    values = %{outbox_key => Value.pack_outbox(existing)}
+
+    request =
+      CommitRequest.new(
+        writes: [
+          Write.put_outbox("out_2", %{stream: "intent:int_2", signal: %{id: "sig_2"}, inserted_at: @now})
+        ]
+      )
+
+    assert {:ok, %Commit{}} = Bedrock.commit(store, @ledger, request, transaction_opts: [values: values])
+
+    range = Keyspace.outbox_range(@ledger)
+    next_key = Keyspace.outbox(@ledger, 2)
+
+    assert_receive {:transact, [values: ^values]}
+    assert_receive {:ops, [{:write_conflict, ^range}, {:get_range, ^range}, {:put, ^next_key, encoded}]}
+
+    assert {:ok, decoded} = Value.unpack_outbox(encoded)
+    assert decoded.key == "out_2"
+    assert decoded.sequence == 2
+    assert decoded.acked_at == nil
+    assert decoded.stream == "intent:int_2"
+  end
+
+  test "reads acks and replays outbox entries", %{store: store} do
+    acked = %{key: "out_1", sequence: 1, stream: "intent:int_1", signal: %{id: "sig_1"}, acked_at: @now}
+    unacked = %{key: "out_2", sequence: 2, stream: "intent:int_2", signal: %{id: "sig_2"}, acked_at: nil}
+    acked_key = Keyspace.outbox(@ledger, 1)
+    unacked_key = Keyspace.outbox(@ledger, 2)
+
+    values = %{
+      unacked_key => Value.pack_outbox(unacked),
+      acked_key => Value.pack_outbox(acked)
+    }
+
+    range = Keyspace.outbox_range(@ledger)
+
+    assert {:ok, [^unacked]} =
+             Bedrock.outbox(store, @ledger, Outbox.read("dispatcher"), transaction_opts: [values: values])
+
+    assert_receive {:transact, [values: ^values]}
+    assert_receive {:ops, [{:get_range, ^range}]}
+
+    assert {:ok, delivered} =
+             Bedrock.outbox(
+               store,
+               @ledger,
+               Outbox.ack("out_2", "dispatcher", metadata: %{acked_at: @now}),
+               transaction_opts: [values: values]
+             )
+
+    assert delivered.key == "out_2"
+    assert delivered.consumer == "dispatcher"
+    assert delivered.acked_at == @now
+
+    assert_receive {:transact, [values: ^values]}
+
+    assert_receive {:ops,
+                    [
+                      {:get_range, ^range},
+                      {:read_conflict, ^unacked_key},
+                      {:put, ^unacked_key, encoded_ack}
+                    ]}
+
+    assert {:ok, ^delivered} = Value.unpack_outbox(encoded_ack)
+
+    replay_values = %{values | unacked_key => encoded_ack}
+
+    assert {:ok, replayed} =
+             Bedrock.outbox(store, @ledger, Outbox.replay(cursor: 0, limit: 10),
+               transaction_opts: [values: replay_values]
+             )
+
+    assert Enum.map(replayed, & &1.key) == ["out_1", "out_2"]
+    assert Enum.map(replayed, & &1.acked_at) == [@now, @now]
+
+    assert_receive {:transact, [values: ^replay_values]}
+    assert_receive {:ops, [{:get_range, ^range}]}
+  end
+
+  test "checks outbox_unacked preconditions with read conflict keys", %{store: store} do
+    entry = %{key: "out_1", sequence: 1, stream: "intent:int_1", signal: %{id: "sig_1"}, acked_at: nil}
+    outbox_key = Keyspace.outbox(@ledger, 1)
+    values = %{outbox_key => Value.pack_outbox(entry)}
+    request = CommitRequest.new(preconditions: [Precondition.outbox_unacked("out_1")])
+
+    assert {:ok, %Commit{}} = Bedrock.commit(store, @ledger, request, transaction_opts: [values: values])
+
+    range = Keyspace.outbox_range(@ledger)
+
+    assert_receive {:transact, [values: ^values]}
+    assert_receive {:ops, [{:get_range, ^range}, {:read_conflict, ^outbox_key}]}
+
+    acked_values = %{outbox_key => Value.pack_outbox(%{entry | acked_at: @now})}
+
+    assert {:error, %IntentLedger.Store.Conflict{type: :outbox}} =
+             Bedrock.commit(store, @ledger, request, transaction_opts: [values: acked_values])
+
+    assert_receive {:transact, [values: ^acked_values]}
+    assert_receive {:ops, [{:get_range, ^range}, {:read_conflict, ^outbox_key}]}
+  end
+
+  test "compiles ack_outbox writes", %{store: store} do
+    entry = %{key: "out_1", sequence: 1, stream: "intent:int_1", signal: %{id: "sig_1"}, acked_at: nil}
+    outbox_key = Keyspace.outbox(@ledger, 1)
+    values = %{outbox_key => Value.pack_outbox(entry)}
+
+    request =
+      CommitRequest.new(writes: [Write.ack_outbox("out_1", metadata: %{acked_at: @now, consumer: "dispatcher"})])
+
+    assert {:ok, %Commit{}} = Bedrock.commit(store, @ledger, request, transaction_opts: [values: values])
+
+    range = Keyspace.outbox_range(@ledger)
+
+    assert_receive {:transact, [values: ^values]}
+
+    assert_receive {:ops,
+                    [
+                      {:get_range, ^range},
+                      {:read_conflict, ^outbox_key},
+                      {:put, ^outbox_key, encoded}
+                    ]}
+
+    assert {:ok, decoded} = Value.unpack_outbox(encoded)
+    assert decoded.key == "out_1"
+    assert decoded.acked_at == @now
+    assert decoded.consumer == "dispatcher"
   end
 
   test "checks command_absent before writing command replay records", %{store: store} do
@@ -478,24 +611,11 @@ defmodule IntentLedger.StoreBedrockCommitTest do
                     ]}
   end
 
-  test "rejects preconditions reserved for later semantic compilers", %{store: store} do
-    request = CommitRequest.new(preconditions: [Precondition.outbox_unacked("out_1")])
+  test "rejects unsupported writes reserved for later Bedrock semantic stories", %{store: store} do
+    request = CommitRequest.new(writes: [%{type: :unknown_write}])
 
     assert {:error,
-            %IntentLedger.Error.AdapterRuntimeError{
-              details: %{reason: :unsupported_precondition, precondition_type: :outbox_unacked}
-            }} =
-             Bedrock.commit(store, @ledger, request, [])
-
-    assert_receive {:transact, []}
-    assert_receive {:ops, []}
-  end
-
-  test "rejects writes that need later Bedrock semantic stories", %{store: store} do
-    request = CommitRequest.new(writes: [Write.ack_outbox("out_1")])
-
-    assert {:error,
-            %IntentLedger.Error.AdapterRuntimeError{details: %{reason: :unsupported_write, write_type: :ack_outbox}}} =
+            %IntentLedger.Error.AdapterRuntimeError{details: %{reason: :unsupported_write, write_type: :unknown_write}}} =
              Bedrock.commit(store, @ledger, request, [])
   end
 end
