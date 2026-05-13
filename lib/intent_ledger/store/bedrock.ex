@@ -244,6 +244,37 @@ defmodule IntentLedger.Store.Bedrock do
     end
   end
 
+  defp check_precondition(repo, ledger, _request, %{type: :intent_status, key: intent_id, expected: expected}) do
+    state_key = Keyspace.state(ledger, intent_id)
+    add_read_conflict_key(repo, state_key)
+
+    case fetch_state(repo, ledger, intent_id) do
+      {:ok, nil} ->
+        {:error, Conflict.intent_status(intent_id, expected, :missing)}
+
+      {:ok, state} ->
+        actual = state.status
+
+        if actual in expected do
+          :ok
+        else
+          {:error, Conflict.intent_status(intent_id, expected, actual)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp check_precondition(repo, ledger, _request, %{
+         type: :claim_fence,
+         key: claim_id,
+         expected: expected,
+         metadata: metadata
+       }) do
+    claim_fence_conflict(repo, ledger, claim_id, expected, metadata)
+  end
+
   defp check_precondition(_repo, _ledger, _request, precondition) do
     {:error,
      adapter_error("Bedrock commit precondition is not implemented yet",
@@ -355,6 +386,7 @@ defmodule IntentLedger.Store.Bedrock do
   defp get(repo, key), do: apply(repo, :get, [key])
   defp get_range(repo, range), do: apply(repo, :get_range, [range])
   defp clear(repo, key), do: apply(repo, :clear, [key])
+  defp add_read_conflict_key(repo, key), do: apply(repo, :add_read_conflict_key, [key])
 
   defp read_stream(repo, ledger, stream) do
     entries = stream_entries(repo, ledger, stream)
@@ -456,6 +488,66 @@ defmodule IntentLedger.Store.Bedrock do
         end
     end
   end
+
+  defp fetch_claim(repo, ledger, claim_id) do
+    case get(repo, Keyspace.claim(ledger, claim_id)) do
+      nil ->
+        {:ok, nil}
+
+      encoded ->
+        case Value.unpack_claim(encoded) do
+          {:ok, claim} -> {:ok, claim}
+          {:error, reason} -> {:error, adapter_error("invalid Bedrock claim value", reason: reason)}
+        end
+    end
+  end
+
+  defp claim_fence_conflict(repo, ledger, claim_id, expected, metadata) do
+    claim_key = Keyspace.claim(ledger, claim_id)
+    add_read_conflict_key(repo, claim_key)
+
+    with {:ok, claim} when not is_nil(claim) <- fetch_claim(repo, ledger, claim_id),
+         true <- value_field(claim, :token_hash) == Map.get(expected, :token_hash),
+         {:ok, state} when not is_nil(state) <- fetch_claim_state(repo, ledger, claim_id, claim),
+         true <- claim_state_current?(claim_id, state),
+         true <- lease_current?(claim, Map.get(metadata, :now)) do
+      :ok
+    else
+      {:ok, nil} ->
+        {:error, Conflict.claim_fence(claim_id, expected, :missing)}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _failed_check ->
+        {:ok, claim} = fetch_claim(repo, ledger, claim_id)
+        {:error, Conflict.claim_fence(claim_id, expected, claim || :missing)}
+    end
+  end
+
+  defp fetch_claim_state(repo, ledger, _claim_id, claim) do
+    intent_id = value_field(claim, :intent_id)
+    state_key = Keyspace.state(ledger, intent_id)
+    add_read_conflict_key(repo, state_key)
+    fetch_state(repo, ledger, intent_id)
+  end
+
+  defp claim_state_current?(claim_id, %IntentState{} = state) do
+    state.status == :claimed and state.claim_id in [nil, claim_id]
+  end
+
+  defp lease_current?(_claim, nil), do: true
+
+  defp lease_current?(claim, %DateTime{} = now) do
+    case value_field(claim, :lease_until) do
+      %DateTime{} = lease_until -> DateTime.compare(lease_until, now) == :gt
+      _missing_or_invalid -> false
+    end
+  end
+
+  defp value_field(value, key, default \\ nil)
+  defp value_field(value, key, default) when is_map(value), do: Map.get(value, key, default)
+  defp value_field(_value, _key, default), do: default
 
   defp next_stream_version(stream, metadata, acc) do
     case fetch_metadata_version(metadata) do

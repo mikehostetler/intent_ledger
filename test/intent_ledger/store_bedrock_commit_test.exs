@@ -33,6 +33,8 @@ defmodule IntentLedger.StoreBedrockCommitTest do
       :ok
     end
 
+    def add_read_conflict_key(key), do: record({:read_conflict, key})
+
     def get(key) do
       record({:get, key})
       Map.get(Process.get(:values, %{}), key)
@@ -319,12 +321,93 @@ defmodule IntentLedger.StoreBedrockCommitTest do
              Bedrock.read(store, @ledger, {:stream, "intent:int_1", []}, transaction_opts: [values: values])
   end
 
-  test "rejects preconditions reserved for later semantic compilers", %{store: store} do
+  test "checks intent status with read conflict keys", %{store: store} do
+    state = %IntentState{
+      intent_id: "int_1",
+      queue: "default",
+      shard: 0,
+      status: :available,
+      visible_at: @now
+    }
+
+    state_key = Keyspace.state(@ledger, "int_1")
+    values = %{state_key => Value.pack_state(state)}
+    request = CommitRequest.new(preconditions: [Precondition.intent_status("int_1", [:available, :retry_scheduled])])
+
+    assert {:ok, %Commit{}} = Bedrock.commit(store, @ledger, request, transaction_opts: [values: values])
+
+    assert_receive {:transact, [values: ^values]}
+    assert_receive {:ops, [{:read_conflict, ^state_key}, {:get, ^state_key}]}
+  end
+
+  test "returns intent status conflicts when acquisition state is stale", %{store: store} do
+    state = %IntentState{
+      intent_id: "int_1",
+      queue: "default",
+      shard: 0,
+      status: :claimed,
+      visible_at: @now
+    }
+
+    state_key = Keyspace.state(@ledger, "int_1")
+    values = %{state_key => Value.pack_state(state)}
     request = CommitRequest.new(preconditions: [Precondition.intent_status("int_1", [:available])])
+
+    assert {:error, %IntentLedger.Store.Conflict{type: :intent_status, expected: [:available], actual: :claimed}} =
+             Bedrock.commit(store, @ledger, request, transaction_opts: [values: values])
+  end
+
+  test "checks claim fences against claim and state rows", %{store: store} do
+    claim = %{intent_id: "int_1", token_hash: "hash", lease_until: DateTime.add(@now, 30, :second)}
+    state = %IntentState{intent_id: "int_1", queue: "default", shard: 0, status: :claimed, claim_id: "clm_1"}
+    claim_key = Keyspace.claim(@ledger, "clm_1")
+    state_key = Keyspace.state(@ledger, "int_1")
+    values = %{claim_key => Value.pack_claim(claim), state_key => Value.pack_state(state)}
+
+    request =
+      CommitRequest.new(preconditions: [Precondition.claim_fence("clm_1", "hash", metadata: %{now: @now})])
+
+    assert {:ok, %Commit{}} = Bedrock.commit(store, @ledger, request, transaction_opts: [values: values])
+
+    assert_receive {:transact, [values: ^values]}
+
+    assert_receive {:ops,
+                    [
+                      {:read_conflict, ^claim_key},
+                      {:get, ^claim_key},
+                      {:read_conflict, ^state_key},
+                      {:get, ^state_key}
+                    ]}
+  end
+
+  test "rejects stale or expired claim fences", %{store: store} do
+    claim = %{intent_id: "int_1", token_hash: "hash", lease_until: DateTime.add(@now, -1, :second)}
+    state = %IntentState{intent_id: "int_1", queue: "default", shard: 0, status: :claimed, claim_id: "clm_1"}
+
+    values = %{
+      Keyspace.claim(@ledger, "clm_1") => Value.pack_claim(claim),
+      Keyspace.state(@ledger, "int_1") => Value.pack_state(state)
+    }
+
+    expired =
+      CommitRequest.new(preconditions: [Precondition.claim_fence("clm_1", "hash", metadata: %{now: @now})])
+
+    assert {:error, %IntentLedger.Store.Conflict{type: :claim_fence}} =
+             Bedrock.commit(store, @ledger, expired, transaction_opts: [values: values])
+
+    stale_token =
+      CommitRequest.new(preconditions: [Precondition.claim_fence("clm_1", "other_hash", metadata: %{now: @now})])
+
+    assert {:error, %IntentLedger.Store.Conflict{type: :claim_fence}} =
+             Bedrock.commit(store, @ledger, stale_token, transaction_opts: [values: values])
+  end
+
+  test "rejects preconditions reserved for later semantic compilers", %{store: store} do
+    request = CommitRequest.new(preconditions: [Precondition.shard_available(:default, 0, @now)])
 
     assert {:error,
             %IntentLedger.Error.AdapterRuntimeError{
-              details: %{reason: :unsupported_precondition, precondition_type: :intent_status}
+              details: %{reason: :unsupported_precondition, precondition_type: :shard_lease}
             }} =
              Bedrock.commit(store, @ledger, request, [])
 
