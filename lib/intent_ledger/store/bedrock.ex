@@ -82,7 +82,7 @@ defmodule IntentLedger.Store.Bedrock do
   @doc false
   @impl true
   @spec lease(Store.ref(), atom(), Store.lease_request(), keyword()) :: Store.result()
-  def lease(_ref, _ledger, _request, _opts), do: unavailable()
+  def lease(ref, ledger, request, opts), do: GenServer.call(ref, {:lease, ledger, request, opts})
 
   @doc false
   @impl true
@@ -124,6 +124,20 @@ defmodule IntentLedger.Store.Bedrock do
 
   def handle_call({:read, _ledger, request, _opts}, _from, %__MODULE__{} = state) do
     {:reply, {:error, {:unsupported_store_v1_request, :read, request}}, state}
+  end
+
+  @impl true
+  def handle_call({:lease, ledger, request, opts}, _from, %__MODULE__{} = state) do
+    result =
+      transact(
+        state.repo,
+        fn repo ->
+          apply_lease_request(repo, ledger, request)
+        end,
+        transaction_opts(state, opts)
+      )
+
+    {:reply, normalize_transact_result(result), state}
   end
 
   @doc false
@@ -273,6 +287,15 @@ defmodule IntentLedger.Store.Bedrock do
          metadata: metadata
        }) do
     claim_fence_conflict(repo, ledger, claim_id, expected, metadata)
+  end
+
+  defp check_precondition(repo, ledger, _request, %{
+         type: :shard_lease,
+         key: key,
+         expected: expected,
+         metadata: metadata
+       }) do
+    shard_lease_check(repo, ledger, key, expected, metadata)
   end
 
   defp check_precondition(_repo, _ledger, _request, precondition) do
@@ -502,6 +525,164 @@ defmodule IntentLedger.Store.Bedrock do
     end
   end
 
+  defp fetch_shard_lease(repo, ledger, key) do
+    with {:ok, queue, shard} <- parse_shard_key(key) do
+      case get(repo, Keyspace.shard_lease(ledger, queue, shard)) do
+        nil ->
+          {:ok, nil}
+
+        encoded ->
+          case Value.unpack_shard_lease(encoded) do
+            {:ok, lease} -> {:ok, lease}
+            {:error, reason} -> {:error, adapter_error("invalid Bedrock shard lease value", reason: reason)}
+          end
+      end
+    end
+  end
+
+  defp shard_lease_check(repo, ledger, key, expected, metadata) do
+    with {:ok, queue, shard} <- parse_shard_key(key) do
+      lease_key = Keyspace.shard_lease(ledger, queue, shard)
+      add_read_conflict_key(repo, lease_key)
+
+      case fetch_shard_lease(repo, ledger, key) do
+        {:ok, lease} ->
+          if shard_lease_matches?(lease, expected, metadata) do
+            :ok
+          else
+            {:error,
+             Conflict.new(:shard_lease,
+               key: key,
+               expected: expected,
+               actual: lease || :missing,
+               message: "shard lease conflict"
+             )}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp shard_lease_matches?(lease, %{available_at: now}, _metadata), do: is_nil(lease) or lease_expired?(lease, now)
+
+  defp shard_lease_matches?(lease, %{expired_at_or_before: now}, _metadata),
+    do: not is_nil(lease) and lease_expired?(lease, now)
+
+  defp shard_lease_matches?(lease, %{status: :current, owner_id: owner_id}, metadata) do
+    not is_nil(lease) and value_field(lease, :owner_id) == owner_id and lease_current?(lease, Map.get(metadata, :now))
+  end
+
+  defp shard_lease_matches?(_lease, _expected, _metadata), do: false
+
+  defp lease_expired?(_lease, nil), do: false
+
+  defp lease_expired?(lease, %DateTime{} = now) do
+    case value_field(lease, :lease_until) do
+      %DateTime{} = lease_until -> DateTime.compare(lease_until, now) != :gt
+      _missing_or_invalid -> false
+    end
+  end
+
+  defp apply_lease_request(repo, ledger, {:shard, operation, attrs}) when is_map(attrs) or is_list(attrs) do
+    attrs = normalize_attrs(attrs)
+
+    with {:ok, queue} <- fetch_attr(attrs, :queue),
+         {:ok, shard} <- fetch_attr(attrs, :shard),
+         {:ok, key} <- {:ok, shard_key(queue, shard)} do
+      do_apply_lease_request(repo, ledger, operation, key, attrs)
+    else
+      _missing_or_invalid -> {:error, {:unsupported_store_v1_request, :lease, {:shard, operation, attrs}}}
+    end
+  end
+
+  defp apply_lease_request(_repo, _ledger, request), do: {:error, {:unsupported_store_v1_request, :lease, request}}
+
+  defp do_apply_lease_request(repo, ledger, :acquire, key, attrs) do
+    expected = %{available_at: Map.get(attrs, :now)}
+
+    with :ok <- shard_lease_check(repo, ledger, key, expected, %{}) do
+      lease = shard_lease_value(attrs)
+      put_shard_lease(repo, ledger, key, lease)
+      {:ok, lease}
+    end
+  end
+
+  defp do_apply_lease_request(repo, ledger, :renew, key, attrs) do
+    expected = %{owner_id: to_string(Map.fetch!(attrs, :owner_id)), status: :current}
+
+    with :ok <- shard_lease_check(repo, ledger, key, expected, %{now: Map.get(attrs, :now)}) do
+      lease = shard_lease_value(attrs)
+      put_shard_lease(repo, ledger, key, lease)
+      {:ok, lease}
+    end
+  end
+
+  defp do_apply_lease_request(repo, ledger, :release, key, attrs) do
+    expected = %{owner_id: to_string(Map.fetch!(attrs, :owner_id)), status: :current}
+
+    with :ok <- shard_lease_check(repo, ledger, key, expected, %{now: Map.get(attrs, :now)}),
+         {:ok, lease} <- fetch_shard_lease(repo, ledger, key) do
+      clear_shard_lease(repo, ledger, key)
+      {:ok, lease}
+    end
+  end
+
+  defp do_apply_lease_request(repo, ledger, :expire, key, attrs) do
+    expected = %{expired_at_or_before: Map.get(attrs, :now)}
+
+    with :ok <- shard_lease_check(repo, ledger, key, expected, %{}),
+         {:ok, lease} <- fetch_shard_lease(repo, ledger, key) do
+      clear_shard_lease(repo, ledger, key)
+      {:ok, lease}
+    end
+  end
+
+  defp do_apply_lease_request(repo, ledger, :takeover, key, attrs) do
+    expected = %{expired_at_or_before: Map.get(attrs, :now)}
+
+    with :ok <- shard_lease_check(repo, ledger, key, expected, %{}) do
+      lease = shard_lease_value(attrs)
+      put_shard_lease(repo, ledger, key, lease)
+      {:ok, lease}
+    end
+  end
+
+  defp do_apply_lease_request(_repo, _ledger, operation, _key, _attrs),
+    do: {:error, {:unsupported_store_v1_request, :lease, {:shard, operation}}}
+
+  defp put_shard_lease(repo, ledger, key, lease) do
+    with {:ok, queue, shard} <- parse_shard_key(key) do
+      put(repo, Keyspace.shard_lease(ledger, queue, shard), Value.pack_shard_lease(lease))
+    end
+  end
+
+  defp clear_shard_lease(repo, ledger, key) do
+    with {:ok, queue, shard} <- parse_shard_key(key) do
+      clear(repo, Keyspace.shard_lease(ledger, queue, shard))
+    end
+  end
+
+  defp shard_lease_value(attrs) do
+    %{
+      queue: to_string(Map.fetch!(attrs, :queue)),
+      shard: Map.fetch!(attrs, :shard),
+      owner_id: to_string(Map.fetch!(attrs, :owner_id)),
+      lease_until: Map.fetch!(attrs, :lease_until)
+    }
+  end
+
+  defp normalize_attrs(attrs) when is_list(attrs), do: Map.new(attrs)
+  defp normalize_attrs(attrs) when is_map(attrs), do: attrs
+
+  defp fetch_attr(attrs, key) do
+    case Map.fetch(attrs, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> :error
+    end
+  end
+
   defp claim_fence_conflict(repo, ledger, claim_id, expected, metadata) do
     claim_key = Keyspace.claim(ledger, claim_id)
     add_read_conflict_key(repo, claim_key)
@@ -620,6 +801,8 @@ defmodule IntentLedger.Store.Bedrock do
 
   defp parse_shard_key(key),
     do: {:error, adapter_error("invalid shard lease key", reason: :invalid_shard_key, key: key)}
+
+  defp shard_key(queue, shard), do: "shard:" <> to_string(queue) <> ":" <> to_string(shard)
 
   defp parse_shard(queue, shard) do
     case Integer.parse(shard) do

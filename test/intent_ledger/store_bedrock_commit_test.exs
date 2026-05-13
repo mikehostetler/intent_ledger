@@ -402,12 +402,88 @@ defmodule IntentLedger.StoreBedrockCommitTest do
              Bedrock.commit(store, @ledger, stale_token, transaction_opts: [values: values])
   end
 
-  test "rejects preconditions reserved for later semantic compilers", %{store: store} do
+  test "checks shard lease preconditions with read conflict keys", %{store: store} do
+    lease_until = DateTime.add(@now, 30, :second)
+    lease = %{queue: "default", shard: 0, owner_id: "node-a", lease_until: lease_until}
+    lease_key = Keyspace.shard_lease(@ledger, :default, 0)
+    values = %{lease_key => Value.pack_shard_lease(lease)}
+
+    request =
+      CommitRequest.new(preconditions: [Precondition.shard_lease(:default, 0, "node-a", metadata: %{now: @now})])
+
+    assert {:ok, %Commit{}} = Bedrock.commit(store, @ledger, request, transaction_opts: [values: values])
+
+    assert_receive {:transact, [values: ^values]}
+    assert_receive {:ops, [{:read_conflict, ^lease_key}, {:get, ^lease_key}]}
+  end
+
+  test "returns shard lease conflicts for current leases that are not available", %{store: store} do
+    lease = %{queue: "default", shard: 0, owner_id: "node-a", lease_until: DateTime.add(@now, 30, :second)}
+    lease_key = Keyspace.shard_lease(@ledger, :default, 0)
+    values = %{lease_key => Value.pack_shard_lease(lease)}
     request = CommitRequest.new(preconditions: [Precondition.shard_available(:default, 0, @now)])
+
+    assert {:error, %IntentLedger.Store.Conflict{type: :shard_lease}} =
+             Bedrock.commit(store, @ledger, request, transaction_opts: [values: values])
+  end
+
+  test "acquires renews releases and takes over shard leases", %{store: store} do
+    lease_until = DateTime.add(@now, 30, :second)
+    lease_key = Keyspace.shard_lease(@ledger, :default, 0)
+
+    acquire = {:shard, :acquire, %{queue: :default, shard: 0, owner_id: "node-a", lease_until: lease_until, now: @now}}
+
+    assert {:ok, %{owner_id: "node-a"} = acquired} = Bedrock.lease(store, @ledger, acquire, [])
+
+    assert_receive {:transact, []}
+    assert_receive {:ops, [{:read_conflict, ^lease_key}, {:get, ^lease_key}, {:put, ^lease_key, encoded_acquire}]}
+    assert {:ok, ^acquired} = Value.unpack_shard_lease(encoded_acquire)
+
+    renewed_until = DateTime.add(@now, 60, :second)
+    current_values = %{lease_key => encoded_acquire}
+    renew = {:shard, :renew, %{queue: :default, shard: 0, owner_id: "node-a", lease_until: renewed_until, now: @now}}
+
+    assert {:ok, %{lease_until: ^renewed_until}} =
+             Bedrock.lease(store, @ledger, renew, transaction_opts: [values: current_values])
+
+    assert_receive {:transact, [values: ^current_values]}
+    assert_receive {:ops, [{:read_conflict, ^lease_key}, {:get, ^lease_key}, {:put, ^lease_key, _encoded_renew}]}
+
+    expired = %{acquired | lease_until: DateTime.add(@now, -1, :second)}
+    expired_values = %{lease_key => Value.pack_shard_lease(expired)}
+
+    takeover =
+      {:shard, :takeover, %{queue: :default, shard: 0, owner_id: "node-b", lease_until: renewed_until, now: @now}}
+
+    assert {:ok, %{owner_id: "node-b"}} =
+             Bedrock.lease(store, @ledger, takeover, transaction_opts: [values: expired_values])
+  end
+
+  test "release clears a current shard lease and returns the previous lease", %{store: store} do
+    lease = %{queue: "default", shard: 0, owner_id: "node-a", lease_until: DateTime.add(@now, 30, :second)}
+    lease_key = Keyspace.shard_lease(@ledger, :default, 0)
+    values = %{lease_key => Value.pack_shard_lease(lease)}
+    release = {:shard, :release, %{queue: :default, shard: 0, owner_id: "node-a", now: @now}}
+
+    assert {:ok, ^lease} = Bedrock.lease(store, @ledger, release, transaction_opts: [values: values])
+
+    assert_receive {:transact, [values: ^values]}
+
+    assert_receive {:ops,
+                    [
+                      {:read_conflict, ^lease_key},
+                      {:get, ^lease_key},
+                      {:get, ^lease_key},
+                      {:clear, ^lease_key}
+                    ]}
+  end
+
+  test "rejects preconditions reserved for later semantic compilers", %{store: store} do
+    request = CommitRequest.new(preconditions: [Precondition.outbox_unacked("out_1")])
 
     assert {:error,
             %IntentLedger.Error.AdapterRuntimeError{
-              details: %{reason: :unsupported_precondition, precondition_type: :shard_lease}
+              details: %{reason: :unsupported_precondition, precondition_type: :outbox_unacked}
             }} =
              Bedrock.commit(store, @ledger, request, [])
 
