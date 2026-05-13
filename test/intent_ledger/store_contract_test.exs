@@ -1,7 +1,7 @@
 defmodule IntentLedger.StoreContractTest do
   use ExUnit.Case, async: true
 
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Precondition, Write}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Precondition, Write}
 
   test "commit request structs compose preconditions and writes" do
     precondition = Precondition.new(:stream_version, stream: "intent:int_1", expected: 1)
@@ -49,15 +49,19 @@ defmodule IntentLedger.StoreContractTest do
     assert %Zoi.Types.Struct{} = Precondition.schema()
     assert %Zoi.Types.Struct{} = Write.schema()
     assert %Zoi.Types.Struct{} = Conflict.schema()
+    assert %Zoi.Types.Struct{} = Listing.schema()
 
     assert {:ok, %CommitRequest{}} = Zoi.parse(CommitRequest.schema(), CommitRequest.new())
     assert {:ok, %Commit{}} = Zoi.parse(Commit.schema(), Commit.new())
     assert {:ok, %Precondition{}} = Zoi.parse(Precondition.schema(), Precondition.new(:command_absent))
     assert {:ok, %Write{}} = Zoi.parse(Write.schema(), Write.new(:put_idempotency))
     assert {:ok, %Conflict{}} = Zoi.parse(Conflict.schema(), Conflict.new(:claim_fence))
+    assert {:ok, %Listing{}} = Zoi.parse(Listing.schema(), Listing.due_intents(:default, 0, ~U[2026-01-01 00:00:00Z]))
   end
 
   test "store v1 structs publish supported semantic kinds" do
+    assert :due_intents in Listing.kinds()
+    assert :expired_claims in Listing.kinds()
     assert :claim_fence in Precondition.kinds()
     assert :shard_lease in Precondition.kinds()
     assert :put_shard_lease in Write.kinds()
@@ -193,6 +197,31 @@ defmodule IntentLedger.StoreContractTest do
     assert conflict.type == :shard_lease
     assert conflict.key == "shard:default:0"
     assert conflict.message == "shard lease conflict"
+  end
+
+  test "listing helpers describe due intent and expired claim scans" do
+    now = ~U[2026-01-01 00:00:00Z]
+
+    due = Listing.due_intents(:default, 0, now, limit: 25, cursor: "page-1")
+
+    assert due.type == :due_intents
+    assert due.queue == "default"
+    assert due.shard == 0
+    assert due.at == now
+    assert due.limit == 25
+    assert due.cursor == "page-1"
+    assert due.order == [:priority_desc, :visible_at_asc, :intent_id_asc]
+    assert Listing.to_request(due) == {:due_intents, Map.delete(Map.from_struct(due), :type)}
+
+    expired = Listing.expired_claims("default", nil, now, metadata: %{recovery_owner: "node-a"})
+
+    assert expired.type == :expired_claims
+    assert expired.queue == "default"
+    assert expired.shard == nil
+    assert expired.at == now
+    assert expired.order == [:lease_until_asc, :intent_id_asc]
+    assert expired.metadata.recovery_owner == "node-a"
+    assert Listing.to_request(expired) == {:expired_claims, Map.delete(Map.from_struct(expired), :type)}
   end
 
   test "store behaviour exposes semantic v1 callbacks" do

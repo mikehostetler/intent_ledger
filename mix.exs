@@ -124,6 +124,7 @@ defmodule IntentLedger.MixProject do
           IntentLedger.Store.Commit,
           IntentLedger.Store.CommitRequest,
           IntentLedger.Store.Conflict,
+          IntentLedger.Store.Listing,
           IntentLedger.Store.Memory,
           IntentLedger.Store.Precondition,
           IntentLedger.Store.Write

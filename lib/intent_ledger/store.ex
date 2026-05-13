@@ -70,11 +70,25 @@ defmodule IntentLedger.Store do
   `IntentLedger.Store.Write.put_shard_lease/4`; successful release and expiry
   delete it with `IntentLedger.Store.Write.delete_shard_lease/3`.
 
+  ## Listing Semantics
+
+  Listing requests are read-only index scans expressed as
+  `IntentLedger.Store.Listing` structs or `{:due_intents | :expired_claims,
+  attrs}` tuples. Due-intent listings filter by queue, optional shard, and
+  `visible_at <= at`; only `:available` and `:retry_scheduled` states are
+  returned. Results are ordered by priority descending, then `visible_at`
+  ascending, then intent id ascending.
+
+  Expired-claim listings filter by queue, optional shard, `:claimed` status,
+  and `lease_until <= at`. Results are ordered by `lease_until` ascending and
+  then intent id ascending. Listing callbacks must not mutate claim or intent
+  state; recovery is a later commit that uses the returned records.
+
   The bundled `IntentLedger.Store.Memory` adapter is intended for tests, local
   development, and as the executable contract for durable adapters.
   """
 
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing}
 
   @type ref :: GenServer.server()
   @type result :: {:ok, term()} | {:error, term()}
@@ -86,7 +100,7 @@ defmodule IntentLedger.Store do
           | map()
   @type shard_lease_operation :: :acquire | :renew | :release | :expire | :takeover
   @type lease_request :: {:shard, shard_lease_operation(), map()} | map()
-  @type listing_request :: {:due_intents, map()} | {:expired_claims, map()} | map()
+  @type listing_request :: Listing.t() | {:due_intents, map()} | {:expired_claims, map()} | map()
   @type outbox_request :: {:insert, map()} | {:read, map()} | {:ack, map()} | {:replay, map()} | map()
 
   @callback child_spec(keyword()) :: Supervisor.child_spec()
