@@ -71,6 +71,18 @@ defmodule IntentLedger do
   def history(ledger, intent_id), do: GenServer.call(ledger, {:history, intent_id})
 
   @doc """
+  Executes a command signal against a ledger.
+  """
+  @spec command(ledger(), Jido.Signal.t(), keyword()) ::
+          {:ok, term()} | :empty | {:error, term()}
+  def command(ledger, %Jido.Signal{} = signal, opts \\ []) do
+    case Command.normalize(signal) do
+      {:ok, command} -> call(ledger, {:command, command, message_for(command)}, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
   Claims the next available intent from a queue.
   """
   @spec claim(ledger(), String.t() | atom(), String.t(), keyword()) ::
@@ -187,6 +199,70 @@ defmodule IntentLedger do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp message_for(%{operation: :submit, data: data}) do
+    {:submit, Map.fetch!(data, :intent), command_opts(data, [:now])}
+  end
+
+  defp message_for(%{operation: :submit_many, data: data}) do
+    {:submit_many, Map.fetch!(data, :intents), command_opts(data, [:now])}
+  end
+
+  defp message_for(%{operation: :claim, data: data}) do
+    {:claim, Map.fetch!(data, :queue), Map.fetch!(data, :owner_id), command_opts(data, [:limit, :lease_ms, :now])}
+  end
+
+  defp message_for(%{operation: :heartbeat, data: data}) do
+    {:heartbeat, Map.fetch!(data, :claim_id), Map.fetch!(data, :token), command_opts(data, [:lease_ms, :now])}
+  end
+
+  defp message_for(%{operation: :complete, data: data}) do
+    {:complete, Map.fetch!(data, :claim_id), Map.fetch!(data, :token), Map.fetch!(data, :result),
+     command_opts(data, [:now])}
+  end
+
+  defp message_for(%{operation: :fail, data: data}) do
+    {:fail, Map.fetch!(data, :claim_id), Map.fetch!(data, :token), Map.fetch!(data, :error),
+     command_opts(data, [:retry_at, :retry_ms, :now])}
+  end
+
+  defp message_for(%{operation: :release, data: data}) do
+    {:release, Map.fetch!(data, :claim_id), Map.fetch!(data, :token), command_opts(data, [:now])}
+  end
+
+  defp message_for(%{operation: :cancel, data: data}) do
+    {:cancel, Map.fetch!(data, :intent_id), Map.fetch!(data, :reason), command_opts(data, [:now])}
+  end
+
+  defp message_for(%{operation: :requeue, data: data}) do
+    {:requeue, Map.fetch!(data, :intent_id), command_opts(data, [:retry_at, :now])}
+  end
+
+  defp message_for(%{operation: :mark_ambiguous, data: data}) do
+    {:mark_ambiguous, Map.fetch!(data, :intent_id), Map.fetch!(data, :reason), command_opts(data, [:now])}
+  end
+
+  defp message_for(%{operation: :recover, data: data}) do
+    {:recover, Map.fetch!(data, :queue), command_opts(data, [:limit, :now])}
+  end
+
+  defp command_opts(data, fields) do
+    data
+    |> Map.take(fields)
+    |> Enum.map(fn
+      {field, value} when field in [:now, :retry_at] -> {field, normalize_command_time(value)}
+      field_and_value -> field_and_value
+    end)
+  end
+
+  defp normalize_command_time(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      _invalid -> value
+    end
+  end
+
+  defp normalize_command_time(value), do: value
 
   defp call(ledger, message, opts) do
     GenServer.call(ledger, message, Keyword.get(opts, :timeout, 5000))

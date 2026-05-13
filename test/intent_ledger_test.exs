@@ -305,6 +305,21 @@ defmodule IntentLedgerTest do
     assert :empty = IntentLedger.claim(ledger, :default, "worker-2")
   end
 
+  test "command signal entrypoint uses the same replay path as public APIs", %{ledger: ledger} do
+    signal =
+      IntentLedger.Command.submit(MyApp.IntentLedger, %{key: "job:signal", kind: "job.run"}, command_id: "cmd_signal")
+
+    {:ok, via_signal} = IntentLedger.command(ledger, signal)
+
+    {:ok, replayed} =
+      IntentLedger.submit(ledger, %{key: "job:signal-other", kind: "job.run"}, command_id: "cmd_signal")
+
+    assert replayed == via_signal
+
+    {:ok, history} = IntentLedger.history(ledger, via_signal.intent.id)
+    assert Enum.map(history, & &1.type) == ["intent_ledger.intent.submitted", "intent_ledger.intent.available"]
+  end
+
   test "replays duplicate completion command ids after the first commit", %{ledger: ledger} do
     {:ok, record} = IntentLedger.submit(ledger, %{key: "job:complete-replay", kind: "job.run"})
     {:ok, claimed} = IntentLedger.claim(ledger, :default, "worker-1")

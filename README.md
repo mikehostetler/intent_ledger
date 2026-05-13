@@ -92,6 +92,8 @@ commit lifecycle state. Command envelopes are `Jido.Signal` structs with:
   `causation_id`, `correlation_id`, `root_intent_id`, `parent_intent_id`, and
   `depth`.
 
+Call `IntentLedger.command/3` to execute a command signal directly.
+
 The current command signal types are:
 
 - `intent_ledger.command.submit`
