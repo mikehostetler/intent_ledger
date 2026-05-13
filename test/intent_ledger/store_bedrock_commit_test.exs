@@ -21,8 +21,17 @@ defmodule IntentLedger.StoreBedrockCommitTest do
       Process.delete(:values)
     end
 
-    def put(key, value), do: record({:put, key, value})
-    def clear(key), do: record({:clear, key})
+    def put(key, value) do
+      record({:put, key, value})
+      Process.put(:values, Map.put(Process.get(:values, %{}), key, value))
+      :ok
+    end
+
+    def clear(key) do
+      record({:clear, key})
+      Process.put(:values, Map.delete(Process.get(:values, %{}), key))
+      :ok
+    end
 
     def get(key) do
       record({:get, key})
@@ -82,20 +91,61 @@ defmodule IntentLedger.StoreBedrockCommitTest do
 
     assert [
              {:put, intent_key, intent_value},
+             {:get, state_key},
              {:put, state_key, state_value},
+             {:put, queue_key, queue_value},
              {:put, stream_key, signal_value},
              {:put, command_key, command_value}
            ] = ops
 
     assert intent_key == Keyspace.intent(@ledger, intent.id)
     assert state_key == Keyspace.state(@ledger, intent.id)
+    assert queue_key == Keyspace.queue(@ledger, state.queue, state.shard, state.visible_at, 0, state.intent_id)
     assert stream_key == Keyspace.stream(@ledger, "intent:int_1", 1)
     assert command_key == Keyspace.command(@ledger, "cmd_1")
 
     assert {:ok, ^intent} = Value.unpack_intent(intent_value)
     assert {:ok, ^state} = Value.unpack_state(state_value)
+    assert {:ok, ^state} = Value.unpack_state(queue_value)
     assert {:ok, ^signal} = Value.unpack_signal(signal_value)
     assert {:ok, %{signature: {:submit, %{key: "job:1"}}, result: ^result}} = Value.unpack_command(command_value)
+  end
+
+  test "updates queue indexes when state transitions leave or enter the due queue", %{store: store} do
+    old_state = %IntentState{
+      intent_id: "int_1",
+      queue: "default",
+      shard: 0,
+      status: :available,
+      visible_at: @now,
+      updated_at: @now
+    }
+
+    claimed_state = %{old_state | status: :claimed, claim_id: "clm_1"}
+    retry_state = %{claimed_state | status: :retry_scheduled, visible_at: DateTime.add(@now, 10, :second)}
+    state_key = Keyspace.state(@ledger, "int_1")
+    old_queue_key = Keyspace.queue(@ledger, "default", 0, @now, 0, "int_1")
+    retry_queue_key = Keyspace.queue(@ledger, "default", 0, retry_state.visible_at, 0, "int_1")
+
+    claim_request = CommitRequest.new(writes: [Write.new(:put_state, key: "int_1", value: claimed_state)])
+    values = %{state_key => Value.pack_state(old_state), old_queue_key => Value.pack_state(old_state)}
+
+    assert {:ok, %Commit{}} = Bedrock.commit(store, @ledger, claim_request, transaction_opts: [values: values])
+
+    assert_receive {:transact, [values: ^values]}
+    assert_receive {:ops, [{:get, ^state_key}, {:clear, ^old_queue_key}, {:put, ^state_key, _encoded_claimed}]}
+
+    retry_request = CommitRequest.new(writes: [Write.new(:put_state, key: "int_1", value: retry_state)])
+    retry_values = %{state_key => Value.pack_state(claimed_state)}
+
+    assert {:ok, %Commit{}} = Bedrock.commit(store, @ledger, retry_request, transaction_opts: [values: retry_values])
+
+    assert_receive {:transact, [values: ^retry_values]}
+
+    assert_receive {:ops,
+                    [{:get, ^state_key}, {:put, ^state_key, _encoded_retry}, {:put, ^retry_queue_key, encoded_queue}]}
+
+    assert {:ok, ^retry_state} = Value.unpack_state(encoded_queue)
   end
 
   test "compiles claim, shard lease, and outbox write keys", %{store: store} do

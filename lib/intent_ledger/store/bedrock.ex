@@ -13,7 +13,7 @@ defmodule IntentLedger.Store.Bedrock do
 
   use GenServer
 
-  alias IntentLedger.{Error, Store}
+  alias IntentLedger.{Error, IntentState, Store}
   alias IntentLedger.Store.{Commit, CommitRequest, Conflict}
   alias IntentLedger.Store.Bedrock.{Keyspace, Value}
 
@@ -283,8 +283,11 @@ defmodule IntentLedger.Store.Bedrock do
   end
 
   defp compile_write(repo, ledger, _request, %{type: :put_state, key: key, value: value}, acc) do
-    put(repo, Keyspace.state(ledger, key), Value.pack_state(value))
-    {:ok, acc}
+    with :ok <- clear_previous_queue_index(repo, ledger, key),
+         :ok <- put_state_value(repo, ledger, key, value),
+         :ok <- put_current_queue_index(repo, ledger, value) do
+      {:ok, acc}
+    end
   end
 
   defp compile_write(
@@ -378,6 +381,56 @@ defmodule IntentLedger.Store.Bedrock do
     end)
   end
 
+  defp clear_previous_queue_index(repo, ledger, intent_id) do
+    with {:ok, previous_state} <- fetch_state(repo, ledger, intent_id) do
+      clear_queue_index(repo, ledger, previous_state)
+    end
+  end
+
+  defp put_state_value(repo, ledger, intent_id, %IntentState{} = state) do
+    put(repo, Keyspace.state(ledger, intent_id), Value.pack_state(state))
+  end
+
+  defp put_current_queue_index(repo, ledger, %IntentState{} = state) do
+    if queue_indexed_state?(state) do
+      put(repo, queue_index_key(ledger, state), Value.pack_state(state))
+    else
+      :ok
+    end
+  end
+
+  defp clear_queue_index(_repo, _ledger, nil), do: :ok
+
+  defp clear_queue_index(repo, ledger, %IntentState{} = state) do
+    if queue_indexed_state?(state) do
+      clear(repo, queue_index_key(ledger, state))
+    else
+      :ok
+    end
+  end
+
+  defp queue_indexed_state?(%IntentState{status: status, visible_at: %DateTime{}})
+       when status in [:available, :retry_scheduled],
+       do: true
+
+  defp queue_indexed_state?(%IntentState{status: status, visible_at: nil})
+       when status in [:available, :retry_scheduled] do
+    raise adapter_error("queue-indexed states require visible_at", reason: :missing_visible_at)
+  end
+
+  defp queue_indexed_state?(%IntentState{}), do: false
+
+  defp queue_index_key(ledger, %IntentState{} = state) do
+    Keyspace.queue(
+      ledger,
+      state.queue,
+      state.shard,
+      state.visible_at,
+      Map.get(state, :priority, 0),
+      state.intent_id
+    )
+  end
+
   defp fetch_command(repo, ledger, command_id) do
     case get(repo, Keyspace.command(ledger, command_id)) do
       nil ->
@@ -387,6 +440,19 @@ defmodule IntentLedger.Store.Bedrock do
         case Value.unpack_command(encoded) do
           {:ok, entry} -> {:ok, entry}
           {:error, reason} -> {:error, adapter_error("invalid Bedrock command replay value", reason: reason)}
+        end
+    end
+  end
+
+  defp fetch_state(repo, ledger, intent_id) do
+    case get(repo, Keyspace.state(ledger, intent_id)) do
+      nil ->
+        {:ok, nil}
+
+      encoded ->
+        case Value.unpack_state(encoded) do
+          {:ok, state} -> {:ok, state}
+          {:error, reason} -> {:error, adapter_error("invalid Bedrock state value", reason: reason)}
         end
     end
   end
