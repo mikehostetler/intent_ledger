@@ -392,4 +392,82 @@ defmodule IntentLedger.StoreContractTest do
     assert {:ok, %Commit{}} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, next, [])
     assert {:ok, %{version: 2}} = IntentLedger.Store.Memory.read(store, MyApp.IntentLedger, {:stream, stream, []}, [])
   end
+
+  test "memory adapter enforces v1 claim fences for stale tokens and released claims" do
+    store =
+      start_supervised!({IntentLedger.Store.Memory, name: :"store_v1_claim_#{System.unique_integer([:positive])}"})
+
+    now = ~U[2026-01-01 00:00:00Z]
+    lease_until = ~U[2026-01-01 00:01:00Z]
+
+    seed =
+      CommitRequest.new(
+        command_id: "cmd_claim_seed",
+        operation: :submit,
+        writes: [
+          Write.new(:put_state,
+            key: "int_claim",
+            value: %{intent_id: "int_claim", status: :available, visible_at: now}
+          )
+        ]
+      )
+
+    assert {:ok, %Commit{}} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, seed, [])
+
+    claim =
+      CommitRequest.new(
+        command_id: "cmd_claim",
+        operation: :claim,
+        preconditions: [Precondition.intent_status("int_claim", [:available])],
+        writes: [
+          Write.new(:put_state,
+            key: "int_claim",
+            value: %{intent_id: "int_claim", status: :claimed, claim_id: "clm_1", lease_until: lease_until}
+          ),
+          Write.put_claim("clm_1", %{
+            intent_id: "int_claim",
+            owner_id: "worker-1",
+            token_hash: "hash_1",
+            lease_until: lease_until
+          })
+        ]
+      )
+
+    assert {:ok, %Commit{}} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, claim, [])
+
+    stale =
+      CommitRequest.new(
+        command_id: "cmd_claim_stale",
+        operation: :heartbeat,
+        preconditions: [Precondition.claim_fence("clm_1", "bad_hash", metadata: %{now: now})],
+        writes: [Write.append_signal("intent:int_claim", %{id: "sig_stale"})]
+      )
+
+    assert {:error, %Conflict{type: :claim_fence}} =
+             IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, stale, [])
+
+    release =
+      CommitRequest.new(
+        command_id: "cmd_claim_release",
+        operation: :release,
+        preconditions: [Precondition.claim_fence("clm_1", "hash_1", metadata: %{now: now})],
+        writes: [
+          Write.new(:put_state, key: "int_claim", value: %{intent_id: "int_claim", status: :available}),
+          Write.delete_claim("clm_1")
+        ]
+      )
+
+    assert {:ok, %Commit{}} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, release, [])
+
+    after_release =
+      CommitRequest.new(
+        command_id: "cmd_claim_after_release",
+        operation: :complete,
+        preconditions: [Precondition.claim_fence("clm_1", "hash_1", metadata: %{now: now})],
+        writes: [Write.append_signal("intent:int_claim", %{id: "sig_complete"})]
+      )
+
+    assert {:error, %Conflict{type: :claim_fence}} =
+             IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, after_release, [])
+  end
 end

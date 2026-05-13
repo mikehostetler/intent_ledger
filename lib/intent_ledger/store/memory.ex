@@ -752,8 +752,14 @@ defmodule IntentLedger.Store.Memory do
   defp intent_stream(intent_id), do: "intent:" <> intent_id
 
   defp supported_commit?(%CommitRequest{} = request) do
-    Enum.all?(request.preconditions, &(&1.type in [:command_absent, :command_replay, :stream_version])) and
-      Enum.all?(request.writes, &(&1.type in [:append_signal, :put_idempotency]))
+    Enum.all?(
+      request.preconditions,
+      &(&1.type in [:command_absent, :command_replay, :stream_version, :intent_status, :claim_fence])
+    ) and
+      Enum.all?(
+        request.writes,
+        &(&1.type in [:append_signal, :put_idempotency, :put_state, :put_claim, :delete_claim])
+      )
   end
 
   defp check_commit_preconditions(state, %CommitRequest{} = request) do
@@ -786,6 +792,21 @@ defmodule IntentLedger.Store.Memory do
         else
           {:halt, {:error, Conflict.stream_version(stream, expected, actual)}}
         end
+
+      %{type: :intent_status, key: intent_id, expected: expected}, :ok ->
+        actual = state.states |> Map.get(intent_id, %{}) |> store_field(:status, :missing)
+
+        if actual in expected do
+          {:cont, :ok}
+        else
+          {:halt, {:error, Conflict.intent_status(intent_id, expected, actual)}}
+        end
+
+      %{type: :claim_fence, key: claim_id, expected: expected, metadata: metadata}, :ok ->
+        case claim_fence_conflict(state, claim_id, expected, metadata) do
+          nil -> {:cont, :ok}
+          conflict -> {:halt, {:error, conflict}}
+        end
     end)
   end
 
@@ -800,10 +821,52 @@ defmodule IntentLedger.Store.Memory do
         entry = %{signature: command_signature(request), result: result}
 
         {%{acc_state | commands: Map.put(acc_state.commands, command_id, entry)}, result, signals}
+
+      %{type: :put_state, key: key, value: value}, {acc_state, result, signals} ->
+        {%{acc_state | states: Map.put(acc_state.states, key, value)}, result, signals}
+
+      %{type: :put_claim, key: key, value: value}, {acc_state, result, signals} ->
+        {%{acc_state | claims: Map.put(acc_state.claims, key, value)}, result, signals}
+
+      %{type: :delete_claim, key: key}, {acc_state, result, signals} ->
+        {%{acc_state | claims: Map.delete(acc_state.claims, key)}, result, signals}
     end)
   end
 
   defp stream_version(state, stream), do: state.streams |> Map.get(stream, []) |> length()
+
+  defp claim_fence_conflict(state, claim_id, expected, metadata) do
+    now = Map.get(metadata, :now)
+
+    with {:ok, claim} <- Map.fetch(state.claims, claim_id),
+         true <- store_field(claim, :token_hash) == expected.token_hash,
+         true <- claim_state_current?(state, claim_id, claim),
+         true <- store_lease_current?(claim, now) do
+      nil
+    else
+      _reason -> Conflict.claim_fence(claim_id, expected, Map.get(state.claims, claim_id, :missing))
+    end
+  end
+
+  defp claim_state_current?(state, claim_id, claim) do
+    intent_id = store_field(claim, :intent_id)
+    intent_state = Map.get(state.states, intent_id, %{})
+
+    store_field(intent_state, :status) == :claimed and store_field(intent_state, :claim_id) in [nil, claim_id]
+  end
+
+  defp store_lease_current?(_value, nil), do: true
+
+  defp store_lease_current?(value, now) do
+    case store_field(value, :lease_until) do
+      %DateTime{} = lease_until -> DateTime.compare(lease_until, now) == :gt
+      _value -> false
+    end
+  end
+
+  defp store_field(value, key, default \\ nil)
+  defp store_field(value, key, default) when is_map(value), do: Map.get(value, key, default)
+  defp store_field(_value, _key, default), do: default
 
   defp command_signature(%CommitRequest{} = request), do: {request.operation, request.command}
 
