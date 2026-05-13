@@ -332,4 +332,11 @@ defmodule IntentLedgerTest do
     refute IntentLedger.Instance.running?(Module.concat(__MODULE__, :MissingLedger))
     assert :ok = IntentLedger.Instance.stop(Module.concat(__MODULE__, :MissingLedger))
   end
+
+  test "does not expose pre-release compatibility aliases" do
+    refute Code.ensure_loaded?(Jido.IntentLedger)
+    refute Code.ensure_loaded?(Jido.IntentLedger.Application)
+    refute Code.ensure_loaded?(Jido.IntentLedger.Store)
+    refute Code.ensure_loaded?(Jido.IntentLedger.Store.Memory)
+  end
 end
