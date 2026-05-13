@@ -107,6 +107,7 @@ defmodule IntentLedger.MixProject do
       groups_for_modules: [
         "Public API": [
           IntentLedger,
+          IntentLedger.Command,
           IntentLedger.Intent,
           IntentLedger.IntentState,
           IntentLedger.Claim,
