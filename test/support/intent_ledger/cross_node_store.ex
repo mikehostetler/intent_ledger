@@ -133,6 +133,16 @@ defmodule IntentLedger.CrossNodeStore do
     call(peer, __MODULE__, :claim_on_node, [context.store_name, context.ledger, normalize_attrs(attrs)])
   end
 
+  @spec claim_intent(PeerNodes.peer(), t(), String.t(), map() | keyword()) :: term()
+  def claim_intent(peer, context, intent_id, attrs \\ []) do
+    call(peer, __MODULE__, :claim_intent_on_node, [
+      context.store_name,
+      context.ledger,
+      intent_id,
+      normalize_attrs(attrs)
+    ])
+  end
+
   @spec complete(PeerNodes.peer(), t(), map() | keyword()) :: term()
   def complete(peer, context, attrs) do
     call(peer, __MODULE__, :complete_on_node, [context.store_name, context.ledger, normalize_attrs(attrs)])
@@ -228,6 +238,26 @@ defmodule IntentLedger.CrossNodeStore do
       {:ok, []} -> :empty
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  @spec claim_intent_on_node(GenServer.server(), atom(), String.t(), map()) :: IntentLedger.Store.commit_result()
+  def claim_intent_on_node(store, ledger, intent_id, attrs) do
+    now = Map.get(attrs, :now, @default_now)
+
+    state =
+      %IntentState{
+        intent_id: intent_id,
+        queue: attrs |> Map.get(:queue, "default") |> to_string(),
+        shard: Map.get(attrs, :shard, 0),
+        status: :available,
+        visible_at: Map.get(attrs, :visible_at, now),
+        priority: Map.get(attrs, :priority, 0),
+        attempt: Map.get(attrs, :attempt, 0),
+        max_attempts: Map.get(attrs, :max_attempts, 3),
+        updated_at: now
+      }
+
+    claim_state(store, ledger, state, attrs, now)
   end
 
   @spec complete_on_node(GenServer.server(), atom(), map()) :: IntentLedger.Store.commit_result()
