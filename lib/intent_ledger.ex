@@ -30,7 +30,7 @@ defmodule IntentLedger do
       {:ok, _record} = IntentLedger.complete(MyApp.IntentLedger, claimed.claim.id, claimed.claim.token, :ok)
   """
 
-  alias IntentLedger.Command
+  alias IntentLedger.{Command, Projection}
 
   @type ledger :: GenServer.server()
 
@@ -101,6 +101,27 @@ defmodule IntentLedger do
   @spec replay_outbox(ledger(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def replay_outbox(ledger, opts \\ []) do
     GenServer.call(ledger, {:replay_outbox, opts})
+  end
+
+  @doc """
+  Rebuilds a projection module from replayed lifecycle signals.
+
+  Options:
+
+    * `:source` - one of `:ledger`, `{:intent, intent_id}`, or
+      `{:queue, queue, shard}`. Defaults to `:ledger`.
+    * `:replay` - replay window options passed to the selected replay API.
+    * `:projection` - options passed to `IntentLedger.Projection`.
+  """
+  @spec rebuild_projection(ledger(), module(), keyword()) :: {:ok, term()} | {:error, term()}
+  def rebuild_projection(ledger, projection, opts \\ []) when is_atom(projection) do
+    source = Keyword.get(opts, :source, :ledger)
+    replay_opts = Keyword.get(opts, :replay, [])
+    projection_opts = Keyword.get(opts, :projection, [])
+
+    with {:ok, signals} <- replay_projection_source(ledger, source, replay_opts) do
+      Projection.rebuild(projection, signals, projection_opts)
+    end
   end
 
   @doc """
@@ -225,6 +246,15 @@ defmodule IntentLedger do
   def recover(ledger, queue, opts \\ []) do
     command_call(ledger, Command.recover(ledger, queue, opts), {:recover, queue, opts}, opts)
   end
+
+  defp replay_projection_source(ledger, :ledger, opts), do: replay_ledger(ledger, opts)
+  defp replay_projection_source(ledger, {:intent, intent_id}, opts), do: replay_intent(ledger, intent_id, opts)
+
+  defp replay_projection_source(ledger, {:queue, queue, shard}, opts) do
+    replay_queue(ledger, queue, shard, opts)
+  end
+
+  defp replay_projection_source(_ledger, source, _opts), do: {:error, {:invalid_projection_source, source}}
 
   defp command_call(ledger, signal, message, opts) do
     case Command.normalize(signal) do

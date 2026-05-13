@@ -131,6 +131,7 @@ defmodule IntentLedger.MixProject do
           IntentLedger.InstanceSupervisor,
           IntentLedger.Lifecycle,
           IntentLedger.Notifier,
+          IntentLedger.Projection,
           IntentLedger.QueueSupervisor,
           IntentLedger.QueueShardServer,
           IntentLedger.RecoveryServer,

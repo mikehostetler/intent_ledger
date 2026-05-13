@@ -27,6 +27,8 @@ Ecto/Postgres remains a planned local durable adapter.
   node.
 - `IntentLedger.RecoveryServer` periodically recovers expired claims and stale
   queue-shard leases supported by the configured store.
+- `IntentLedger.Projection` defines lightweight rebuild hooks for query models
+  derived from replayed lifecycle signals.
 - `IntentLedger.Store` defines the persistence contract.
 - `IntentLedger.Store.Memory` is the executable in-memory reference adapter for
   tests and local examples. It is not durable and is not a clustered production
@@ -162,6 +164,41 @@ Lifecycle facts are emitted as `Jido.Signal` structs with stable
 - `intent_ledger.intent.released`
 - `intent_ledger.claim.heartbeat`
 - `intent_ledger.claim.lease_expired`
+
+## Projection Rebuilds
+
+Query projections can be treated as disposable state derived from lifecycle
+signals. Define a projection module with `IntentLedger.Projection`, then rebuild
+it from an intent, queue shard, or whole-ledger replay window:
+
+```elixir
+defmodule MyApp.IntentStatusProjection do
+  @behaviour IntentLedger.Projection
+
+  @impl true
+  def init(_opts), do: %{version: 0, statuses: %{}}
+
+  @impl true
+  def apply_signal(%{subject: intent_id, type: type}, projection, _context) do
+    status =
+      String.replace_prefix(type, "intent_ledger.intent.", "")
+
+    projection
+    |> update_in([:statuses], &Map.put(&1, intent_id, status))
+    |> Map.update!(:version, &(&1 + 1))
+  end
+end
+
+{:ok, projection} =
+  IntentLedger.rebuild_projection(
+    MyApp.IntentLedger,
+    MyApp.IntentStatusProjection,
+    source: :ledger
+  )
+```
+
+When a durable projection stores its own offset, replay from that cursor and
+pass the returned signals to `IntentLedger.Projection.catch_up/4`.
 
 ## Development
 
