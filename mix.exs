@@ -126,6 +126,7 @@ defmodule IntentLedger.MixProject do
           IntentLedger.Store.Conflict,
           IntentLedger.Store.Listing,
           IntentLedger.Store.Memory,
+          IntentLedger.Store.Outbox,
           IntentLedger.Store.Precondition,
           IntentLedger.Store.Write
         ]

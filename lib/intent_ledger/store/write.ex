@@ -124,6 +124,28 @@ defmodule IntentLedger.Store.Write do
   end
 
   @doc """
+  Inserts a durable outbox entry.
+  """
+  @spec put_outbox(String.t(), map(), keyword() | map()) :: t()
+  def put_outbox(entry_id, entry, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.merge(%{key: entry_id, value: entry})
+    |> then(&new(:put_outbox, &1))
+  end
+
+  @doc """
+  Acknowledges a durable outbox entry.
+  """
+  @spec ack_outbox(String.t(), keyword() | map()) :: t()
+  def ack_outbox(entry_id, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.put(:key, entry_id)
+    |> then(&new(:ack_outbox, &1))
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Write.t/0`.
   """
   @spec schema() :: Zoi.schema()

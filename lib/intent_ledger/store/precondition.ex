@@ -147,6 +147,17 @@ defmodule IntentLedger.Store.Precondition do
   end
 
   @doc """
+  Requires an outbox entry to exist and remain unacknowledged.
+  """
+  @spec outbox_unacked(String.t(), keyword() | map()) :: t()
+  def outbox_unacked(entry_id, attrs \\ %{}) do
+    attrs
+    |> normalize_attrs()
+    |> Map.merge(%{key: entry_id, expected: :unacked})
+    |> then(&new(:outbox_unacked, &1))
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Precondition.t/0`.
   """
   @spec schema() :: Zoi.schema()

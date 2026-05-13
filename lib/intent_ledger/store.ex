@@ -84,11 +84,31 @@ defmodule IntentLedger.Store do
   then intent id ascending. Listing callbacks must not mutate claim or intent
   state; recovery is a later commit that uses the returned records.
 
+  ## Outbox Semantics
+
+  Durable outbox entries capture lifecycle signals for at-least-once delivery.
+  Insertions are represented by `IntentLedger.Store.Write.put_outbox/3` or
+  `IntentLedger.Store.Outbox.insert/3` and must be committed atomically with the
+  lifecycle state, stream, and idempotency writes that produced the signal.
+  Adapters assign monotonically increasing sequences for read ordering.
+
+  `IntentLedger.Store.Outbox.read/2` returns unacknowledged entries for a
+  consumer ordered by sequence ascending, honoring cursor and limit fields
+  without mutating ack state. `IntentLedger.Store.Outbox.ack/3` requires
+  `IntentLedger.Store.Precondition.outbox_unacked/2` and records an ack with
+  `IntentLedger.Store.Write.ack_outbox/2`; missing or already acked entries
+  return `IntentLedger.Store.Conflict.outbox/3`.
+
+  `IntentLedger.Store.Outbox.replay/1` returns durable entries from a cursor in
+  sequence order without considering or changing ack state. Replayed command
+  commits must not insert duplicate outbox entries; they return the original
+  deterministic commit result.
+
   The bundled `IntentLedger.Store.Memory` adapter is intended for tests, local
   development, and as the executable contract for durable adapters.
   """
 
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Outbox}
 
   @type ref :: GenServer.server()
   @type result :: {:ok, term()} | {:error, term()}
@@ -101,7 +121,7 @@ defmodule IntentLedger.Store do
   @type shard_lease_operation :: :acquire | :renew | :release | :expire | :takeover
   @type lease_request :: {:shard, shard_lease_operation(), map()} | map()
   @type listing_request :: Listing.t() | {:due_intents, map()} | {:expired_claims, map()} | map()
-  @type outbox_request :: {:insert, map()} | {:read, map()} | {:ack, map()} | {:replay, map()} | map()
+  @type outbox_request :: Outbox.t() | {:insert, map()} | {:read, map()} | {:ack, map()} | {:replay, map()} | map()
 
   @callback child_spec(keyword()) :: Supervisor.child_spec()
   @callback commit(ref(), atom(), CommitRequest.t(), keyword()) :: commit_result()

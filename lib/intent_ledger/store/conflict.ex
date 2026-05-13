@@ -130,6 +130,19 @@ defmodule IntentLedger.Store.Conflict do
   end
 
   @doc """
+  Builds an outbox conflict for missing, already acknowledged, or duplicate entries.
+  """
+  @spec outbox(String.t(), term(), term()) :: t()
+  def outbox(entry_id, expected, actual) do
+    new(:outbox,
+      key: entry_id,
+      expected: expected,
+      actual: actual,
+      message: "outbox conflict"
+    )
+  end
+
+  @doc """
   Returns the Zoi schema for `t:IntentLedger.Store.Conflict.t/0`.
   """
   @spec schema() :: Zoi.schema()

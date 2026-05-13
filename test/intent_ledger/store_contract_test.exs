@@ -1,7 +1,7 @@
 defmodule IntentLedger.StoreContractTest do
   use ExUnit.Case, async: true
 
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Precondition, Write}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Outbox, Precondition, Write}
 
   test "commit request structs compose preconditions and writes" do
     precondition = Precondition.new(:stream_version, stream: "intent:int_1", expected: 1)
@@ -50,6 +50,7 @@ defmodule IntentLedger.StoreContractTest do
     assert %Zoi.Types.Struct{} = Write.schema()
     assert %Zoi.Types.Struct{} = Conflict.schema()
     assert %Zoi.Types.Struct{} = Listing.schema()
+    assert %Zoi.Types.Struct{} = Outbox.schema()
 
     assert {:ok, %CommitRequest{}} = Zoi.parse(CommitRequest.schema(), CommitRequest.new())
     assert {:ok, %Commit{}} = Zoi.parse(Commit.schema(), Commit.new())
@@ -57,9 +58,12 @@ defmodule IntentLedger.StoreContractTest do
     assert {:ok, %Write{}} = Zoi.parse(Write.schema(), Write.new(:put_idempotency))
     assert {:ok, %Conflict{}} = Zoi.parse(Conflict.schema(), Conflict.new(:claim_fence))
     assert {:ok, %Listing{}} = Zoi.parse(Listing.schema(), Listing.due_intents(:default, 0, ~U[2026-01-01 00:00:00Z]))
+    assert {:ok, %Outbox{}} = Zoi.parse(Outbox.schema(), Outbox.read("dispatcher"))
   end
 
   test "store v1 structs publish supported semantic kinds" do
+    assert :read in Outbox.kinds()
+    assert :ack in Outbox.kinds()
     assert :due_intents in Listing.kinds()
     assert :expired_claims in Listing.kinds()
     assert :claim_fence in Precondition.kinds()
@@ -222,6 +226,48 @@ defmodule IntentLedger.StoreContractTest do
     assert expired.order == [:lease_until_asc, :intent_id_asc]
     assert expired.metadata.recovery_owner == "node-a"
     assert Listing.to_request(expired) == {:expired_claims, Map.delete(Map.from_struct(expired), :type)}
+  end
+
+  test "outbox helpers describe insert read ack and replay semantics" do
+    now = ~U[2026-01-01 00:00:00Z]
+    signal = %{type: "intent_ledger.intent.completed", id: "sig_1"}
+
+    insert = Outbox.insert("intent:int_1", signal, metadata: %{command_id: "cmd_1"})
+    write = Write.put_outbox("out_1", %{stream: insert.stream, signal: insert.value, inserted_at: now})
+
+    assert insert.type == :insert
+    assert insert.stream == "intent:int_1"
+    assert insert.value == signal
+    assert insert.metadata.command_id == "cmd_1"
+    assert write.type == :put_outbox
+    assert write.key == "out_1"
+
+    read = Outbox.read(:dispatcher, cursor: 10, limit: 50)
+
+    assert read.type == :read
+    assert read.consumer == "dispatcher"
+    assert read.cursor == 10
+    assert read.limit == 50
+    assert Outbox.to_request(read) == {:read, Map.delete(Map.from_struct(read), :type)}
+
+    ack = Outbox.ack("out_1", :dispatcher, metadata: %{acked_at: now})
+    ack_gate = Precondition.outbox_unacked("out_1")
+    ack_write = Write.ack_outbox("out_1", metadata: %{acked_at: now, consumer: "dispatcher"})
+
+    assert ack.type == :ack
+    assert ack.key == "out_1"
+    assert ack.consumer == "dispatcher"
+    assert ack_gate.type == :outbox_unacked
+    assert ack_gate.expected == :unacked
+    assert ack_write.type == :ack_outbox
+
+    replay = Outbox.replay(cursor: 5, limit: 100)
+    conflict = Conflict.outbox("out_1", :unacked, :acked)
+
+    assert replay.type == :replay
+    assert replay.cursor == 5
+    assert conflict.type == :outbox
+    assert conflict.message == "outbox conflict"
   end
 
   test "store behaviour exposes semantic v1 callbacks" do
