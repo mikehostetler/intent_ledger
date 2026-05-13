@@ -1,0 +1,28 @@
+# Build artifacts
+/_build/
+/deps/
+
+# Coverage
+/cover/
+
+# Dialyzer PLT files - do NOT commit these
+/priv/plts/
+*.plt
+*.plt.hash
+
+# Editor/IDE
+.elixir_ls/
+.vscode/
+*.swp
+*.swo
+
+# Generated files
+/doc/
+erl_crash.dump
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Package tarball
+intent_ledger-*.tar
