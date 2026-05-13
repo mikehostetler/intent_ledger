@@ -3,6 +3,15 @@ defmodule IntentLedgerTest do
 
   alias IntentLedger.{Claim, Claimed, Error, Intent, IntentState, Record, ShardState, Store, Time}
 
+  @pre_release_namespace Enum.join(["Jido", "IntentLedger"], ".")
+  @public_namespace_files [
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "usage-rules.md",
+    "mix.exs"
+  ]
+
   defmodule TestLifecycle do
     @behaviour IntentLedger.Lifecycle
 
@@ -334,9 +343,35 @@ defmodule IntentLedgerTest do
   end
 
   test "does not expose pre-release compatibility aliases" do
-    refute Code.ensure_loaded?(Jido.IntentLedger)
-    refute Code.ensure_loaded?(Jido.IntentLedger.Application)
-    refute Code.ensure_loaded?(Jido.IntentLedger.Store)
-    refute Code.ensure_loaded?(Jido.IntentLedger.Store.Memory)
+    refute Code.ensure_loaded?(Module.concat([Jido, IntentLedger]))
+    refute Code.ensure_loaded?(Module.concat([Jido, IntentLedger, Application]))
+    refute Code.ensure_loaded?(Module.concat([Jido, IntentLedger, Store]))
+    refute Code.ensure_loaded?(Module.concat([Jido, IntentLedger, Store, Memory]))
+  end
+
+  test "public files do not reference the pre-release namespace" do
+    scanned_files =
+      @public_namespace_files
+      |> Enum.concat(release_source_files("lib"))
+      |> Enum.concat(release_source_files("test"))
+      |> Enum.concat(release_source_files("guides"))
+
+    offenders =
+      for file <- scanned_files,
+          String.contains?(File.read!(file), @pre_release_namespace),
+          do: file
+
+    assert offenders == []
+  end
+
+  defp release_source_files(path) do
+    if File.dir?(path) do
+      path
+      |> Path.join("**/*")
+      |> Path.wildcard()
+      |> Enum.filter(&File.regular?/1)
+    else
+      []
+    end
   end
 end
