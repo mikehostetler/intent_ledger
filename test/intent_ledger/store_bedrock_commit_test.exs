@@ -1,0 +1,143 @@
+defmodule IntentLedger.StoreBedrockCommitTest do
+  use ExUnit.Case, async: true
+
+  alias IntentLedger.{Intent, IntentState, Signal}
+  alias IntentLedger.Store.{Bedrock, Commit, CommitRequest, Precondition, Write}
+  alias IntentLedger.Store.Bedrock.{Keyspace, Value}
+
+  defmodule FakeRepo do
+    def transact(fun, opts) do
+      test_pid = Keyword.fetch!(opts, :test_pid)
+      Process.put(:ops, [])
+      send(test_pid, {:transact, Keyword.delete(opts, :test_pid)})
+
+      result = fun.(__MODULE__)
+      send(test_pid, {:ops, Enum.reverse(Process.get(:ops, []))})
+
+      result
+    after
+      Process.delete(:ops)
+    end
+
+    def put(key, value), do: record({:put, key, value})
+    def clear(key), do: record({:clear, key})
+
+    defp record(op) do
+      Process.put(:ops, [op | Process.get(:ops, [])])
+      :ok
+    end
+  end
+
+  @ledger MyApp.IntentLedger
+  @now ~U[2026-01-01 00:00:00Z]
+
+  setup do
+    name = :"bedrock_store_#{System.unique_integer([:positive])}"
+    store = start_supervised!({Bedrock, name: name, repo: FakeRepo, transaction_opts: [test_pid: self()]})
+
+    %{store: store}
+  end
+
+  test "compiles basic Store V1 writes inside a repo transaction", %{store: store} do
+    {:ok, intent} = Intent.new(%{id: "int_1", key: "job:1", kind: "job.run", visible_at: @now})
+    state = IntentState.new(intent, @now)
+    signal = Signal.lifecycle(:intent_available, @ledger, intent.id, %{visible_at: @now})
+    result = %{intent_id: intent.id}
+
+    request =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        operation: :submit,
+        command: %{key: intent.key},
+        writes: [
+          Write.new(:put_intent, key: intent.id, value: intent),
+          Write.new(:put_state, key: intent.id, value: state),
+          Write.append_signal("intent:int_1", signal, metadata: %{version: 1}),
+          Write.put_idempotency("cmd_1", result)
+        ]
+      )
+
+    assert {:ok, %Commit{} = commit} = Bedrock.commit(store, @ledger, request, transaction_opts: [retry_limit: 1])
+    assert commit.command_id == "cmd_1"
+    assert commit.result == result
+    assert commit.signals == [signal]
+
+    assert_receive {:transact, [retry_limit: 1]}
+    assert_receive {:ops, ops}
+
+    assert [
+             {:put, intent_key, intent_value},
+             {:put, state_key, state_value},
+             {:put, stream_key, signal_value},
+             {:put, command_key, command_value}
+           ] = ops
+
+    assert intent_key == Keyspace.intent(@ledger, intent.id)
+    assert state_key == Keyspace.state(@ledger, intent.id)
+    assert stream_key == Keyspace.stream(@ledger, "intent:int_1", 1)
+    assert command_key == Keyspace.command(@ledger, "cmd_1")
+
+    assert {:ok, ^intent} = Value.unpack_intent(intent_value)
+    assert {:ok, ^state} = Value.unpack_state(state_value)
+    assert {:ok, ^signal} = Value.unpack_signal(signal_value)
+    assert {:ok, %{signature: {:submit, %{key: "job:1"}}, result: ^result}} = Value.unpack_command(command_value)
+  end
+
+  test "compiles claim, shard lease, and outbox write keys", %{store: store} do
+    claim = %{intent_id: "int_1", token_hash: "hash", lease_until: @now}
+    lease = %{queue: "default", shard: 0, owner_id: "node-a", lease_until: @now}
+    outbox = %{sequence: 1, stream: "intent:int_1", signal: %{id: "sig_1"}, acked_at: nil}
+
+    request =
+      CommitRequest.new(
+        writes: [
+          Write.put_claim("clm_1", claim),
+          Write.put_shard_lease(:default, 0, lease),
+          Write.put_outbox("out_1", outbox),
+          Write.delete_claim("clm_1"),
+          Write.delete_shard_lease(:default, 0)
+        ]
+      )
+
+    assert {:ok, %Commit{}} = Bedrock.commit(store, @ledger, request, [])
+
+    assert_receive {:transact, []}
+    assert_receive {:ops, ops}
+
+    assert [
+             {:put, claim_key, claim_value},
+             {:put, lease_key, lease_value},
+             {:put, outbox_key, outbox_value},
+             {:clear, clear_claim_key},
+             {:clear, clear_lease_key}
+           ] = ops
+
+    assert claim_key == Keyspace.claim(@ledger, "clm_1")
+    assert lease_key == Keyspace.shard_lease(@ledger, :default, 0)
+    assert outbox_key == Keyspace.outbox(@ledger, 1)
+    assert clear_claim_key == claim_key
+    assert clear_lease_key == lease_key
+
+    assert {:ok, ^claim} = Value.unpack_claim(claim_value)
+    assert {:ok, ^lease} = Value.unpack_shard_lease(lease_value)
+    assert {:ok, %{key: "out_1", sequence: 1}} = Value.unpack_outbox(outbox_value)
+  end
+
+  test "rejects preconditions until dedicated semantic compilers land", %{store: store} do
+    request = CommitRequest.new(preconditions: [Precondition.command_absent("cmd_1")])
+
+    assert {:error, %IntentLedger.Error.AdapterRuntimeError{details: %{reason: :unsupported_preconditions}}} =
+             Bedrock.commit(store, @ledger, request, [])
+
+    assert_receive {:transact, []}
+    assert_receive {:ops, []}
+  end
+
+  test "rejects writes that need later Bedrock semantic stories", %{store: store} do
+    request = CommitRequest.new(writes: [Write.ack_outbox("out_1")])
+
+    assert {:error,
+            %IntentLedger.Error.AdapterRuntimeError{details: %{reason: :unsupported_write, write_type: :ack_outbox}}} =
+             Bedrock.commit(store, @ledger, request, [])
+  end
+end
