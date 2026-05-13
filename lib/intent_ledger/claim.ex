@@ -1,9 +1,9 @@
-defmodule Jido.IntentLedger.Claim do
+defmodule IntentLedger.Claim do
   @moduledoc """
   Lease token returned to a worker that has claimed an intent.
   """
 
-  alias Jido.IntentLedger.ID
+  alias IntentLedger.ID
 
   @schema Zoi.struct(__MODULE__, %{
             id: Zoi.string() |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
@@ -34,7 +34,7 @@ defmodule Jido.IntentLedger.Claim do
   end
 
   @doc """
-  Returns the Zoi schema for `t:Jido.IntentLedger.Claim.t/0`.
+  Returns the Zoi schema for `t:IntentLedger.Claim.t/0`.
   """
   @spec schema() :: Zoi.schema()
   def schema, do: @schema

@@ -1,4 +1,4 @@
-defmodule Jido.IntentLedger.MixProject do
+defmodule IntentLedger.MixProject do
   use Mix.Project
 
   @version "0.1.0"
@@ -52,7 +52,7 @@ defmodule Jido.IntentLedger.MixProject do
   def application do
     [
       extra_applications: [:crypto, :logger],
-      mod: {Jido.IntentLedger.Application, []}
+      mod: {IntentLedger.Application, []}
     ]
   end
 
@@ -106,21 +106,21 @@ defmodule Jido.IntentLedger.MixProject do
       ],
       groups_for_modules: [
         "Public API": [
-          Jido.IntentLedger,
-          Jido.IntentLedger.Intent,
-          Jido.IntentLedger.IntentState,
-          Jido.IntentLedger.Claim,
-          Jido.IntentLedger.Claimed,
-          Jido.IntentLedger.Error,
-          Jido.IntentLedger.Record
+          IntentLedger,
+          IntentLedger.Intent,
+          IntentLedger.IntentState,
+          IntentLedger.Claim,
+          IntentLedger.Claimed,
+          IntentLedger.Error,
+          IntentLedger.Record
         ],
         Runtime: [
-          Jido.IntentLedger.Application,
-          Jido.IntentLedger.Instance,
-          Jido.IntentLedger.InstanceSupervisor,
-          Jido.IntentLedger.Lifecycle,
-          Jido.IntentLedger.Store,
-          Jido.IntentLedger.Store.Memory
+          IntentLedger.Application,
+          IntentLedger.Instance,
+          IntentLedger.InstanceSupervisor,
+          IntentLedger.Lifecycle,
+          IntentLedger.Store,
+          IntentLedger.Store.Memory
         ]
       ]
     ]

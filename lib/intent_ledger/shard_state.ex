@@ -1,4 +1,4 @@
-defmodule Jido.IntentLedger.ShardState do
+defmodule IntentLedger.ShardState do
   @moduledoc """
   Cursor and lease metadata for a queue shard.
   """
@@ -17,7 +17,7 @@ defmodule Jido.IntentLedger.ShardState do
   defstruct Zoi.Struct.struct_fields(@schema)
 
   @doc """
-  Returns the Zoi schema for `t:Jido.IntentLedger.ShardState.t/0`.
+  Returns the Zoi schema for `t:IntentLedger.ShardState.t/0`.
   """
   @spec schema() :: Zoi.schema()
   def schema, do: @schema

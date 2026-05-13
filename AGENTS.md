@@ -23,7 +23,7 @@ separate actions requiring additional permission.
 
 ## Conventions
 
-- Public modules live under `Jido.IntentLedger`.
+- Public modules live under `IntentLedger`.
 - Core structs should expose Zoi schemas.
-- External/runtime failures should be normalized through `Jido.IntentLedger.Error`.
-- Store adapters must implement `Jido.IntentLedger.Store`.
+- External/runtime failures should be normalized through `IntentLedger.Error`.
+- Store adapters must implement `IntentLedger.Store`.

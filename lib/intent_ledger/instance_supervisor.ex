@@ -1,4 +1,4 @@
-defmodule Jido.IntentLedger.InstanceSupervisor do
+defmodule IntentLedger.InstanceSupervisor do
   @moduledoc """
   Supervises a named intent ledger instance.
 
@@ -8,7 +8,7 @@ defmodule Jido.IntentLedger.InstanceSupervisor do
 
   use Supervisor
 
-  alias Jido.IntentLedger.{Names, Store}
+  alias IntentLedger.{Names, Store}
 
   @type option ::
           {:name, atom()}
@@ -56,7 +56,7 @@ defmodule Jido.IntentLedger.InstanceSupervisor do
     children = [
       {Registry, keys: :unique, name: Names.registry(name)},
       store_module.child_spec(Keyword.put(store_opts, :name, store_name)),
-      {Jido.IntentLedger.Server, server_opts}
+      {IntentLedger.Server, server_opts}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

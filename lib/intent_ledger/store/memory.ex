@@ -1,4 +1,4 @@
-defmodule Jido.IntentLedger.Store.Memory do
+defmodule IntentLedger.Store.Memory do
   @moduledoc """
   In-memory store adapter for tests and local spikes.
 
@@ -9,9 +9,9 @@ defmodule Jido.IntentLedger.Store.Memory do
 
   use GenServer
 
-  @behaviour Jido.IntentLedger.Store
+  @behaviour IntentLedger.Store
 
-  alias Jido.IntentLedger.{
+  alias IntentLedger.{
     Claim,
     Claimed,
     Intent,

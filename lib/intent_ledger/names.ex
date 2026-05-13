@@ -1,4 +1,4 @@
-defmodule Jido.IntentLedger.Names do
+defmodule IntentLedger.Names do
   @moduledoc false
 
   @doc false

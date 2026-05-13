@@ -1,4 +1,4 @@
-defmodule Jido.IntentLedger.Lifecycle do
+defmodule IntentLedger.Lifecycle do
   @moduledoc """
   Optional lifecycle hooks for ledger instances.
 
@@ -8,7 +8,7 @@ defmodule Jido.IntentLedger.Lifecycle do
   durable adapters can delegate retry policy without changing the public API.
   """
 
-  alias Jido.IntentLedger.{Intent, Record}
+  alias IntentLedger.{Intent, Record}
 
   @type context :: map()
 

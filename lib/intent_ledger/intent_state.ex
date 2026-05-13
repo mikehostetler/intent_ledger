@@ -1,9 +1,9 @@
-defmodule Jido.IntentLedger.IntentState do
+defmodule IntentLedger.IntentState do
   @moduledoc """
-  Mutable lifecycle state for an `Jido.IntentLedger.Intent`.
+  Mutable lifecycle state for an `IntentLedger.Intent`.
   """
 
-  alias Jido.IntentLedger.Intent
+  alias IntentLedger.Intent
 
   @type status ::
           :available
@@ -66,7 +66,7 @@ defmodule Jido.IntentLedger.IntentState do
   def final?(%__MODULE__{status: status}), do: status in @final_statuses
 
   @doc """
-  Returns the Zoi schema for `t:Jido.IntentLedger.IntentState.t/0`.
+  Returns the Zoi schema for `t:IntentLedger.IntentState.t/0`.
   """
   @spec schema() :: Zoi.schema()
   def schema, do: @schema

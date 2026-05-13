@@ -1,4 +1,4 @@
-defmodule Jido.IntentLedger.Time do
+defmodule IntentLedger.Time do
   @moduledoc false
 
   @doc false

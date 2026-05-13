@@ -1,13 +1,13 @@
-defmodule Jido.IntentLedger.Store do
+defmodule IntentLedger.Store do
   @moduledoc """
   Persistence contract for intent lifecycle state.
 
-  Stores own atomic lifecycle commits. The bundled `Jido.IntentLedger.Store.Memory`
+  Stores own atomic lifecycle commits. The bundled `IntentLedger.Store.Memory`
   adapter is intended for tests, local development, and as the executable
   contract for durable adapters.
   """
 
-  alias Jido.IntentLedger.{Claimed, Intent, Record}
+  alias IntentLedger.{Claimed, Intent, Record}
 
   @type ref :: GenServer.server()
   @type result :: {:ok, term()} | {:error, term()}
@@ -34,7 +34,7 @@ defmodule Jido.IntentLedger.Store do
 
   @doc false
   @spec normalize_spec(module() | {module(), keyword()} | nil) :: {module(), keyword()}
-  def normalize_spec(nil), do: {Jido.IntentLedger.Store.Memory, []}
+  def normalize_spec(nil), do: {IntentLedger.Store.Memory, []}
   def normalize_spec(module) when is_atom(module), do: {module, []}
   def normalize_spec({module, opts}) when is_atom(module) and is_list(opts), do: {module, opts}
 end

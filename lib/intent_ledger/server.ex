@@ -1,9 +1,9 @@
-defmodule Jido.IntentLedger.Server do
+defmodule IntentLedger.Server do
   @moduledoc false
 
   use GenServer
 
-  alias Jido.IntentLedger.{Intent, Lifecycle, Telemetry, Time}
+  alias IntentLedger.{Intent, Lifecycle, Telemetry, Time}
 
   require Logger
 

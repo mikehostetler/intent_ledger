@@ -1,4 +1,4 @@
-defmodule Jido.IntentLedger.Signal do
+defmodule IntentLedger.Signal do
   @moduledoc false
 
   @source_prefix "/intent_ledger"

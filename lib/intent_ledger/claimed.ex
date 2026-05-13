@@ -1,9 +1,9 @@
-defmodule Jido.IntentLedger.Claimed do
+defmodule IntentLedger.Claimed do
   @moduledoc """
   Return value for a successful claim.
   """
 
-  alias Jido.IntentLedger.{Claim, Intent, IntentState}
+  alias IntentLedger.{Claim, Intent, IntentState}
 
   @schema Zoi.struct(__MODULE__, %{
             intent: Zoi.struct(Intent) |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
@@ -16,7 +16,7 @@ defmodule Jido.IntentLedger.Claimed do
   defstruct Zoi.Struct.struct_fields(@schema)
 
   @doc """
-  Returns the Zoi schema for `t:Jido.IntentLedger.Claimed.t/0`.
+  Returns the Zoi schema for `t:IntentLedger.Claimed.t/0`.
   """
   @spec schema() :: Zoi.schema()
   def schema, do: @schema

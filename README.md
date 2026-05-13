@@ -11,17 +11,17 @@ https://gist.github.com/mikehostetler/cc2f56822cf5611126f4462d7ed874c7
 
 This is a package spike. The public API, lifecycle structs, supervision shape,
 store behaviour, and in-memory adapter are in place. Durable adapters such as
-Ecto/Postgres or Bedrock can implement `Jido.IntentLedger.Store` without changing
+Ecto/Postgres or Bedrock can implement `IntentLedger.Store` without changing
 callers.
 
 ## Runtime Shape
 
-- `Jido.IntentLedger` is the public API and child spec.
-- `Jido.IntentLedger.InstanceSupervisor` owns a named ledger instance.
+- `IntentLedger` is the public API and child spec.
+- `IntentLedger.InstanceSupervisor` owns a named ledger instance.
 - The server process validates API calls and delegates atomic commits.
-- `Jido.IntentLedger.Store` defines the persistence contract.
-- `Jido.IntentLedger.Store.Memory` is the executable in-memory contract for tests.
-- `Jido.IntentLedger.Lifecycle` provides optional hooks for submit enrichment and
+- `IntentLedger.Store` defines the persistence contract.
+- `IntentLedger.Store.Memory` is the executable in-memory contract for tests.
+- `IntentLedger.Lifecycle` provides optional hooks for submit enrichment and
   post-transition observation.
 
 ## Installation
@@ -44,11 +44,11 @@ Start a named ledger under your supervision tree:
 
 ```elixir
 children = [
-  {Jido.IntentLedger,
+  {IntentLedger,
    name: MyApp.IntentLedger,
    queues: [default: [shards: 4]],
    lease_ms: 30_000,
-   store: Jido.IntentLedger.Store.Memory}
+   store: IntentLedger.Store.Memory}
 ]
 
 Supervisor.start_link(children, strategy: :one_for_one)
@@ -58,24 +58,24 @@ Submit and process work:
 
 ```elixir
 {:ok, record} =
-  Jido.IntentLedger.submit(MyApp.IntentLedger, %{
+  IntentLedger.submit(MyApp.IntentLedger, %{
     key: "invoice:123",
     kind: "invoice.send",
     payload: %{invoice_id: 123},
     idempotency_key: "invoice:123:send"
   })
 
-{:ok, claimed} = Jido.IntentLedger.claim(MyApp.IntentLedger, :default, "worker-1")
+{:ok, claimed} = IntentLedger.claim(MyApp.IntentLedger, :default, "worker-1")
 
 {:ok, completed} =
-  Jido.IntentLedger.complete(
+  IntentLedger.complete(
     MyApp.IntentLedger,
     claimed.claim.id,
     claimed.claim.token,
     %{sent: true}
   )
 
-{:ok, history} = Jido.IntentLedger.history(MyApp.IntentLedger, record.intent.id)
+{:ok, history} = IntentLedger.history(MyApp.IntentLedger, record.intent.id)
 Enum.map(history, & &1.type)
 ```
 

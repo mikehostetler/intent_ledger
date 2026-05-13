@@ -1,14 +1,14 @@
-defmodule Jido.IntentLedger.Intent do
+defmodule IntentLedger.Intent do
   @moduledoc """
   A durable unit of deferred work.
 
   Intents are immutable command envelopes. Runtime progress lives in
-  `Jido.IntentLedger.IntentState`; lifecycle history is emitted as `Jido.Signal`
+  `IntentLedger.IntentState`; lifecycle history is emitted as `Jido.Signal`
   records.
   """
 
-  alias Jido.IntentLedger.ID
-  alias Jido.IntentLedger.Time
+  alias IntentLedger.ID
+  alias IntentLedger.Time
 
   @type ambiguity_policy :: :retry | :manual | :reconcile
 
@@ -107,7 +107,7 @@ defmodule Jido.IntentLedger.Intent do
   end
 
   @doc """
-  Returns the Zoi schema for `t:Jido.IntentLedger.Intent.t/0`.
+  Returns the Zoi schema for `t:IntentLedger.Intent.t/0`.
   """
   @spec schema() :: Zoi.schema()
   def schema, do: @schema

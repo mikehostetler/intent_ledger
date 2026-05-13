@@ -1,10 +1,10 @@
-defmodule Jido.IntentLedgerTest do
+defmodule IntentLedgerTest do
   use ExUnit.Case, async: false
 
-  alias Jido.IntentLedger.{Claim, Claimed, Error, Intent, IntentState, Record, ShardState, Store, Time}
+  alias IntentLedger.{Claim, Claimed, Error, Intent, IntentState, Record, ShardState, Store, Time}
 
   defmodule TestLifecycle do
-    @behaviour Jido.IntentLedger.Lifecycle
+    @behaviour IntentLedger.Lifecycle
 
     @impl true
     def before_submit(intent, _context) do
@@ -25,8 +25,7 @@ defmodule Jido.IntentLedgerTest do
     name = Module.concat(__MODULE__, "Ledger#{System.unique_integer([:positive])}")
 
     start_supervised!(
-      {Jido.IntentLedger,
-       name: name, queues: [default: [shards: 2]], lease_ms: 1_000, store: Jido.IntentLedger.Store.Memory}
+      {IntentLedger, name: name, queues: [default: [shards: 2]], lease_ms: 1_000, store: IntentLedger.Store.Memory}
     )
 
     %{ledger: name}
@@ -34,7 +33,7 @@ defmodule Jido.IntentLedgerTest do
 
   test "submits an intent, assigns a shard, and records history", %{ledger: ledger} do
     {:ok, %Record{} = record} =
-      Jido.IntentLedger.submit(ledger, %{
+      IntentLedger.submit(ledger, %{
         key: "invoice:1",
         kind: "invoice.send",
         payload: %{invoice_id: 1},
@@ -45,18 +44,18 @@ defmodule Jido.IntentLedgerTest do
     assert record.intent.queue == "default"
     assert record.intent.shard in [0, 1]
 
-    {:ok, fetched} = Jido.IntentLedger.get(ledger, record.intent.id)
+    {:ok, fetched} = IntentLedger.get(ledger, record.intent.id)
     assert fetched.intent.id == record.intent.id
     intent_id = record.intent.id
 
     assert {:error, {:idempotency_conflict, ^intent_id}} =
-             Jido.IntentLedger.submit(ledger, %{
+             IntentLedger.submit(ledger, %{
                key: "invoice:1",
                kind: "invoice.send",
                idempotency_key: "invoice:1:send"
              })
 
-    {:ok, history} = Jido.IntentLedger.history(ledger, record.intent.id)
+    {:ok, history} = IntentLedger.history(ledger, record.intent.id)
 
     assert Enum.map(history, & &1.type) == [
              "intent_ledger.intent.submitted",
@@ -66,28 +65,28 @@ defmodule Jido.IntentLedgerTest do
 
   test "claims and completes an intent with token protection", %{ledger: ledger} do
     {:ok, record} =
-      Jido.IntentLedger.submit(ledger, %{
+      IntentLedger.submit(ledger, %{
         key: "job:1",
         kind: "job.run",
         payload: %{work: true}
       })
 
-    {:ok, %Claimed{} = claimed} = Jido.IntentLedger.claim(ledger, :default, "worker-1")
+    {:ok, %Claimed{} = claimed} = IntentLedger.claim(ledger, :default, "worker-1")
     assert claimed.intent.id == record.intent.id
     assert claimed.state.status == :claimed
     assert claimed.claim.token =~ "tok_"
 
     assert {:error, :stale_claim} =
-             Jido.IntentLedger.complete(ledger, claimed.claim.id, "bad-token", :ok)
+             IntentLedger.complete(ledger, claimed.claim.id, "bad-token", :ok)
 
     {:ok, completed} =
-      Jido.IntentLedger.complete(ledger, claimed.claim.id, claimed.claim.token, %{ok: true})
+      IntentLedger.complete(ledger, claimed.claim.id, claimed.claim.token, %{ok: true})
 
     assert completed.state.status == :completed
     assert completed.state.result == %{ok: true}
-    assert :empty = Jido.IntentLedger.claim(ledger, :default, "worker-2")
+    assert :empty = IntentLedger.claim(ledger, :default, "worker-2")
 
-    {:ok, history} = Jido.IntentLedger.history(ledger, record.intent.id)
+    {:ok, history} = IntentLedger.history(ledger, record.intent.id)
 
     assert Enum.map(history, & &1.type) == [
              "intent_ledger.intent.submitted",
@@ -102,7 +101,7 @@ defmodule Jido.IntentLedgerTest do
     retry_at = Time.add_ms(now, 100)
 
     {:ok, record} =
-      Jido.IntentLedger.submit(
+      IntentLedger.submit(
         ledger,
         %{
           key: "job:retry",
@@ -112,10 +111,10 @@ defmodule Jido.IntentLedgerTest do
         now: now
       )
 
-    {:ok, claimed} = Jido.IntentLedger.claim(ledger, :default, "worker-1", now: now, lease_ms: 1_000)
+    {:ok, claimed} = IntentLedger.claim(ledger, :default, "worker-1", now: now, lease_ms: 1_000)
 
     {:ok, retry_record} =
-      Jido.IntentLedger.fail(
+      IntentLedger.fail(
         ledger,
         claimed.claim.id,
         claimed.claim.token,
@@ -126,15 +125,15 @@ defmodule Jido.IntentLedgerTest do
 
     assert retry_record.intent.id == record.intent.id
     assert retry_record.state.status == :retry_scheduled
-    assert :empty = Jido.IntentLedger.claim(ledger, :default, "worker-2", now: now)
+    assert :empty = IntentLedger.claim(ledger, :default, "worker-2", now: now)
 
     {:ok, claimed_again} =
-      Jido.IntentLedger.claim(ledger, :default, "worker-2", now: retry_at, lease_ms: 1_000)
+      IntentLedger.claim(ledger, :default, "worker-2", now: retry_at, lease_ms: 1_000)
 
     assert claimed_again.claim.attempt == 2
 
     {:ok, failed_record} =
-      Jido.IntentLedger.fail(
+      IntentLedger.fail(
         ledger,
         claimed_again.claim.id,
         claimed_again.claim.token,
@@ -150,7 +149,7 @@ defmodule Jido.IntentLedgerTest do
     expired_at = Time.add_ms(now, 2)
 
     {:ok, record} =
-      Jido.IntentLedger.submit(
+      IntentLedger.submit(
         ledger,
         %{
           key: "job:expired",
@@ -160,14 +159,14 @@ defmodule Jido.IntentLedgerTest do
         now: now
       )
 
-    {:ok, claimed} = Jido.IntentLedger.claim(ledger, :default, "worker-1", now: now, lease_ms: 1)
+    {:ok, claimed} = IntentLedger.claim(ledger, :default, "worker-1", now: now, lease_ms: 1)
 
-    {:ok, [recovered]} = Jido.IntentLedger.recover(ledger, :default, now: expired_at)
+    {:ok, [recovered]} = IntentLedger.recover(ledger, :default, now: expired_at)
     assert recovered.intent.id == record.intent.id
     assert recovered.state.status == :available
 
     {:ok, claimed_again} =
-      Jido.IntentLedger.claim(ledger, :default, "worker-2", now: expired_at, lease_ms: 1_000)
+      IntentLedger.claim(ledger, :default, "worker-2", now: expired_at, lease_ms: 1_000)
 
     assert claimed_again.intent.id == claimed.intent.id
     assert claimed_again.claim.attempt == 2
@@ -175,14 +174,14 @@ defmodule Jido.IntentLedgerTest do
 
   test "submits batches and claims multiple intents", %{ledger: ledger} do
     {:ok, records} =
-      Jido.IntentLedger.submit_many(ledger, [
+      IntentLedger.submit_many(ledger, [
         %{key: "batch:1", kind: "job.run", priority: 1},
         %{key: "batch:2", kind: "job.run", priority: 2}
       ])
 
     assert length(records) == 2
 
-    {:ok, claimed} = Jido.IntentLedger.claim(ledger, :default, "worker-1", limit: 2)
+    {:ok, claimed} = IntentLedger.claim(ledger, :default, "worker-1", limit: 2)
     assert Enum.map(claimed, & &1.intent.key) == ["batch:2", "batch:1"]
   end
 
@@ -191,51 +190,51 @@ defmodule Jido.IntentLedgerTest do
     later = Time.add_ms(now, 5)
 
     {:ok, _record} =
-      Jido.IntentLedger.submit(ledger, %{key: "job:heartbeat", kind: "job.run"}, now: now)
+      IntentLedger.submit(ledger, %{key: "job:heartbeat", kind: "job.run"}, now: now)
 
-    {:ok, claimed} = Jido.IntentLedger.claim(ledger, :default, "worker-1", now: now, lease_ms: 10)
+    {:ok, claimed} = IntentLedger.claim(ledger, :default, "worker-1", now: now, lease_ms: 10)
 
     {:ok, heartbeat} =
-      Jido.IntentLedger.heartbeat(ledger, claimed.claim.id, claimed.claim.token, now: later, lease_ms: 50)
+      IntentLedger.heartbeat(ledger, claimed.claim.id, claimed.claim.token, now: later, lease_ms: 50)
 
     assert DateTime.compare(heartbeat.lease_until, claimed.claim.lease_until) == :gt
 
-    {:ok, released} = Jido.IntentLedger.release(ledger, claimed.claim.id, claimed.claim.token, now: later)
+    {:ok, released} = IntentLedger.release(ledger, claimed.claim.id, claimed.claim.token, now: later)
     assert released.state.status == :available
 
-    {:ok, claimed_again} = Jido.IntentLedger.claim(ledger, :default, "worker-2", now: later)
+    {:ok, claimed_again} = IntentLedger.claim(ledger, :default, "worker-2", now: later)
     assert claimed_again.claim.attempt == 2
   end
 
   test "cancels, requeues, and marks intents ambiguous", %{ledger: ledger} do
     {:ok, cancelled} =
-      Jido.IntentLedger.submit(ledger, %{key: "job:cancel", kind: "job.run"})
-      |> then(fn {:ok, record} -> Jido.IntentLedger.cancel(ledger, record.intent.id, :no_longer_needed) end)
+      IntentLedger.submit(ledger, %{key: "job:cancel", kind: "job.run"})
+      |> then(fn {:ok, record} -> IntentLedger.cancel(ledger, record.intent.id, :no_longer_needed) end)
 
     assert cancelled.state.status == :cancelled
-    assert {:error, {:final_state, :cancelled}} = Jido.IntentLedger.requeue(ledger, cancelled.intent.id)
+    assert {:error, {:final_state, :cancelled}} = IntentLedger.requeue(ledger, cancelled.intent.id)
 
-    {:ok, requeued_source} = Jido.IntentLedger.submit(ledger, %{key: "job:requeue", kind: "job.run"})
+    {:ok, requeued_source} = IntentLedger.submit(ledger, %{key: "job:requeue", kind: "job.run"})
     retry_at = Time.add_ms(requeued_source.intent.visible_at, 1_000)
-    {:ok, requeued} = Jido.IntentLedger.requeue(ledger, requeued_source.intent.id, retry_at: retry_at)
+    {:ok, requeued} = IntentLedger.requeue(ledger, requeued_source.intent.id, retry_at: retry_at)
     assert requeued.state.status == :retry_scheduled
 
-    {:ok, ambiguous_source} = Jido.IntentLedger.submit(ledger, %{key: "job:ambiguous", kind: "job.run"})
-    {:ok, ambiguous} = Jido.IntentLedger.mark_ambiguous(ledger, ambiguous_source.intent.id, :manual_review)
+    {:ok, ambiguous_source} = IntentLedger.submit(ledger, %{key: "job:ambiguous", kind: "job.run"})
+    {:ok, ambiguous} = IntentLedger.mark_ambiguous(ledger, ambiguous_source.intent.id, :manual_review)
     assert ambiguous.state.status == :ambiguous
   end
 
   test "moves exhausted manual intents to ambiguous", %{ledger: ledger} do
     {:ok, _record} =
-      Jido.IntentLedger.submit(ledger, %{
+      IntentLedger.submit(ledger, %{
         key: "job:manual",
         kind: "job.run",
         max_attempts: 1,
         ambiguity_policy: :manual
       })
 
-    {:ok, claimed} = Jido.IntentLedger.claim(ledger, :default, "worker-1")
-    {:ok, ambiguous} = Jido.IntentLedger.fail(ledger, claimed.claim.id, claimed.claim.token, :boom)
+    {:ok, claimed} = IntentLedger.claim(ledger, :default, "worker-1")
+    {:ok, ambiguous} = IntentLedger.fail(ledger, claimed.claim.id, claimed.claim.token, :boom)
 
     assert ambiguous.state.status == :ambiguous
   end
@@ -244,32 +243,32 @@ defmodule Jido.IntentLedgerTest do
     now = ~U[2026-01-01 00:00:00Z]
 
     {:ok, _record} =
-      Jido.IntentLedger.submit(
+      IntentLedger.submit(
         ledger,
         %{key: "job:expired-manual", kind: "job.run", max_attempts: 1, ambiguity_policy: :manual},
         now: now
       )
 
-    {:ok, _claimed} = Jido.IntentLedger.claim(ledger, :default, "worker-1", now: now, lease_ms: 1)
-    {:ok, [ambiguous]} = Jido.IntentLedger.recover(ledger, :default, now: Time.add_ms(now, 2))
+    {:ok, _claimed} = IntentLedger.claim(ledger, :default, "worker-1", now: now, lease_ms: 1)
+    {:ok, [ambiguous]} = IntentLedger.recover(ledger, :default, now: Time.add_ms(now, 2))
 
     assert ambiguous.state.status == :ambiguous
   end
 
   test "validates inputs and time coercion", %{ledger: ledger} do
-    assert {:error, {:required, :kind}} = Jido.IntentLedger.submit(ledger, %{key: "bad"})
+    assert {:error, {:required, :kind}} = IntentLedger.submit(ledger, %{key: "bad"})
 
     assert {:error, {:invalid_positive_integer, :max_attempts, 0}} =
-             Jido.IntentLedger.submit(ledger, %{key: "bad:attempts", kind: "job.run", max_attempts: 0})
+             IntentLedger.submit(ledger, %{key: "bad:attempts", kind: "job.run", max_attempts: 0})
 
     visible_at = "2026-01-01T00:00:00Z"
-    {:ok, record} = Jido.IntentLedger.submit(ledger, %{key: "job:iso", kind: :run, visible_at: visible_at})
+    {:ok, record} = IntentLedger.submit(ledger, %{key: "job:iso", kind: :run, visible_at: visible_at})
 
     assert record.intent.kind == "run"
     assert record.intent.visible_at == ~U[2026-01-01 00:00:00Z]
 
     assert {:error, {:invalid_datetime, "not-a-date", :invalid_format}} =
-             Jido.IntentLedger.submit(ledger, %{key: "bad:time", kind: "job.run", visible_at: "not-a-date"})
+             IntentLedger.submit(ledger, %{key: "bad:time", kind: "job.run", visible_at: "not-a-date"})
   end
 
   test "runs lifecycle hooks", %{ledger: _ledger} do
@@ -277,9 +276,9 @@ defmodule Jido.IntentLedgerTest do
 
     name = Module.concat(__MODULE__, "HookedLedger#{System.unique_integer([:positive])}")
 
-    start_supervised!({Jido.IntentLedger, name: name, lifecycle: TestLifecycle, store: Jido.IntentLedger.Store.Memory})
+    start_supervised!({IntentLedger, name: name, lifecycle: TestLifecycle, store: IntentLedger.Store.Memory})
 
-    {:ok, record} = Jido.IntentLedger.submit(name, %{key: "job:hooked", kind: "job.run"})
+    {:ok, record} = IntentLedger.submit(name, %{key: "job:hooked", kind: "job.run"})
 
     assert record.intent.metadata.hooked
     assert_receive {:lifecycle_signal, "intent_ledger.intent.submitted"}
@@ -290,10 +289,10 @@ defmodule Jido.IntentLedgerTest do
   end
 
   test "exposes schemas and error helpers" do
-    assert %Jido.IntentLedger.Claim{} = struct!(Jido.IntentLedger.Claim, [])
-    assert %Jido.IntentLedger.Claimed{} = struct!(Jido.IntentLedger.Claimed, [])
-    assert %Jido.IntentLedger.Record{} = struct!(Jido.IntentLedger.Record, [])
-    assert %Jido.IntentLedger.ShardState{} = struct!(Jido.IntentLedger.ShardState, [])
+    assert %IntentLedger.Claim{} = struct!(IntentLedger.Claim, [])
+    assert %IntentLedger.Claimed{} = struct!(IntentLedger.Claimed, [])
+    assert %IntentLedger.Record{} = struct!(IntentLedger.Record, [])
+    assert %IntentLedger.ShardState{} = struct!(IntentLedger.ShardState, [])
     assert %Zoi.Types.Struct{} = Claim.schema()
     assert %Zoi.Types.Struct{} = Claimed.schema()
     assert %Zoi.Types.Struct{} = Record.schema()
@@ -313,11 +312,11 @@ defmodule Jido.IntentLedgerTest do
     assert Exception.message(Error.invalid("bad input", field: :key, value: nil)) == "bad input"
     assert Exception.message(Error.runtime("store failed", details: :boom)) == "store failed"
     assert Exception.message(Error.invalid("raw", :details)) == "raw"
-    assert {Jido.IntentLedger.Store.Memory, []} = Store.normalize_spec(nil)
-    assert {Jido.IntentLedger.Store.Memory, []} = Store.normalize_spec(Jido.IntentLedger.Store.Memory)
+    assert {IntentLedger.Store.Memory, []} = Store.normalize_spec(nil)
+    assert {IntentLedger.Store.Memory, []} = Store.normalize_spec(IntentLedger.Store.Memory)
 
-    assert {Jido.IntentLedger.Store.Memory, [foo: :bar]} =
-             Store.normalize_spec({Jido.IntentLedger.Store.Memory, foo: :bar})
+    assert {IntentLedger.Store.Memory, [foo: :bar]} =
+             Store.normalize_spec({IntentLedger.Store.Memory, foo: :bar})
 
     assert {:ok, %DateTime{}} = Time.normalize(nil, nil)
     assert {:error, {:invalid_datetime, :bad}} = Time.normalize(:bad, nil)
@@ -326,11 +325,11 @@ defmodule Jido.IntentLedgerTest do
   test "starts and stops manual instances" do
     name = Module.concat(__MODULE__, "ManualLedger#{System.unique_integer([:positive])}")
 
-    assert {:ok, _pid} = Jido.IntentLedger.Instance.start_link(name: name)
-    assert Jido.IntentLedger.Instance.running?(name)
-    assert :ok = Jido.IntentLedger.Instance.stop(name)
-    refute Jido.IntentLedger.Instance.running?(name)
-    refute Jido.IntentLedger.Instance.running?(Module.concat(__MODULE__, :MissingLedger))
-    assert :ok = Jido.IntentLedger.Instance.stop(Module.concat(__MODULE__, :MissingLedger))
+    assert {:ok, _pid} = IntentLedger.Instance.start_link(name: name)
+    assert IntentLedger.Instance.running?(name)
+    assert :ok = IntentLedger.Instance.stop(name)
+    refute IntentLedger.Instance.running?(name)
+    refute IntentLedger.Instance.running?(Module.concat(__MODULE__, :MissingLedger))
+    assert :ok = IntentLedger.Instance.stop(Module.concat(__MODULE__, :MissingLedger))
   end
 end

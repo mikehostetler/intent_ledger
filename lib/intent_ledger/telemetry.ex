@@ -1,4 +1,4 @@
-defmodule Jido.IntentLedger.Telemetry do
+defmodule IntentLedger.Telemetry do
   @moduledoc false
 
   @default_prefix [:intent_ledger]

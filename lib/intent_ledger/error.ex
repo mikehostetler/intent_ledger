@@ -1,4 +1,4 @@
-defmodule Jido.IntentLedger.Error do
+defmodule IntentLedger.Error do
   @moduledoc """
   Error namespace for intent ledger failures.
 
@@ -9,11 +9,11 @@ defmodule Jido.IntentLedger.Error do
 
   use Splode,
     error_classes: [
-      invalid: Jido.IntentLedger.Error.Invalid,
-      runtime: Jido.IntentLedger.Error.Runtime
+      invalid: IntentLedger.Error.Invalid,
+      runtime: IntentLedger.Error.Runtime
     ],
-    unknown_error: Jido.IntentLedger.Error.Runtime.UnknownError,
-    filter_stacktraces: [Jido.IntentLedger, "Jido.IntentLedger."]
+    unknown_error: IntentLedger.Error.Runtime.UnknownError,
+    filter_stacktraces: [IntentLedger, "IntentLedger."]
 
   defmodule Invalid do
     @moduledoc """
