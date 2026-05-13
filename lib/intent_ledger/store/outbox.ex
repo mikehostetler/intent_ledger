@@ -83,7 +83,7 @@ defmodule IntentLedger.Store.Outbox do
   end
 
   @doc """
-  Converts an outbox struct into the tuple request accepted by `IntentLedger.Store.outbox/4`.
+  Converts an outbox struct into the tuple request accepted by `c:IntentLedger.Store.outbox/4`.
   """
   @spec to_request(t()) :: {kind(), map()}
   def to_request(%__MODULE__{} = outbox) do

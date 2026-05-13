@@ -1,10 +1,11 @@
 defmodule IntentLedger.Store.Memory do
   @moduledoc """
-  In-memory store adapter for tests and local spikes.
+  In-memory reference store adapter for tests and local examples.
 
-  This adapter keeps the same commit semantics expected from a durable store:
-  every lifecycle operation updates state and appends lifecycle signals inside
-  one GenServer call.
+  This adapter keeps the same semantic commit shape expected from durable
+  stores: every lifecycle operation updates state and appends lifecycle signals
+  inside one GenServer call. It is process-local, loses state on restart, and is
+  not a clustered production backend.
   """
 
   use GenServer

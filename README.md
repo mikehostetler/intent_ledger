@@ -20,7 +20,9 @@ callers.
 - `IntentLedger.InstanceSupervisor` owns a named ledger instance.
 - The server process validates API calls and delegates atomic commits.
 - `IntentLedger.Store` defines the persistence contract.
-- `IntentLedger.Store.Memory` is the executable in-memory contract for tests.
+- `IntentLedger.Store.Memory` is the executable in-memory reference adapter for
+  tests and local examples. It is not durable and is not a clustered production
+  backend.
 - `IntentLedger.Lifecycle` provides optional hooks for submit enrichment and
   post-transition observation.
 
@@ -41,6 +43,10 @@ end
 ## Usage
 
 Start a named ledger under your supervision tree:
+
+The example below uses `IntentLedger.Store.Memory` so it can run without
+external services. Use a durable `IntentLedger.Store` adapter for production or
+for any workflow that must survive process restart.
 
 ```elixir
 children = [

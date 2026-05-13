@@ -68,7 +68,7 @@ defmodule IntentLedger.Store.Listing do
   end
 
   @doc """
-  Converts a listing struct into the tuple request accepted by `IntentLedger.Store.listing/4`.
+  Converts a listing struct into the tuple request accepted by `c:IntentLedger.Store.listing/4`.
   """
   @spec to_request(t()) :: {kind(), map()}
   def to_request(%__MODULE__{} = listing) do
