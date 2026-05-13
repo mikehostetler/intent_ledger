@@ -35,13 +35,16 @@ defmodule IntentLedger.Store.Ecto do
           {:name, GenServer.name()}
           | {:repo, module()}
           | {:prefix, String.t() | nil}
+          | {:tables, keyword() | map()}
 
   defstruct repo: nil,
-            prefix: nil
+            prefix: nil,
+            tables: %{}
 
   @type t :: %__MODULE__{
           repo: module(),
-          prefix: String.t() | nil
+          prefix: String.t() | nil,
+          tables: map()
         }
 
   @doc false
@@ -66,7 +69,11 @@ defmodule IntentLedger.Store.Ecto do
 
     with :ok <- ensure_available(),
          {:ok, repo} <- fetch_repo(opts) do
-      GenServer.start_link(__MODULE__, %{repo: repo, prefix: Keyword.get(opts, :prefix)}, name: name)
+      GenServer.start_link(
+        __MODULE__,
+        %{repo: repo, prefix: Keyword.get(opts, :prefix), tables: Keyword.get(opts, :tables, %{})},
+        name: name
+      )
     end
   end
 
