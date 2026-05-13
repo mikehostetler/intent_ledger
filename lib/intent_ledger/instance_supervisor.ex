@@ -56,7 +56,8 @@ defmodule IntentLedger.InstanceSupervisor do
     children = [
       {Registry, keys: :unique, name: Names.registry(name)},
       store_module.child_spec(Keyword.put(store_opts, :name, store_name)),
-      {IntentLedger.Server, server_opts}
+      {IntentLedger.Server, server_opts},
+      {IntentLedger.QueueSupervisor, Keyword.take(opts, [:name, :queues, :lease_ms])}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

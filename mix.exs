@@ -130,6 +130,8 @@ defmodule IntentLedger.MixProject do
           IntentLedger.Instance,
           IntentLedger.InstanceSupervisor,
           IntentLedger.Lifecycle,
+          IntentLedger.QueueSupervisor,
+          IntentLedger.QueueShardServer,
           IntentLedger.Store,
           IntentLedger.Store.Commit,
           IntentLedger.Store.CommitRequest,

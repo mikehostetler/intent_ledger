@@ -10,6 +10,18 @@ defmodule IntentLedger.Names do
   def registry(name), do: Module.concat(name, Registry)
 
   @doc false
+  @spec queue_supervisor(atom()) :: atom()
+  def queue_supervisor(name), do: Module.concat(name, QueueSupervisor)
+
+  @doc false
   @spec store(atom()) :: atom()
   def store(name), do: Module.concat(name, Store)
+
+  @doc false
+  @spec queue_shard(String.t() | atom(), non_neg_integer()) :: {:queue_shard, String.t(), non_neg_integer()}
+  def queue_shard(queue, shard), do: {:queue_shard, to_string(queue), shard}
+
+  @doc false
+  @spec via(atom(), term()) :: {:via, Registry, {atom(), term()}}
+  def via(name, key), do: {:via, Registry, {registry(name), key}}
 end

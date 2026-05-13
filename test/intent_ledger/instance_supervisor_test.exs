@@ -29,7 +29,10 @@ defmodule IntentLedger.InstanceSupervisorTest do
     assert Process.whereis(Names.supervisor(name)) == supervisor
     assert Process.whereis(Names.registry(name))
     assert Process.whereis(Names.store(name))
+    assert Process.whereis(Names.queue_supervisor(name))
     assert Process.whereis(name)
+    assert [{_default_0, _}] = Registry.lookup(Names.registry(name), Names.queue_shard(:default, 0))
+    assert [{_default_1, _}] = Registry.lookup(Names.registry(name), Names.queue_shard(:default, 1))
 
     assert {:ok, record} =
              IntentLedger.submit(name, %{
