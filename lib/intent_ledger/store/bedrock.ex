@@ -14,7 +14,7 @@ defmodule IntentLedger.Store.Bedrock do
   use GenServer
 
   alias IntentLedger.{Error, Store}
-  alias IntentLedger.Store.{Commit, CommitRequest}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict}
   alias IntentLedger.Store.Bedrock.{Keyspace, Value}
 
   @dependency :bedrock
@@ -161,15 +161,69 @@ defmodule IntentLedger.Store.Bedrock do
   defp normalize_transact_result(other),
     do: {:error, adapter_error("Bedrock transaction returned an invalid result", result: other)}
 
-  defp compile_commit(_repo, _ledger, %CommitRequest{preconditions: [_ | _]} = request) do
+  defp compile_commit(repo, ledger, %CommitRequest{} = request) do
+    case check_preconditions(repo, ledger, request) do
+      :ok ->
+        compile_writes(repo, ledger, request)
+
+      {:replay, entry} ->
+        {:ok,
+         Commit.new(
+           command_id: request.command_id,
+           result: Map.get(entry, :result),
+           replayed: true,
+           replay_of: request.command_id
+         )}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp check_preconditions(repo, ledger, %CommitRequest{} = request) do
+    Enum.reduce_while(request.preconditions, :ok, fn precondition, :ok ->
+      case check_precondition(repo, ledger, request, precondition) do
+        :ok -> {:cont, :ok}
+        {:replay, entry} -> {:halt, {:replay, entry}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp check_precondition(repo, ledger, %CommitRequest{}, %{type: :command_absent, key: command_id}) do
+    case fetch_command(repo, ledger, command_id) do
+      {:ok, nil} -> :ok
+      {:ok, _entry} -> {:error, Conflict.command_conflict(command_id, :absent, :present)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp check_precondition(repo, ledger, %CommitRequest{} = request, %{type: :command_replay, key: command_id}) do
+    case fetch_command(repo, ledger, command_id) do
+      {:ok, nil} ->
+        {:error, Conflict.new(:command_replay, key: command_id, expected: :present, actual: :absent)}
+
+      {:ok, entry} ->
+        if Map.get(entry, :signature) == command_signature(request) do
+          {:replay, entry}
+        else
+          {:error, Conflict.command_conflict(command_id, Map.get(entry, :signature), command_signature(request))}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp check_precondition(_repo, _ledger, _request, precondition) do
     {:error,
-     adapter_error("Bedrock commit preconditions are not implemented yet",
-       reason: :unsupported_preconditions,
-       preconditions: Enum.map(request.preconditions, & &1.type)
+     adapter_error("Bedrock commit precondition is not implemented yet",
+       reason: :unsupported_precondition,
+       precondition_type: precondition.type
      )}
   end
 
-  defp compile_commit(repo, ledger, %CommitRequest{} = request) do
+  defp compile_writes(repo, ledger, %CommitRequest{} = request) do
     Enum.reduce_while(request.writes, {:ok, %{result: nil, signals: []}}, fn write, {:ok, acc} ->
       case compile_write(repo, ledger, request, write, acc) do
         {:ok, next_acc} -> {:cont, {:ok, next_acc}}
@@ -264,7 +318,21 @@ defmodule IntentLedger.Store.Bedrock do
   end
 
   defp put(repo, key, value), do: apply(repo, :put, [key, value])
+  defp get(repo, key), do: apply(repo, :get, [key])
   defp clear(repo, key), do: apply(repo, :clear, [key])
+
+  defp fetch_command(repo, ledger, command_id) do
+    case get(repo, Keyspace.command(ledger, command_id)) do
+      nil ->
+        {:ok, nil}
+
+      encoded ->
+        case Value.unpack_command(encoded) do
+          {:ok, entry} -> {:ok, entry}
+          {:error, reason} -> {:error, adapter_error("invalid Bedrock command replay value", reason: reason)}
+        end
+    end
+  end
 
   defp fetch_metadata_version(metadata) when is_map(metadata) do
     case Map.fetch(metadata, :version) do

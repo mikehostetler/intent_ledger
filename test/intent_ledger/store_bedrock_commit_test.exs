@@ -9,6 +9,7 @@ defmodule IntentLedger.StoreBedrockCommitTest do
     def transact(fun, opts) do
       test_pid = Keyword.fetch!(opts, :test_pid)
       Process.put(:ops, [])
+      Process.put(:values, Keyword.get(opts, :values, %{}))
       send(test_pid, {:transact, Keyword.delete(opts, :test_pid)})
 
       result = fun.(__MODULE__)
@@ -17,10 +18,16 @@ defmodule IntentLedger.StoreBedrockCommitTest do
       result
     after
       Process.delete(:ops)
+      Process.delete(:values)
     end
 
     def put(key, value), do: record({:put, key, value})
     def clear(key), do: record({:clear, key})
+
+    def get(key) do
+      record({:get, key})
+      Map.get(Process.get(:values, %{}), key)
+    end
 
     defp record(op) do
       Process.put(:ops, [op | Process.get(:ops, [])])
@@ -123,10 +130,88 @@ defmodule IntentLedger.StoreBedrockCommitTest do
     assert {:ok, %{key: "out_1", sequence: 1}} = Value.unpack_outbox(outbox_value)
   end
 
-  test "rejects preconditions until dedicated semantic compilers land", %{store: store} do
-    request = CommitRequest.new(preconditions: [Precondition.command_absent("cmd_1")])
+  test "checks command_absent before writing command replay records", %{store: store} do
+    result = %{intent_id: "int_1"}
 
-    assert {:error, %IntentLedger.Error.AdapterRuntimeError{details: %{reason: :unsupported_preconditions}}} =
+    request =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        operation: :submit,
+        command: %{key: "job:1"},
+        preconditions: [Precondition.command_absent("cmd_1")],
+        writes: [Write.put_idempotency("cmd_1", result)]
+      )
+
+    assert {:ok, %Commit{result: ^result}} = Bedrock.commit(store, @ledger, request, [])
+
+    command_key = Keyspace.command(@ledger, "cmd_1")
+
+    assert_receive {:transact, []}
+    assert_receive {:ops, [{:get, ^command_key}, {:put, ^command_key, encoded}]}
+    assert {:ok, %{signature: {:submit, %{key: "job:1"}}, result: ^result}} = Value.unpack_command(encoded)
+  end
+
+  test "returns a command conflict when command_absent finds an existing command", %{store: store} do
+    command_key = Keyspace.command(@ledger, "cmd_1")
+    existing = Value.pack_command(%{signature: {:submit, %{key: "job:1"}}, result: %{intent_id: "int_1"}})
+
+    request =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        preconditions: [Precondition.command_absent("cmd_1")]
+      )
+
+    assert {:error, %IntentLedger.Store.Conflict{type: :command_conflict}} =
+             Bedrock.commit(store, @ledger, request, transaction_opts: [values: %{command_key => existing}])
+
+    assert_receive {:transact, [values: %{^command_key => ^existing}]}
+    assert_receive {:ops, [{:get, ^command_key}]}
+  end
+
+  test "replays an existing command without applying writes", %{store: store} do
+    command_key = Keyspace.command(@ledger, "cmd_1")
+    result = %{intent_id: "int_1"}
+    existing = Value.pack_command(%{signature: {:submit, %{key: "job:1"}}, result: result})
+
+    request =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        operation: :submit,
+        command: %{key: "job:1"},
+        preconditions: [Precondition.command_replay("cmd_1")],
+        writes: [Write.put_idempotency("cmd_1", %{intent_id: "other"})]
+      )
+
+    assert {:ok, %Commit{result: ^result, replayed: true, replay_of: "cmd_1", writes: []}} =
+             Bedrock.commit(store, @ledger, request, transaction_opts: [values: %{command_key => existing}])
+
+    assert_receive {:transact, [values: %{^command_key => ^existing}]}
+    assert_receive {:ops, [{:get, ^command_key}]}
+  end
+
+  test "rejects command replay when the stored signature differs", %{store: store} do
+    command_key = Keyspace.command(@ledger, "cmd_1")
+    existing = Value.pack_command(%{signature: {:submit, %{key: "job:1"}}, result: %{intent_id: "int_1"}})
+
+    request =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        operation: :submit,
+        command: %{key: "other"},
+        preconditions: [Precondition.command_replay("cmd_1")]
+      )
+
+    assert {:error, %IntentLedger.Store.Conflict{type: :command_conflict}} =
+             Bedrock.commit(store, @ledger, request, transaction_opts: [values: %{command_key => existing}])
+  end
+
+  test "rejects preconditions reserved for later semantic compilers", %{store: store} do
+    request = CommitRequest.new(preconditions: [Precondition.stream_version("intent:int_1", 0)])
+
+    assert {:error,
+            %IntentLedger.Error.AdapterRuntimeError{
+              details: %{reason: :unsupported_precondition, precondition_type: :stream_version}
+            }} =
              Bedrock.commit(store, @ledger, request, [])
 
     assert_receive {:transact, []}
