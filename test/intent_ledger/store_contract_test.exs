@@ -470,4 +470,103 @@ defmodule IntentLedger.StoreContractTest do
     assert {:error, %Conflict{type: :claim_fence}} =
              IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, after_release, [])
   end
+
+  test "memory adapter enforces v1 shard lease fences and takeover" do
+    store =
+      start_supervised!({IntentLedger.Store.Memory, name: :"store_v1_shard_#{System.unique_integer([:positive])}"})
+
+    now = ~U[2026-01-01 00:00:00Z]
+    lease_until = ~U[2026-01-01 00:00:30Z]
+    expired_at = ~U[2026-01-01 00:00:31Z]
+
+    acquire =
+      CommitRequest.new(
+        command_id: "cmd_shard_acquire",
+        operation: :shard_acquire,
+        preconditions: [Precondition.shard_available(:default, 0, now)],
+        writes: [Write.put_shard_lease(:default, 0, %{owner_id: "node-a", lease_until: lease_until})]
+      )
+
+    assert {:ok, %Commit{}} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, acquire, [])
+
+    duplicate =
+      CommitRequest.new(
+        command_id: "cmd_shard_duplicate",
+        operation: :shard_acquire,
+        preconditions: [Precondition.shard_available(:default, 0, now)],
+        writes: [Write.put_shard_lease(:default, 0, %{owner_id: "node-b", lease_until: lease_until})]
+      )
+
+    assert {:error, %Conflict{type: :shard_lease}} =
+             IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, duplicate, [])
+
+    takeover =
+      CommitRequest.new(
+        command_id: "cmd_shard_takeover",
+        operation: :shard_takeover,
+        preconditions: [Precondition.shard_expired(:default, 0, expired_at)],
+        writes: [Write.put_shard_lease(:default, 0, %{owner_id: "node-b", lease_until: ~U[2026-01-01 00:01:00Z]})]
+      )
+
+    assert {:ok, %Commit{}} = IntentLedger.Store.Memory.commit(store, MyApp.IntentLedger, takeover, [])
+  end
+
+  test "memory adapter exposes shard lease acquire renew release and takeover callbacks" do
+    store =
+      start_supervised!({IntentLedger.Store.Memory, name: :"store_v1_shard_cb_#{System.unique_integer([:positive])}"})
+
+    now = ~U[2026-01-01 00:00:00Z]
+    lease_until = ~U[2026-01-01 00:00:30Z]
+    renewed_until = ~U[2026-01-01 00:01:00Z]
+    expired_at = ~U[2026-01-01 00:00:31Z]
+
+    assert {:ok, %{owner_id: "node-a", lease_until: ^lease_until}} =
+             IntentLedger.Store.Memory.lease(
+               store,
+               MyApp.IntentLedger,
+               {:shard, :acquire, %{queue: :default, shard: 0, owner_id: "node-a", lease_until: lease_until, now: now}},
+               []
+             )
+
+    assert {:error, %Conflict{type: :shard_lease}} =
+             IntentLedger.Store.Memory.lease(
+               store,
+               MyApp.IntentLedger,
+               {:shard, :acquire, %{queue: :default, shard: 0, owner_id: "node-b", lease_until: lease_until, now: now}},
+               []
+             )
+
+    assert {:ok, %{owner_id: "node-a", lease_until: ^renewed_until}} =
+             IntentLedger.Store.Memory.lease(
+               store,
+               MyApp.IntentLedger,
+               {:shard, :renew, %{queue: :default, shard: 0, owner_id: "node-a", lease_until: renewed_until, now: now}},
+               []
+             )
+
+    assert {:ok, %{owner_id: "node-a"}} =
+             IntentLedger.Store.Memory.lease(
+               store,
+               MyApp.IntentLedger,
+               {:shard, :release, %{queue: :default, shard: 0, owner_id: "node-a", now: now}},
+               []
+             )
+
+    assert {:ok, %{owner_id: "node-b"}} =
+             IntentLedger.Store.Memory.lease(
+               store,
+               MyApp.IntentLedger,
+               {:shard, :acquire, %{queue: :default, shard: 0, owner_id: "node-b", lease_until: lease_until, now: now}},
+               []
+             )
+
+    assert {:ok, %{owner_id: "node-c"}} =
+             IntentLedger.Store.Memory.lease(
+               store,
+               MyApp.IntentLedger,
+               {:shard, :takeover,
+                %{queue: :default, shard: 0, owner_id: "node-c", lease_until: renewed_until, now: expired_at}},
+               []
+             )
+  end
 end

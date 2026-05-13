@@ -28,6 +28,7 @@ defmodule IntentLedger.Store.Memory do
             claims: %{},
             idempotency: %{},
             commands: %{},
+            shard_leases: %{},
             streams: %{}
 
   @type t :: %__MODULE__{
@@ -36,6 +37,7 @@ defmodule IntentLedger.Store.Memory do
           claims: map(),
           idempotency: %{optional(String.t()) => String.t()},
           commands: %{optional(String.t()) => map()},
+          shard_leases: %{optional(String.t()) => map()},
           streams: %{optional(String.t()) => [Jido.Signal.t()]}
         }
 
@@ -199,7 +201,11 @@ defmodule IntentLedger.Store.Memory do
   end
 
   def handle_call({:store_v1_lease, _ledger, request, _opts}, _from, state) do
-    {:reply, unsupported_store_v1(:lease, request), state}
+    case apply_shard_lease_request(state, request) do
+      {:ok, reply, next_state} -> {:reply, {:ok, reply}, next_state}
+      {:error, conflict} -> {:reply, {:error, conflict}, state}
+      :unsupported -> {:reply, unsupported_store_v1(:lease, request), state}
+    end
   end
 
   def handle_call({:store_v1_listing, _ledger, request, _opts}, _from, state) do
@@ -754,11 +760,19 @@ defmodule IntentLedger.Store.Memory do
   defp supported_commit?(%CommitRequest{} = request) do
     Enum.all?(
       request.preconditions,
-      &(&1.type in [:command_absent, :command_replay, :stream_version, :intent_status, :claim_fence])
+      &(&1.type in [:command_absent, :command_replay, :stream_version, :intent_status, :claim_fence, :shard_lease])
     ) and
       Enum.all?(
         request.writes,
-        &(&1.type in [:append_signal, :put_idempotency, :put_state, :put_claim, :delete_claim])
+        &(&1.type in [
+            :append_signal,
+            :put_idempotency,
+            :put_state,
+            :put_claim,
+            :delete_claim,
+            :put_shard_lease,
+            :delete_shard_lease
+          ])
       )
   end
 
@@ -807,6 +821,12 @@ defmodule IntentLedger.Store.Memory do
           nil -> {:cont, :ok}
           conflict -> {:halt, {:error, conflict}}
         end
+
+      %{type: :shard_lease, key: key, expected: expected, metadata: metadata}, :ok ->
+        case shard_lease_conflict(state, key, expected, metadata) do
+          nil -> {:cont, :ok}
+          conflict -> {:halt, {:error, conflict}}
+        end
     end)
   end
 
@@ -830,6 +850,12 @@ defmodule IntentLedger.Store.Memory do
 
       %{type: :delete_claim, key: key}, {acc_state, result, signals} ->
         {%{acc_state | claims: Map.delete(acc_state.claims, key)}, result, signals}
+
+      %{type: :put_shard_lease, key: key, value: value}, {acc_state, result, signals} ->
+        {%{acc_state | shard_leases: Map.put(acc_state.shard_leases, key, value)}, result, signals}
+
+      %{type: :delete_shard_lease, key: key}, {acc_state, result, signals} ->
+        {%{acc_state | shard_leases: Map.delete(acc_state.shard_leases, key)}, result, signals}
     end)
   end
 
@@ -867,6 +893,133 @@ defmodule IntentLedger.Store.Memory do
   defp store_field(value, key, default \\ nil)
   defp store_field(value, key, default) when is_map(value), do: Map.get(value, key, default)
   defp store_field(_value, _key, default), do: default
+
+  defp shard_lease_conflict(state, key, expected, metadata) do
+    lease = Map.get(state.shard_leases, key)
+    now = Map.get(metadata, :now)
+
+    cond do
+      Map.has_key?(expected, :available_at) and (is_nil(lease) or store_lease_expired?(lease, expected.available_at)) ->
+        nil
+
+      Map.has_key?(expected, :expired_at_or_before) and not is_nil(lease) and
+          store_lease_expired?(lease, expected.expired_at_or_before) ->
+        nil
+
+      Map.get(expected, :status) == :current and not is_nil(lease) and
+        store_field(lease, :owner_id) == expected.owner_id and store_lease_current?(lease, now) ->
+        nil
+
+      true ->
+        Conflict.new(:shard_lease,
+          key: key,
+          expected: expected,
+          actual: lease || :missing,
+          message: "shard lease conflict"
+        )
+    end
+  end
+
+  defp apply_shard_lease_request(state, {:shard, operation, attrs}) when is_map(attrs) or is_list(attrs) do
+    attrs = normalize_attrs(attrs)
+
+    case {Map.fetch(attrs, :queue), Map.fetch(attrs, :shard)} do
+      {{:ok, queue}, {:ok, shard}} ->
+        key = shard_key(queue, shard)
+        now = Map.get(attrs, :now)
+
+        case operation do
+          :acquire ->
+            lease = shard_lease_value(attrs)
+            expected = %{available_at: now}
+
+            if is_nil(shard_lease_conflict(state, key, expected, %{})) do
+              next_state = %{state | shard_leases: Map.put(state.shard_leases, key, lease)}
+              {:ok, lease, next_state}
+            else
+              {:error,
+               Conflict.new(:shard_lease,
+                 key: key,
+                 expected: expected,
+                 actual: Map.get(state.shard_leases, key, :missing),
+                 message: "shard lease conflict"
+               )}
+            end
+
+          :renew ->
+            with nil <-
+                   shard_lease_conflict(
+                     state,
+                     key,
+                     %{owner_id: to_string(Map.fetch!(attrs, :owner_id)), status: :current},
+                     %{now: now}
+                   ) do
+              lease = shard_lease_value(attrs)
+              next_state = %{state | shard_leases: Map.put(state.shard_leases, key, lease)}
+              {:ok, lease, next_state}
+            else
+              conflict -> {:error, conflict}
+            end
+
+          :release ->
+            with nil <-
+                   shard_lease_conflict(
+                     state,
+                     key,
+                     %{owner_id: to_string(Map.fetch!(attrs, :owner_id)), status: :current},
+                     %{now: now}
+                   ) do
+              lease = Map.fetch!(state.shard_leases, key)
+              next_state = %{state | shard_leases: Map.delete(state.shard_leases, key)}
+              {:ok, lease, next_state}
+            else
+              conflict -> {:error, conflict}
+            end
+
+          operation when operation in [:expire, :takeover] ->
+            expected = %{expired_at_or_before: now}
+
+            with nil <- shard_lease_conflict(state, key, expected, %{}) do
+              case operation do
+                :expire ->
+                  lease = Map.fetch!(state.shard_leases, key)
+                  next_state = %{state | shard_leases: Map.delete(state.shard_leases, key)}
+                  {:ok, lease, next_state}
+
+                :takeover ->
+                  lease = shard_lease_value(attrs)
+                  next_state = %{state | shard_leases: Map.put(state.shard_leases, key, lease)}
+                  {:ok, lease, next_state}
+              end
+            else
+              conflict -> {:error, conflict}
+            end
+
+          _operation ->
+            :unsupported
+        end
+
+      _missing ->
+        :unsupported
+    end
+  end
+
+  defp apply_shard_lease_request(_state, _request), do: :unsupported
+
+  defp shard_lease_value(attrs) do
+    %{
+      queue: to_string(Map.fetch!(attrs, :queue)),
+      shard: Map.fetch!(attrs, :shard),
+      owner_id: to_string(Map.fetch!(attrs, :owner_id)),
+      lease_until: Map.fetch!(attrs, :lease_until)
+    }
+  end
+
+  defp store_lease_expired?(lease, now), do: DateTime.compare(store_field(lease, :lease_until), now) != :gt
+  defp shard_key(queue, shard), do: "shard:" <> to_string(queue) <> ":" <> to_string(shard)
+
+  defp normalize_attrs(attrs) when is_list(attrs), do: Map.new(attrs)
+  defp normalize_attrs(attrs) when is_map(attrs), do: attrs
 
   defp command_signature(%CommitRequest{} = request), do: {request.operation, request.command}
 
