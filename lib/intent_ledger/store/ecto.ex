@@ -1,14 +1,21 @@
 defmodule IntentLedger.Store.Ecto do
   @moduledoc """
-  Ecto/Postgres-backed local store adapter scaffold.
+  Ecto/Postgres-backed local and single-node store adapter.
 
   Ecto SQL and Postgrex are optional dependencies so applications that use the
   memory or Bedrock adapters do not pull in an Ecto stack. Projects that
   configure this adapter must include `:ecto_sql` and `:postgrex`, and must pass
   an Ecto repo configured with the Postgres adapter.
 
-  This module currently owns dependency and repo guardrails. The SQL Store V1
-  operations are implemented by later Ecto adapter tasks.
+  This adapter is intentionally scoped to local durable development and
+  single-node deployments. SQL transactions provide atomicity within one Ecto
+  repo, but this adapter does not coordinate multiple BEAM nodes and is not the
+  clustered production backend for Intent Ledger. Use
+  `IntentLedger.Store.Bedrock` for clustered deployments.
+
+  Store V1 coverage is implemented incrementally. Unsupported callbacks return
+  normalized `IntentLedger.Error.AdapterRuntimeError` values rather than leaking
+  backend-specific failures.
   """
 
   @behaviour IntentLedger.Store

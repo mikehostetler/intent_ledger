@@ -1,12 +1,16 @@
 if Code.ensure_loaded?(Ecto.Migration) do
   defmodule IntentLedger.Store.Ecto.Migration do
     @moduledoc """
-    Migration helpers for the local Ecto/Postgres store adapter.
+    Migration helpers for the local and single-node Ecto/Postgres store adapter.
 
     Call `up/1` and `down/1` from an application migration, or call `change/1`
     when your migration can rely on Ecto's reversible create/drop commands.
     Options accept a repo module for parity with `IntentLedger.Store.Ecto`,
     a Postgres schema prefix, and table-name overrides.
+
+    These tables support the `IntentLedger.Store.Ecto` local durable adapter.
+    They are not a clustered coordination layer; use
+    `IntentLedger.Store.Bedrock` for multi-node deployments.
     """
 
     use Ecto.Migration
@@ -228,7 +232,7 @@ if Code.ensure_loaded?(Ecto.Migration) do
 else
   defmodule IntentLedger.Store.Ecto.Migration do
     @moduledoc """
-    Migration helpers for the local Ecto/Postgres store adapter.
+    Migration helpers for the local and single-node Ecto/Postgres store adapter.
 
     This fallback module keeps the core package compilable when optional Ecto
     dependencies are not installed. Applications must add `:ecto_sql` and

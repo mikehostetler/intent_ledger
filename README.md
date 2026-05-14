@@ -11,7 +11,8 @@ https://gist.github.com/mikehostetler/cc2f56822cf5611126f4462d7ed874c7
 
 This is a package spike. The public API, lifecycle structs, supervision shape,
 store behaviour, in-memory adapter, and optional Bedrock adapter are in place.
-Ecto/Postgres remains a planned local durable adapter.
+The Ecto/Postgres adapter is being added for local durable development and
+single-node deployments only.
 
 ## Runtime Shape
 
@@ -38,6 +39,9 @@ Ecto/Postgres remains a planned local durable adapter.
   backend.
 - `IntentLedger.Store.Bedrock` is the optional durable adapter for Bedrock-backed
   clustered deployments. See [Bedrock Adapter](docs/bedrock.md).
+- `IntentLedger.Store.Ecto` is the optional Ecto/Postgres adapter for local
+  durable development and single-node deployments. It is not a clustered
+  production backend. See [Ecto/Postgres Adapter](docs/ecto.md).
 - `IntentLedger.Lifecycle` provides optional submit enrichment plus a
   compatibility-only, best-effort `after_transition/2` observer. Use signal
   handlers, not `after_transition/2`, for durable signal delivery.
@@ -62,7 +66,9 @@ Start a named ledger under your supervision tree:
 
 The example below uses `IntentLedger.Store.Memory` so it can run without
 external services. Use a durable `IntentLedger.Store` adapter for production or
-for any workflow that must survive process restart.
+for any workflow that must survive process restart. Use Bedrock for clustered
+deployments; the Ecto/Postgres adapter is limited to local durable and
+single-node operation.
 
 ```elixir
 children = [
