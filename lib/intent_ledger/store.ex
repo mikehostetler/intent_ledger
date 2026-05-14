@@ -117,6 +117,7 @@ defmodule IntentLedger.Store do
           {:intent, String.t()}
           | {:history, String.t()}
           | {:stream, String.t(), keyword()}
+          | {:lineage_counts, keyword() | map()}
           | map()
   @type shard_lease_operation :: :acquire | :renew | :release | :expire | :takeover
   @type lease_request :: {:shard, shard_lease_operation(), map()} | map()

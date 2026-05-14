@@ -435,6 +435,68 @@ defmodule IntentLedgerTest do
     assert {:error, :not_found} = IntentLedger.history(name, "int_depth_child")
   end
 
+  test "rejects children and open descendants beyond configured limits before committing", %{ledger: _ledger} do
+    name = Module.concat(__MODULE__, "LineageGuardrailLedger#{System.unique_integer([:positive])}")
+
+    start_supervised!(
+      {IntentLedger, name: name, max_children_per_intent: 1, max_open_descendants: 2, store: IntentLedger.Store.Memory}
+    )
+
+    {:ok, root} =
+      IntentLedger.submit(name, %{
+        id: "int_guard_root",
+        key: "job:guard-root",
+        kind: "job.run"
+      })
+
+    {:ok, child} =
+      IntentLedger.submit(name, %{
+        id: "int_guard_child",
+        key: "job:guard-child",
+        kind: "job.run",
+        root_intent_id: root.intent.id,
+        parent_intent_id: root.intent.id,
+        depth: 1
+      })
+
+    assert {:error,
+            {:guardrail_violation, :max_children_per_intent,
+             %{parent_intent_id: "int_guard_root", children: 1, proposed_children: 1}}} =
+             IntentLedger.submit(name, %{
+               id: "int_guard_second_child",
+               key: "job:guard-second-child",
+               kind: "job.run",
+               root_intent_id: root.intent.id,
+               parent_intent_id: root.intent.id,
+               depth: 1
+             })
+
+    {:ok, grandchild} =
+      IntentLedger.submit(name, %{
+        id: "int_guard_grandchild",
+        key: "job:guard-grandchild",
+        kind: "job.run",
+        root_intent_id: root.intent.id,
+        parent_intent_id: child.intent.id,
+        depth: 2
+      })
+
+    assert {:error,
+            {:guardrail_violation, :max_open_descendants,
+             %{root_intent_id: "int_guard_root", open_descendants: 2, proposed_open_descendants: 1}}} =
+             IntentLedger.submit(name, %{
+               id: "int_guard_great_grandchild",
+               key: "job:guard-great-grandchild",
+               kind: "job.run",
+               root_intent_id: root.intent.id,
+               parent_intent_id: grandchild.intent.id,
+               depth: 3
+             })
+
+    assert {:error, :not_found} = IntentLedger.get(name, "int_guard_second_child")
+    assert {:error, :not_found} = IntentLedger.get(name, "int_guard_great_grandchild")
+  end
+
   test "replays duplicate command ids without duplicate lifecycle commits", %{ledger: ledger} do
     {:ok, first} =
       IntentLedger.submit(ledger, %{key: "job:replay", kind: "job.run"}, command_id: "cmd_submit")

@@ -23,7 +23,7 @@ defmodule IntentLedger.Store.Memory do
     Time
   }
 
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Outbox}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Lineage, Listing, Outbox}
 
   defstruct intents: %{},
             states: %{},
@@ -200,6 +200,11 @@ defmodule IntentLedger.Store.Memory do
     signals = Map.get(state.streams, stream, [])
 
     {:reply, {:ok, %{stream: stream, version: length(signals), signals: window(signals, read_opts)}}, state}
+  end
+
+  def handle_call({:store_v1_read, _ledger, {:lineage_counts, attrs}, _opts}, _from, state) do
+    counts = Lineage.counts(Map.values(state.intents), Map.values(state.states), attrs)
+    {:reply, {:ok, counts}, state}
   end
 
   def handle_call({:store_v1_read, _ledger, request, _opts}, _from, state) do

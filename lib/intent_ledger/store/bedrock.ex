@@ -14,7 +14,7 @@ defmodule IntentLedger.Store.Bedrock do
   use GenServer
 
   alias IntentLedger.{Error, IntentState, Store}
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Outbox}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Lineage, Listing, Outbox}
   alias IntentLedger.Store.Bedrock.{Keyspace, Value}
 
   @dependency :bedrock
@@ -109,6 +109,20 @@ defmodule IntentLedger.Store.Bedrock do
   end
 
   @impl true
+  def handle_call({:read, ledger, {:lineage_counts, attrs}, opts}, _from, %__MODULE__{} = state)
+      when is_map(attrs) or is_list(attrs) do
+    result =
+      transact(
+        state.repo,
+        fn repo ->
+          read_lineage_counts(repo, ledger, attrs)
+        end,
+        transaction_opts(state, opts)
+      )
+
+    {:reply, normalize_transact_result(result), state}
+  end
+
   def handle_call({:read, ledger, {:stream, stream, read_opts}, opts}, _from, %__MODULE__{} = state) do
     result =
       transact(
@@ -440,6 +454,31 @@ defmodule IntentLedger.Store.Bedrock do
   defp clear(repo, key), do: apply(repo, :clear, [key])
   defp add_read_conflict_key(repo, key), do: apply(repo, :add_read_conflict_key, [key])
   defp add_write_conflict_range(repo, range), do: apply(repo, :add_write_conflict_range, [range])
+
+  defp read_lineage_counts(repo, ledger, attrs) do
+    with {:ok, intents} <- read_intents(repo, ledger),
+         {:ok, states} <- read_states(repo, ledger) do
+      {:ok, Lineage.counts(intents, states, attrs)}
+    end
+  end
+
+  defp read_intents(repo, ledger) do
+    repo
+    |> get_range(Keyspace.table_range(ledger, :intent))
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.reduce_while({:ok, []}, fn {_key, encoded}, {:ok, intents} ->
+      case Value.unpack_intent(encoded) do
+        {:ok, intent} -> {:cont, {:ok, intents ++ [intent]}}
+        {:error, reason} -> {:halt, {:error, adapter_error("invalid Bedrock intent value", reason: reason)}}
+      end
+    end)
+  end
+
+  defp read_states(repo, ledger) do
+    repo
+    |> get_range(Keyspace.table_range(ledger, :state))
+    |> decode_state_rows("invalid Bedrock state value")
+  end
 
   defp read_stream(repo, ledger, stream, opts) do
     entries = stream_entries(repo, ledger, stream)

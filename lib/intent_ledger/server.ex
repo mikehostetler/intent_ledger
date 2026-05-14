@@ -19,6 +19,8 @@ defmodule IntentLedger.Server do
           queues: map(),
           lease_ms: pos_integer(),
           max_depth: non_neg_integer() | nil,
+          max_children_per_intent: non_neg_integer() | nil,
+          max_open_descendants: non_neg_integer() | nil,
           wakeups?: boolean(),
           telemetry: keyword(),
           command_results: %{optional(String.t()) => term()}
@@ -32,6 +34,8 @@ defmodule IntentLedger.Server do
     :queues,
     :lease_ms,
     :max_depth,
+    :max_children_per_intent,
+    :max_open_descendants,
     :wakeups?,
     :telemetry,
     command_results: %{}
@@ -73,6 +77,12 @@ defmodule IntentLedger.Server do
        queues: normalize_queues(Keyword.get(opts, :queues, default: @default_queue_opts)),
        lease_ms: Keyword.get(opts, :lease_ms, @default_lease_ms),
        max_depth: normalize_max_depth(Keyword.get(opts, :max_depth)),
+       max_children_per_intent:
+         normalize_guardrail_limit(
+           :max_children_per_intent,
+           Keyword.get(opts, :max_children_per_intent, Keyword.get(opts, :max_children))
+         ),
+       max_open_descendants: normalize_guardrail_limit(:max_open_descendants, Keyword.get(opts, :max_open_descendants)),
        wakeups?: Keyword.get(opts, :wakeups?, false),
        telemetry: Keyword.take(opts, [:telemetry_prefix])
      }}
@@ -95,6 +105,7 @@ defmodule IntentLedger.Server do
 
     with {:ok, intent} <- build_intent(attrs, state, now),
          {:ok, intent} <- Lifecycle.before_submit(state.lifecycle, intent, context(state, opts)),
+         :ok <- enforce_submit_guardrails(state, [intent]),
          {:ok, record, signals} <-
            state.store_module.submit(
              state.store_ref,
@@ -114,6 +125,7 @@ defmodule IntentLedger.Server do
     now = now(opts)
 
     with {:ok, intents} <- build_intents(attrs_list, state, now, opts),
+         :ok <- enforce_submit_guardrails(state, intents),
          {:ok, records, signals} <-
            state.store_module.submit_many(
              state.store_ref,
@@ -306,6 +318,7 @@ defmodule IntentLedger.Server do
 
     with {:ok, intent} <- build_intent(attrs, state, now),
          {:ok, intent} <- Lifecycle.before_submit(state.lifecycle, intent, context(state, opts)),
+         :ok <- enforce_submit_guardrails(state, [intent]),
          {:ok, record, signals} <-
            state.store_module.submit(
              state.store_ref,
@@ -325,6 +338,7 @@ defmodule IntentLedger.Server do
     now = now(opts)
 
     with {:ok, intents} <- build_intents(attrs_list, state, now, opts),
+         :ok <- enforce_submit_guardrails(state, intents),
          {:ok, records, signals} <-
            state.store_module.submit_many(
              state.store_ref,
@@ -525,14 +539,30 @@ defmodule IntentLedger.Server do
 
   defp build_intent(attrs, state, now) do
     with {:ok, intent} <- Intent.new(attrs, now: now) do
-      intent
-      |> Intent.with_shard(shard_for(state, intent))
-      |> enforce_max_depth(state)
+      {:ok, Intent.with_shard(intent, shard_for(state, intent))}
     end
   end
 
-  defp enforce_max_depth(%Intent{depth: depth} = intent, %{max_depth: max_depth})
-       when is_integer(max_depth) and depth > max_depth do
+  defp enforce_submit_guardrails(state, intents) do
+    with :ok <- enforce_max_depth(state, intents),
+         :ok <- enforce_max_children_per_intent(state, intents) do
+      enforce_max_open_descendants(state, intents)
+    end
+  end
+
+  defp enforce_max_depth(%{max_depth: max_depth}, intents) when is_integer(max_depth) do
+    case Enum.find(intents, &(&1.depth > max_depth)) do
+      nil ->
+        :ok
+
+      %Intent{} = intent ->
+        max_depth_violation(intent, max_depth)
+    end
+  end
+
+  defp enforce_max_depth(_state, _intents), do: :ok
+
+  defp max_depth_violation(%Intent{depth: depth} = intent, max_depth) do
     {:error,
      {:guardrail_violation, :max_depth,
       %{
@@ -544,7 +574,75 @@ defmodule IntentLedger.Server do
       }}}
   end
 
-  defp enforce_max_depth(%Intent{} = intent, _state), do: {:ok, intent}
+  defp enforce_max_children_per_intent(%{max_children_per_intent: max_children} = state, intents)
+       when is_integer(max_children) do
+    intents
+    |> Enum.reject(&is_nil(&1.parent_intent_id))
+    |> Enum.group_by(& &1.parent_intent_id)
+    |> Enum.reduce_while(:ok, fn {parent_intent_id, proposed_children}, :ok ->
+      with {:ok, counts} <- lineage_counts(state, parent_intent_id: parent_intent_id) do
+        existing_children = Map.get(counts, :children, 0)
+        proposed_count = length(proposed_children)
+
+        if existing_children + proposed_count > max_children do
+          {:halt,
+           {:error,
+            {:guardrail_violation, :max_children_per_intent,
+             %{
+               parent_intent_id: parent_intent_id,
+               children: existing_children,
+               proposed_children: proposed_count,
+               max_children_per_intent: max_children
+             }}}}
+        else
+          {:cont, :ok}
+        end
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp enforce_max_children_per_intent(_state, _intents), do: :ok
+
+  defp enforce_max_open_descendants(%{max_open_descendants: max_open_descendants} = state, intents)
+       when is_integer(max_open_descendants) do
+    intents
+    |> Enum.filter(&descendant_intent?/1)
+    |> Enum.group_by(& &1.root_intent_id)
+    |> Enum.reduce_while(:ok, fn {root_intent_id, proposed_descendants}, :ok ->
+      with {:ok, counts} <- lineage_counts(state, root_intent_id: root_intent_id) do
+        existing_open_descendants = Map.get(counts, :open_descendants, 0)
+        proposed_count = length(proposed_descendants)
+
+        if existing_open_descendants + proposed_count > max_open_descendants do
+          {:halt,
+           {:error,
+            {:guardrail_violation, :max_open_descendants,
+             %{
+               root_intent_id: root_intent_id,
+               open_descendants: existing_open_descendants,
+               proposed_open_descendants: proposed_count,
+               max_open_descendants: max_open_descendants
+             }}}}
+        else
+          {:cont, :ok}
+        end
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp enforce_max_open_descendants(_state, _intents), do: :ok
+
+  defp lineage_counts(state, attrs) do
+    state.store_module.read(state.store_ref, state.name, {:lineage_counts, attrs}, [])
+  end
+
+  defp descendant_intent?(%Intent{} = intent) do
+    not is_nil(intent.parent_intent_id) or intent.root_intent_id != intent.id
+  end
 
   defp shard_for(_state, %Intent{shard: shard}) when is_integer(shard), do: shard
 
@@ -629,12 +727,14 @@ defmodule IntentLedger.Server do
 
   defp now(opts), do: Keyword.get(opts, :now, Time.utc_now())
 
-  defp normalize_max_depth(nil), do: nil
-  defp normalize_max_depth(:infinity), do: nil
-  defp normalize_max_depth(max_depth) when is_integer(max_depth) and max_depth >= 0, do: max_depth
+  defp normalize_max_depth(max_depth), do: normalize_guardrail_limit(:max_depth, max_depth)
 
-  defp normalize_max_depth(max_depth) do
-    raise ArgumentError, "expected :max_depth to be a non-negative integer or :infinity, got: #{inspect(max_depth)}"
+  defp normalize_guardrail_limit(_field, nil), do: nil
+  defp normalize_guardrail_limit(_field, :infinity), do: nil
+  defp normalize_guardrail_limit(_field, limit) when is_integer(limit) and limit >= 0, do: limit
+
+  defp normalize_guardrail_limit(field, limit) do
+    raise ArgumentError, "expected #{inspect(field)} to be a non-negative integer or :infinity, got: #{inspect(limit)}"
   end
 
   defp normalize_queues(queues) when is_map(queues) do

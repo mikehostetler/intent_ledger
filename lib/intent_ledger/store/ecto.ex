@@ -23,7 +23,7 @@ defmodule IntentLedger.Store.Ecto do
   use GenServer
 
   alias IntentLedger.{Error, Store, Time}
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Outbox}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Lineage, Listing, Outbox}
   alias IntentLedger.Store.Ecto.{Query, Schema}
 
   @dependencies [:ecto_sql, :postgrex]
@@ -146,6 +146,20 @@ defmodule IntentLedger.Store.Ecto do
     {:reply, result, state}
   end
 
+  def handle_call({:read, ledger, {:lineage_counts, attrs} = request, opts}, _from, %__MODULE__{} = state)
+      when is_map(attrs) or is_list(attrs) do
+    result =
+      transact(state.repo, transaction_opts(opts), fn ->
+        apply_read_request(state, ledger, request)
+      end)
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:read, _ledger, request, _opts}, _from, %__MODULE__{} = state) do
+    {:reply, not_implemented(:read, request), state}
+  end
+
   def handle_call({:lease, ledger, request, opts}, _from, %__MODULE__{} = state) do
     result =
       transact(state.repo, transaction_opts(opts), fn ->
@@ -171,11 +185,6 @@ defmodule IntentLedger.Store.Ecto do
       end)
 
     {:reply, result, state}
-  end
-
-  def handle_call({operation, _ledger, request, _opts}, _from, %__MODULE__{} = state)
-      when operation in [:read] do
-    {:reply, not_implemented(operation, request), state}
   end
 
   defp fetch_repo(opts) do
@@ -763,7 +772,7 @@ defmodule IntentLedger.Store.Ecto do
      adapter_error("Ecto store operation is not implemented yet",
        reason: :not_implemented,
        operation: operation,
-       request: compact_request(request)
+       request: request
      )}
   end
 
@@ -787,6 +796,26 @@ defmodule IntentLedger.Store.Ecto do
     {queue, shard} = parse_shard_key(key)
     state.repo.delete_all(Query.by_fields(:shard_leases, ledger, [queue: queue, shard: shard], opts), [])
   end
+
+  defp apply_read_request(%__MODULE__{} = state, ledger, {:lineage_counts, attrs})
+       when is_map(attrs) or is_list(attrs) do
+    opts = source_opts(state)
+
+    intents =
+      state.repo.all(Query.by_fields(:intents, ledger, [], opts))
+      |> Enum.map(&intent_value/1)
+
+    states =
+      state.repo.all(Query.by_fields(:states, ledger, [], opts))
+      |> Enum.map(&state_value/1)
+
+    {:ok, Lineage.counts(intents, states, attrs)}
+  rescue
+    error ->
+      {:error, adapter_error("invalid Ecto lineage count value", reason: error)}
+  end
+
+  defp apply_read_request(_state, _ledger, request), do: {:error, {:unsupported_store_v1_request, :read, request}}
 
   defp source_opts(%__MODULE__{} = state), do: [prefix: state.prefix, tables: state.tables]
 
@@ -1108,6 +1137,11 @@ defmodule IntentLedger.Store.Ecto do
   defp operation_key(operation) when is_atom(operation), do: Atom.to_string(operation)
   defp operation_key(operation), do: to_string(operation)
 
+  defp intent_value(row) do
+    base = field(row, :intent) || %{}
+    Map.put(base, :id, field(row, :intent_id))
+  end
+
   defp state_value(row) do
     base = field(row, :state) || %{}
 
@@ -1320,10 +1354,6 @@ defmodule IntentLedger.Store.Ecto do
       :error -> :error
     end
   end
-
-  defp compact_request(%CommitRequest{} = request), do: %{operation: request.operation, command_id: request.command_id}
-  defp compact_request(%Outbox{} = request), do: %{type: request.type, key: request.key, consumer: request.consumer}
-  defp compact_request(request), do: request
 
   defp loaded?(module), do: match?({:module, _module}, Code.ensure_loaded(module))
 
