@@ -21,6 +21,13 @@ defmodule IntentLedger.Command do
           | :recover
 
   @type field :: atom()
+  @type lineage_field ::
+          :actor
+          | :causation_id
+          | :correlation_id
+          | :root_intent_id
+          | :parent_intent_id
+          | :depth
 
   @type definition :: %{
           required(:operation) => operation(),
@@ -45,9 +52,7 @@ defmodule IntentLedger.Command do
           required(:data) => map()
         }
 
-  @common_metadata_fields [
-    :command_id,
-    :idempotency_key,
+  @lineage_fields [
     :actor,
     :causation_id,
     :correlation_id,
@@ -55,6 +60,7 @@ defmodule IntentLedger.Command do
     :parent_intent_id,
     :depth
   ]
+  @common_metadata_fields [:command_id, :idempotency_key | @lineage_fields]
 
   @definitions [
     %{
@@ -157,6 +163,12 @@ defmodule IntentLedger.Command do
   """
   @spec common_metadata_fields() :: [field()]
   def common_metadata_fields, do: @common_metadata_fields
+
+  @doc """
+  Returns command fields that carry lineage and actor context.
+  """
+  @spec lineage_fields() :: [lineage_field()]
+  def lineage_fields, do: @lineage_fields
 
   @doc """
   Looks up a command definition by operation or signal type.

@@ -24,6 +24,12 @@ defmodule IntentLedger.Intent do
             max_attempts: Zoi.integer() |> Zoi.positive() |> Zoi.default(3) |> Zoi.optional(),
             priority: Zoi.integer() |> Zoi.default(0) |> Zoi.optional(),
             idempotency_key: Zoi.string() |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
+            correlation_id: Zoi.string() |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
+            causation_id: Zoi.string() |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
+            root_intent_id: Zoi.string() |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
+            parent_intent_id: Zoi.string() |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
+            depth: Zoi.integer() |> Zoi.gte(0) |> Zoi.default(0) |> Zoi.optional(),
+            actor: Zoi.string() |> Zoi.nullable() |> Zoi.default(nil) |> Zoi.optional(),
             ambiguity_policy: Zoi.enum([:retry, :manual, :reconcile]) |> Zoi.default(:retry) |> Zoi.optional(),
             metadata: Zoi.map() |> Zoi.default(%{}) |> Zoi.optional()
           })
@@ -44,6 +50,12 @@ defmodule IntentLedger.Intent do
             :max_attempts,
             :priority,
             :idempotency_key,
+            :correlation_id,
+            :causation_id,
+            :root_intent_id,
+            :parent_intent_id,
+            :depth,
+            :actor,
             :ambiguity_policy,
             :metadata
           ])
@@ -82,10 +94,31 @@ defmodule IntentLedger.Intent do
          {:ok, ambiguity_policy} <-
            normalize_ambiguity_policy(Map.get(attrs, :ambiguity_policy, :retry)),
          {:ok, context} <- normalize_map(Map.get(attrs, :context, %{}), :context),
-         {:ok, metadata} <- normalize_map(Map.get(attrs, :metadata, %{}), :metadata) do
+         {:ok, metadata} <- normalize_map(Map.get(attrs, :metadata, %{}), :metadata),
+         {:ok, correlation_id} <-
+           normalize_optional_string(lineage_attr(attrs, metadata, :correlation_id), :correlation_id),
+         {:ok, causation_id} <-
+           normalize_optional_string(lineage_attr(attrs, metadata, :causation_id), :causation_id),
+         {:ok, root_intent_id} <-
+           normalize_optional_string(lineage_attr(attrs, metadata, :root_intent_id), :root_intent_id),
+         {:ok, parent_intent_id} <-
+           normalize_optional_string(lineage_attr(attrs, metadata, :parent_intent_id), :parent_intent_id),
+         {:ok, depth} <- normalize_non_negative_integer(lineage_attr(attrs, metadata, :depth, 0), :depth),
+         {:ok, actor} <- normalize_optional_string(lineage_attr(attrs, metadata, :actor), :actor) do
       id = attrs |> Map.get(:id, ID.generate("int")) |> to_string()
       idempotency_key = Map.get(attrs, :idempotency_key)
-      metadata = put_lineage_defaults(metadata, id, Map.get(attrs, :parent_intent_id))
+      correlation_id = correlation_id || id
+      root_intent_id = root_intent_id || id
+
+      metadata =
+        put_lineage_metadata(metadata, %{
+          correlation_id: correlation_id,
+          causation_id: causation_id,
+          root_intent_id: root_intent_id,
+          parent_intent_id: parent_intent_id,
+          depth: depth,
+          actor: actor
+        })
 
       %__MODULE__{
         id: id,
@@ -99,6 +132,12 @@ defmodule IntentLedger.Intent do
         max_attempts: max_attempts,
         priority: priority,
         idempotency_key: if(is_nil(idempotency_key), do: nil, else: to_string(idempotency_key)),
+        correlation_id: correlation_id,
+        causation_id: causation_id,
+        root_intent_id: root_intent_id,
+        parent_intent_id: parent_intent_id,
+        depth: depth,
+        actor: actor,
         ambiguity_policy: ambiguity_policy,
         metadata: metadata
       }
@@ -162,6 +201,27 @@ defmodule IntentLedger.Intent do
   defp normalize_integer(value, _field) when is_integer(value), do: {:ok, value}
   defp normalize_integer(value, field), do: {:error, {:invalid_integer, field, value}}
 
+  defp normalize_non_negative_integer(value, field) do
+    with {:ok, integer} <- normalize_lineage_integer(value, field) do
+      if integer >= 0 do
+        {:ok, integer}
+      else
+        {:error, {:invalid_non_negative_integer, field, value}}
+      end
+    end
+  end
+
+  defp normalize_lineage_integer(value, _field) when is_integer(value), do: {:ok, value}
+
+  defp normalize_lineage_integer(value, field) when is_binary(value) do
+    case Integer.parse(value) do
+      {integer, ""} -> {:ok, integer}
+      _invalid -> {:error, {:invalid_integer, field, value}}
+    end
+  end
+
+  defp normalize_lineage_integer(value, field), do: {:error, {:invalid_integer, field, value}}
+
   defp normalize_shard(nil), do: {:ok, nil}
   defp normalize_shard(value) when is_integer(value) and value >= 0, do: {:ok, value}
   defp normalize_shard(value), do: {:error, {:invalid_shard, value}}
@@ -181,18 +241,29 @@ defmodule IntentLedger.Intent do
   defp normalize_map(value, _field) when is_map(value), do: {:ok, value}
   defp normalize_map(value, field), do: {:error, {:invalid_map, field, value}}
 
-  defp put_lineage_defaults(metadata, id, parent_intent_id) do
-    metadata
-    |> Map.put_new(:correlation_id, id)
-    |> Map.put_new(:root_intent_id, id)
-    |> maybe_put_parent(parent_intent_id)
-    |> Map.put_new(:depth, 0)
+  defp normalize_optional_string(nil, _field), do: {:ok, nil}
+
+  defp normalize_optional_string(value, field) do
+    case value |> to_string() |> String.trim() do
+      "" -> {:error, {:invalid_string, field, value}}
+      normalized -> {:ok, normalized}
+    end
   end
 
-  defp maybe_put_parent(metadata, nil), do: metadata
+  defp lineage_attr(attrs, metadata, field, default \\ nil) do
+    Map.get(attrs, field, metadata_field(metadata, field, default))
+  end
 
-  defp maybe_put_parent(metadata, parent_intent_id),
-    do: Map.put_new(metadata, :parent_intent_id, parent_intent_id)
+  defp metadata_field(metadata, field, default) do
+    Map.get(metadata, field, Map.get(metadata, Atom.to_string(field), default))
+  end
+
+  defp put_lineage_metadata(metadata, lineage) do
+    Enum.reduce(lineage, metadata, fn
+      {_field, nil}, acc -> acc
+      {field, value}, acc -> Map.put(acc, field, value)
+    end)
+  end
 
   defp validate(%__MODULE__{} = intent) do
     case Zoi.parse(@schema, intent) do

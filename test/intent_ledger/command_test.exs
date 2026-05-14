@@ -49,9 +49,7 @@ defmodule IntentLedger.CommandTest do
   test "catalogue entries include command metadata fields" do
     common_metadata = Command.common_metadata_fields()
 
-    assert common_metadata == [
-             :command_id,
-             :idempotency_key,
+    assert Command.lineage_fields() == [
              :actor,
              :causation_id,
              :correlation_id,
@@ -59,6 +57,8 @@ defmodule IntentLedger.CommandTest do
              :parent_intent_id,
              :depth
            ]
+
+    assert common_metadata == [:command_id, :idempotency_key | Command.lineage_fields()]
 
     for definition <- Command.all() do
       assert Enum.all?(common_metadata, &(&1 in definition.optional))
