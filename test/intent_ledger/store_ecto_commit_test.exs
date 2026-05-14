@@ -62,6 +62,7 @@ defmodule IntentLedger.StoreEctoCommitTest do
 
   @ledger MyApp.IntentLedger
   @now ~U[2026-01-01 00:00:00Z]
+  @lease_until ~U[2026-01-01 00:01:00Z]
 
   setup do
     name = :"ecto_store_#{System.unique_integer([:positive])}"
@@ -228,6 +229,158 @@ defmodule IntentLedger.StoreEctoCommitTest do
     assert_receive {:ops, []}
   end
 
+  test "checks intent status before claim writes", %{store: store} do
+    claim = %{intent_id: "int_1", owner_id: "worker", token_hash: "hash", lease_until: @lease_until}
+
+    request =
+      CommitRequest.new(
+        preconditions: [Precondition.intent_status("int_1", :available)],
+        writes: [Write.put_claim("clm_1", claim)]
+      )
+
+    assert {:ok, %Commit{}} =
+             EctoStore.commit(
+               store,
+               @ledger,
+               request,
+               transaction_opts: [test_pid: self(), rows: [state_row(status: "available")]]
+             )
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}, {:insert_all, {"intent_ledger_claims", _schema}, [_row], _opts}]}
+  end
+
+  test "checks claim fences against claim and state rows", %{store: store} do
+    claim = claim_row(token_hash: "hash", lease_until: @lease_until)
+    state = state_row(status: "claimed", claim_id: "clm_1")
+
+    request =
+      CommitRequest.new(
+        preconditions: [Precondition.claim_fence("clm_1", "hash", metadata: %{now: @now})],
+        writes: [Write.delete_claim("clm_1")]
+      )
+
+    assert {:ok, %Commit{}} =
+             EctoStore.commit(store, @ledger, request, transaction_opts: [test_pid: self(), rows: [claim, state]])
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}, {:one, %Ecto.Query{}}, {:delete_all, %Ecto.Query{}, []}]}
+  end
+
+  test "rejects stale claim fences", %{store: store} do
+    claim = claim_row(token_hash: "other", lease_until: @lease_until)
+
+    request =
+      CommitRequest.new(
+        preconditions: [Precondition.claim_fence("clm_1", "hash", metadata: %{now: @now})],
+        writes: [Write.delete_claim("clm_1")]
+      )
+
+    assert {:error, %Conflict{type: :claim_fence, key: "clm_1"}} =
+             EctoStore.commit(store, @ledger, request, transaction_opts: [test_pid: self(), rows: [claim]])
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}]}
+  end
+
+  test "checks shard lease preconditions before commit writes", %{store: store} do
+    request =
+      CommitRequest.new(
+        preconditions: [Precondition.shard_available(:default, 0, @now)],
+        writes: [Write.put_shard_lease(:default, 0, %{owner_id: "node-a", lease_until: @lease_until})]
+      )
+
+    assert {:ok, %Commit{}} = EctoStore.commit(store, @ledger, request, transaction_opts: [test_pid: self()])
+
+    assert_receive {:transaction, []}
+
+    assert_receive {:ops,
+                    [
+                      {:one, %Ecto.Query{}},
+                      {:insert_all, {"intent_ledger_shard_leases", _schema}, [lease], _opts}
+                    ]}
+
+    assert lease.owner_id == "node-a"
+
+    duplicate =
+      CommitRequest.new(
+        preconditions: [Precondition.shard_available(:default, 0, @now)],
+        writes: [Write.put_shard_lease(:default, 0, %{owner_id: "node-b", lease_until: @lease_until})]
+      )
+
+    assert {:error, %Conflict{type: :shard_lease}} =
+             EctoStore.commit(
+               store,
+               @ledger,
+               duplicate,
+               transaction_opts: [test_pid: self(), rows: [lease_row(owner_id: "node-a", lease_until: @lease_until)]]
+             )
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}]}
+  end
+
+  test "applies local shard lease callback operations", %{store: store} do
+    renewed_until = ~U[2026-01-01 00:02:00Z]
+    expired_at = ~U[2026-01-01 00:01:01Z]
+
+    assert {:ok, %{owner_id: "node-a", lease_until: @lease_until}} =
+             EctoStore.lease(
+               store,
+               @ledger,
+               {:shard, :acquire,
+                %{queue: :default, shard: 0, owner_id: "node-a", lease_until: @lease_until, now: @now}},
+               transaction_opts: [test_pid: self()]
+             )
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}, {:insert_all, {"intent_ledger_shard_leases", _schema}, [_], _opts}]}
+
+    assert {:ok, %{owner_id: "node-a", lease_until: ^renewed_until}} =
+             EctoStore.lease(
+               store,
+               @ledger,
+               {:shard, :renew,
+                %{queue: :default, shard: 0, owner_id: "node-a", lease_until: renewed_until, now: @now}},
+               transaction_opts: [
+                 test_pid: self(),
+                 rows: [lease_row(owner_id: "node-a", lease_until: @lease_until)]
+               ]
+             )
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}, {:insert_all, {"intent_ledger_shard_leases", _schema}, [_], _opts}]}
+
+    assert {:ok, %{owner_id: "node-a"}} =
+             EctoStore.lease(
+               store,
+               @ledger,
+               {:shard, :release, %{queue: :default, shard: 0, owner_id: "node-a", now: @now}},
+               transaction_opts: [
+                 test_pid: self(),
+                 rows: [lease_row(owner_id: "node-a", lease_until: renewed_until)]
+               ]
+             )
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}, {:delete_all, %Ecto.Query{}, []}]}
+
+    assert {:ok, %{owner_id: "node-b", lease_until: ^renewed_until}} =
+             EctoStore.lease(
+               store,
+               @ledger,
+               {:shard, :takeover,
+                %{queue: :default, shard: 0, owner_id: "node-b", lease_until: renewed_until, now: expired_at}},
+               transaction_opts: [
+                 test_pid: self(),
+                 rows: [lease_row(owner_id: "node-a", lease_until: @lease_until)]
+               ]
+             )
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}, {:insert_all, {"intent_ledger_shard_leases", _schema}, [_], _opts}]}
+  end
+
   test "writes claims shard leases outbox and delete operations", %{store: store} do
     claim = %{intent_id: "int_1", owner_id: "worker", token_hash: "hash", lease_until: @now}
     lease = %{queue: "default", shard: 0, owner_id: "node-a", lease_until: @now}
@@ -274,5 +427,32 @@ defmodule IntentLedger.StoreEctoCommitTest do
 
   defp command_row(operation, command, result) do
     %{operation: to_string(operation), command: command, result: result}
+  end
+
+  defp state_row(attrs) do
+    attrs = Map.new(attrs)
+
+    Map.merge(
+      %{intent_id: "int_1", status: "claimed", queue: "default", shard: 0, state: %{}},
+      attrs
+    )
+  end
+
+  defp claim_row(attrs) do
+    attrs = Map.new(attrs)
+
+    Map.merge(
+      %{claim_id: "clm_1", intent_id: "int_1", owner_id: "worker", token_hash: "hash", claim: %{}},
+      attrs
+    )
+  end
+
+  defp lease_row(attrs) do
+    attrs = Map.new(attrs)
+
+    Map.merge(
+      %{queue: "default", shard: 0, owner_id: "node-a", lease_until: @lease_until, lease: %{}},
+      attrs
+    )
   end
 end

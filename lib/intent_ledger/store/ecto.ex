@@ -146,8 +146,17 @@ defmodule IntentLedger.Store.Ecto do
     {:reply, result, state}
   end
 
+  def handle_call({:lease, ledger, request, opts}, _from, %__MODULE__{} = state) do
+    result =
+      transact(state.repo, transaction_opts(opts), fn ->
+        apply_lease_request(state, ledger, request)
+      end)
+
+    {:reply, result, state}
+  end
+
   def handle_call({operation, _ledger, request, _opts}, _from, %__MODULE__{} = state)
-      when operation in [:read, :lease, :listing, :outbox] do
+      when operation in [:read, :listing, :outbox] do
     {:reply, not_implemented(operation, request), state}
   end
 
@@ -187,11 +196,14 @@ defmodule IntentLedger.Store.Ecto do
 
   defp transact(repo, opts, fun) do
     case repo.transaction(fun, opts) do
-      {:ok, %Commit{} = commit} ->
-        {:ok, commit}
+      {:ok, {:ok, result}} ->
+        {:ok, result}
 
       {:ok, {:error, reason}} ->
         {:error, reason}
+
+      {:ok, result} ->
+        {:ok, result}
 
       {:error, reason} ->
         {:error, reason}
@@ -276,6 +288,51 @@ defmodule IntentLedger.Store.Ecto do
     else
       {:error, Conflict.stream_version(stream, expected, actual)}
     end
+  end
+
+  defp check_precondition(
+         state,
+         ledger,
+         %CommitRequest{},
+         %{type: :intent_status, key: intent_id, expected: expected},
+         opts
+       ) do
+    case fetch_state(state, ledger, intent_id, opts) do
+      {:ok, nil} ->
+        {:error, Conflict.intent_status(intent_id, expected, :missing)}
+
+      {:ok, intent_state} ->
+        actual = status_value(field(intent_state, :status))
+
+        if actual in List.wrap(expected) do
+          :ok
+        else
+          {:error, Conflict.intent_status(intent_id, expected, actual)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp check_precondition(
+         state,
+         ledger,
+         %CommitRequest{},
+         %{type: :claim_fence, key: claim_id, expected: expected, metadata: metadata},
+         opts
+       ) do
+    claim_fence_check(state, ledger, claim_id, expected, metadata, opts)
+  end
+
+  defp check_precondition(
+         state,
+         ledger,
+         %CommitRequest{},
+         %{type: :shard_lease, key: key, expected: expected, metadata: metadata},
+         opts
+       ) do
+    shard_lease_check(state, ledger, key, expected, metadata, opts)
   end
 
   defp check_precondition(_state, _ledger, _request, precondition, _opts) do
@@ -490,6 +547,74 @@ defmodule IntentLedger.Store.Ecto do
     {:error, adapter_error("Ecto commit write is not implemented yet", reason: :unsupported_write, write: write)}
   end
 
+  defp apply_lease_request(%__MODULE__{} = state, ledger, {:shard, operation, attrs})
+       when is_map(attrs) or is_list(attrs) do
+    attrs = normalize_attrs(attrs)
+    opts = source_opts(state)
+    now = Time.utc_now()
+
+    with {:ok, queue} <- fetch_attr(attrs, :queue),
+         {:ok, shard} <- fetch_attr(attrs, :shard),
+         {:ok, key} <- {:ok, shard_key(queue, shard)} do
+      do_apply_lease_request(state, ledger, operation, key, attrs, opts, now)
+    else
+      _missing_or_invalid -> {:error, {:unsupported_store_v1_request, :lease, {:shard, operation, attrs}}}
+    end
+  end
+
+  defp apply_lease_request(_state, _ledger, request), do: {:error, {:unsupported_store_v1_request, :lease, request}}
+
+  defp do_apply_lease_request(state, ledger, :acquire, key, attrs, opts, now) do
+    expected = %{available_at: Map.get(attrs, :now)}
+
+    with {:ok, _lease} <- ensure_shard_lease(state, ledger, key, expected, %{}, opts) do
+      lease = shard_lease_value(attrs)
+      put_shard_lease(state, ledger, key, lease, now)
+      {:ok, lease}
+    end
+  end
+
+  defp do_apply_lease_request(state, ledger, :renew, key, attrs, opts, now) do
+    expected = %{owner_id: to_string(Map.fetch!(attrs, :owner_id)), status: :current}
+
+    with {:ok, _lease} <- ensure_shard_lease(state, ledger, key, expected, %{now: Map.get(attrs, :now)}, opts) do
+      lease = shard_lease_value(attrs)
+      put_shard_lease(state, ledger, key, lease, now)
+      {:ok, lease}
+    end
+  end
+
+  defp do_apply_lease_request(state, ledger, :release, key, attrs, opts, _now) do
+    expected = %{owner_id: to_string(Map.fetch!(attrs, :owner_id)), status: :current}
+
+    with {:ok, lease} <- ensure_shard_lease(state, ledger, key, expected, %{now: Map.get(attrs, :now)}, opts) do
+      delete_shard_lease(state, ledger, key, opts)
+      {:ok, lease}
+    end
+  end
+
+  defp do_apply_lease_request(state, ledger, :expire, key, attrs, opts, _now) do
+    expected = %{expired_at_or_before: Map.get(attrs, :now)}
+
+    with {:ok, lease} <- ensure_shard_lease(state, ledger, key, expected, %{}, opts) do
+      delete_shard_lease(state, ledger, key, opts)
+      {:ok, lease}
+    end
+  end
+
+  defp do_apply_lease_request(state, ledger, :takeover, key, attrs, opts, now) do
+    expected = %{expired_at_or_before: Map.get(attrs, :now)}
+
+    with {:ok, _lease} <- ensure_shard_lease(state, ledger, key, expected, %{}, opts) do
+      lease = shard_lease_value(attrs)
+      put_shard_lease(state, ledger, key, lease, now)
+      {:ok, lease}
+    end
+  end
+
+  defp do_apply_lease_request(_state, _ledger, operation, _key, _attrs, _opts, _now),
+    do: {:error, {:unsupported_store_v1_request, :lease, {:shard, operation}}}
+
   defp not_implemented(operation, request) do
     {:error,
      adapter_error("Ecto store operation is not implemented yet",
@@ -501,6 +626,23 @@ defmodule IntentLedger.Store.Ecto do
 
   defp insert_all(%__MODULE__{} = state, table, rows, opts) do
     state.repo.insert_all(Schema.source(table, source_opts(state)), rows, Keyword.put(opts, :prefix, state.prefix))
+  end
+
+  defp put_shard_lease(%__MODULE__{} = state, ledger, key, lease, now) do
+    row =
+      lease
+      |> shard_lease_row(ledger, key)
+      |> put_timestamps(now)
+
+    insert_all(state, :shard_leases, [row],
+      on_conflict: {:replace, [:owner_id, :lease_until, :lease, :updated_at]},
+      conflict_target: [:ledger, :queue, :shard]
+    )
+  end
+
+  defp delete_shard_lease(%__MODULE__{} = state, ledger, key, opts) do
+    {queue, shard} = parse_shard_key(key)
+    state.repo.delete_all(Query.by_fields(:shard_leases, ledger, [queue: queue, shard: shard], opts), [])
   end
 
   defp source_opts(%__MODULE__{} = state), do: [prefix: state.prefix, tables: state.tables]
@@ -532,6 +674,116 @@ defmodule IntentLedger.Store.Ecto do
     case state.repo.one(Query.by_fields(:streams, ledger, [stream: stream], opts)) do
       nil -> 0
       row -> field(row, :version, 0)
+    end
+  end
+
+  defp fetch_state(%__MODULE__{} = state, ledger, intent_id, opts) do
+    case state.repo.one(Query.by_fields(:states, ledger, [intent_id: intent_id], opts)) do
+      nil -> {:ok, nil}
+      row -> {:ok, state_value(row)}
+    end
+  rescue
+    error ->
+      {:error, adapter_error("invalid Ecto state value", reason: error)}
+  end
+
+  defp fetch_claim(%__MODULE__{} = state, ledger, claim_id, opts) do
+    case state.repo.one(Query.by_fields(:claims, ledger, [claim_id: claim_id], opts)) do
+      nil -> {:ok, nil}
+      row -> {:ok, claim_value(row)}
+    end
+  rescue
+    error ->
+      {:error, adapter_error("invalid Ecto claim value", reason: error)}
+  end
+
+  defp fetch_shard_lease(%__MODULE__{} = state, ledger, key, opts) do
+    {queue, shard} = parse_shard_key(key)
+
+    case state.repo.one(Query.by_fields(:shard_leases, ledger, [queue: queue, shard: shard], opts)) do
+      nil -> {:ok, nil}
+      row -> {:ok, shard_lease_value(row, queue, shard)}
+    end
+  rescue
+    error ->
+      {:error, adapter_error("invalid Ecto shard lease value", reason: error)}
+  end
+
+  defp claim_fence_check(%__MODULE__{} = state, ledger, claim_id, expected, metadata, opts) do
+    case fetch_claim(state, ledger, claim_id, opts) do
+      {:ok, nil} ->
+        {:error, Conflict.claim_fence(claim_id, expected, :missing)}
+
+      {:ok, claim} ->
+        with true <- field(claim, :token_hash) == Map.get(expected, :token_hash),
+             {:ok, intent_state} when not is_nil(intent_state) <-
+               fetch_state(state, ledger, field(claim, :intent_id), opts),
+             true <- claim_state_current?(claim_id, intent_state),
+             true <- lease_current?(claim, Map.get(metadata, :now)) do
+          :ok
+        else
+          {:error, reason} -> {:error, reason}
+          _failed_check -> {:error, Conflict.claim_fence(claim_id, expected, claim)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp claim_state_current?(claim_id, intent_state) do
+    status_value(field(intent_state, :status)) == :claimed and field(intent_state, :claim_id) in [nil, claim_id]
+  end
+
+  defp shard_lease_check(%__MODULE__{} = state, ledger, key, expected, metadata, opts) do
+    case ensure_shard_lease(state, ledger, key, expected, metadata, opts) do
+      {:ok, _lease} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_shard_lease(%__MODULE__{} = state, ledger, key, expected, metadata, opts) do
+    with {:ok, lease} <- fetch_shard_lease(state, ledger, key, opts) do
+      if shard_lease_matches?(lease, expected, metadata) do
+        {:ok, lease}
+      else
+        {:error,
+         Conflict.new(:shard_lease,
+           key: key,
+           expected: expected,
+           actual: lease || :missing,
+           message: "shard lease conflict"
+         )}
+      end
+    end
+  end
+
+  defp shard_lease_matches?(lease, %{available_at: now}, _metadata), do: is_nil(lease) or lease_expired?(lease, now)
+
+  defp shard_lease_matches?(lease, %{expired_at_or_before: now}, _metadata),
+    do: not is_nil(lease) and lease_expired?(lease, now)
+
+  defp shard_lease_matches?(lease, %{status: :current, owner_id: owner_id}, metadata) do
+    not is_nil(lease) and field(lease, :owner_id) == owner_id and lease_current?(lease, Map.get(metadata, :now))
+  end
+
+  defp shard_lease_matches?(_lease, _expected, _metadata), do: false
+
+  defp lease_current?(_value, nil), do: true
+
+  defp lease_current?(value, %DateTime{} = now) do
+    case field(value, :lease_until) do
+      %DateTime{} = lease_until -> DateTime.compare(lease_until, now) == :gt
+      _missing_or_invalid -> false
+    end
+  end
+
+  defp lease_expired?(_value, nil), do: false
+
+  defp lease_expired?(value, %DateTime{} = now) do
+    case field(value, :lease_until) do
+      %DateTime{} = lease_until -> DateTime.compare(lease_until, now) != :gt
+      _missing_or_invalid -> false
     end
   end
 
@@ -584,6 +836,65 @@ defmodule IntentLedger.Store.Ecto do
   defp operation_key(operation) when is_binary(operation), do: operation
   defp operation_key(operation) when is_atom(operation), do: Atom.to_string(operation)
   defp operation_key(operation), do: to_string(operation)
+
+  defp state_value(row) do
+    base = field(row, :state) || %{}
+
+    Map.merge(base, %{
+      intent_id: field(row, :intent_id),
+      status: status_value(field(row, :status)),
+      queue: field(row, :queue),
+      shard: field(row, :shard),
+      priority: field(row, :priority),
+      visible_at: field(row, :visible_at),
+      attempt: field(row, :attempt),
+      claim_id: field(row, :claim_id),
+      token_hash: field(row, :token_hash),
+      lease_until: field(row, :lease_until)
+    })
+  end
+
+  defp claim_value(row) do
+    base = field(row, :claim) || %{}
+
+    Map.merge(base, %{
+      claim_id: field(row, :claim_id),
+      intent_id: field(row, :intent_id),
+      owner_id: field(row, :owner_id),
+      token_hash: field(row, :token_hash),
+      lease_until: field(row, :lease_until)
+    })
+  end
+
+  defp shard_lease_value(attrs) do
+    %{
+      queue: attrs |> Map.fetch!(:queue) |> to_string(),
+      shard: Map.fetch!(attrs, :shard),
+      owner_id: attrs |> Map.fetch!(:owner_id) |> to_string(),
+      lease_until: Map.fetch!(attrs, :lease_until)
+    }
+  end
+
+  defp shard_lease_value(row, queue, shard) do
+    base = field(row, :lease) || %{}
+
+    Map.merge(base, %{
+      queue: field(row, :queue, queue) |> to_string(),
+      shard: field(row, :shard, shard),
+      owner_id: field(row, :owner_id),
+      lease_until: field(row, :lease_until)
+    })
+  end
+
+  defp status_value(status) when is_atom(status), do: status
+
+  defp status_value(status) when is_binary(status) do
+    String.to_existing_atom(status)
+  rescue
+    ArgumentError -> status
+  end
+
+  defp status_value(status), do: status
 
   defp state_row(intent_state, ledger, intent_id) do
     %{
@@ -693,6 +1004,8 @@ defmodule IntentLedger.Store.Ecto do
 
   defp ledger_key(ledger), do: ledger |> inspect() |> String.trim_leading("Elixir.")
 
+  defp shard_key(queue, shard), do: "shard:" <> to_string(queue) <> ":" <> to_string(shard)
+
   defp parse_shard_key("shard:" <> rest) do
     case String.split(rest, ":", parts: 2) do
       [queue, shard] -> {queue, String.to_integer(shard)}
@@ -701,6 +1014,16 @@ defmodule IntentLedger.Store.Ecto do
   end
 
   defp parse_shard_key(_key), do: {"default", 0}
+
+  defp normalize_attrs(attrs) when is_list(attrs), do: Map.new(attrs)
+  defp normalize_attrs(attrs) when is_map(attrs), do: attrs
+
+  defp fetch_attr(attrs, key) do
+    case Map.fetch(attrs, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> :error
+    end
+  end
 
   defp compact_request(%CommitRequest{} = request), do: %{operation: request.operation, command_id: request.command_id}
   defp compact_request(%Outbox{} = request), do: %{type: request.type, key: request.key, consumer: request.consumer}
