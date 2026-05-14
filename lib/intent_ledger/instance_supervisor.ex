@@ -15,6 +15,7 @@ defmodule IntentLedger.InstanceSupervisor do
           | {:store, module() | {module(), keyword()}}
           | {:queues, keyword() | map()}
           | {:lease_ms, pos_integer()}
+          | {:max_depth, non_neg_integer() | :infinity}
           | {:lease_renew_ms, pos_integer()}
           | {:lease_retry_ms, pos_integer()}
           | {:poll_interval_ms, pos_integer()}

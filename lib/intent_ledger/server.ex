@@ -18,6 +18,7 @@ defmodule IntentLedger.Server do
           lifecycle: module() | nil,
           queues: map(),
           lease_ms: pos_integer(),
+          max_depth: non_neg_integer() | nil,
           wakeups?: boolean(),
           telemetry: keyword(),
           command_results: %{optional(String.t()) => term()}
@@ -30,6 +31,7 @@ defmodule IntentLedger.Server do
     :lifecycle,
     :queues,
     :lease_ms,
+    :max_depth,
     :wakeups?,
     :telemetry,
     command_results: %{}
@@ -70,6 +72,7 @@ defmodule IntentLedger.Server do
        lifecycle: Keyword.get(opts, :lifecycle),
        queues: normalize_queues(Keyword.get(opts, :queues, default: @default_queue_opts)),
        lease_ms: Keyword.get(opts, :lease_ms, @default_lease_ms),
+       max_depth: normalize_max_depth(Keyword.get(opts, :max_depth)),
        wakeups?: Keyword.get(opts, :wakeups?, false),
        telemetry: Keyword.take(opts, [:telemetry_prefix])
      }}
@@ -522,9 +525,26 @@ defmodule IntentLedger.Server do
 
   defp build_intent(attrs, state, now) do
     with {:ok, intent} <- Intent.new(attrs, now: now) do
-      {:ok, Intent.with_shard(intent, shard_for(state, intent))}
+      intent
+      |> Intent.with_shard(shard_for(state, intent))
+      |> enforce_max_depth(state)
     end
   end
+
+  defp enforce_max_depth(%Intent{depth: depth} = intent, %{max_depth: max_depth})
+       when is_integer(max_depth) and depth > max_depth do
+    {:error,
+     {:guardrail_violation, :max_depth,
+      %{
+        depth: depth,
+        max_depth: max_depth,
+        intent_id: intent.id,
+        root_intent_id: intent.root_intent_id,
+        parent_intent_id: intent.parent_intent_id
+      }}}
+  end
+
+  defp enforce_max_depth(%Intent{} = intent, _state), do: {:ok, intent}
 
   defp shard_for(_state, %Intent{shard: shard}) when is_integer(shard), do: shard
 
@@ -608,6 +628,14 @@ defmodule IntentLedger.Server do
   end
 
   defp now(opts), do: Keyword.get(opts, :now, Time.utc_now())
+
+  defp normalize_max_depth(nil), do: nil
+  defp normalize_max_depth(:infinity), do: nil
+  defp normalize_max_depth(max_depth) when is_integer(max_depth) and max_depth >= 0, do: max_depth
+
+  defp normalize_max_depth(max_depth) do
+    raise ArgumentError, "expected :max_depth to be a non-negative integer or :infinity, got: #{inspect(max_depth)}"
+  end
 
   defp normalize_queues(queues) when is_map(queues) do
     queues

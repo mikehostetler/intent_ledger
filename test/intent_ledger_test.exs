@@ -406,6 +406,35 @@ defmodule IntentLedgerTest do
     assert Enum.all?(history, &(&1.data.actor == "agent"))
   end
 
+  test "rejects intents beyond configured max depth before committing", %{ledger: _ledger} do
+    name = Module.concat(__MODULE__, "MaxDepthLedger#{System.unique_integer([:positive])}")
+
+    start_supervised!({IntentLedger, name: name, max_depth: 1, store: IntentLedger.Store.Memory})
+
+    assert {:ok, root} =
+             IntentLedger.submit(name, %{
+               id: "int_depth_root",
+               key: "job:depth-root",
+               kind: "job.run",
+               depth: 1
+             })
+
+    assert root.intent.depth == 1
+
+    assert {:error, {:guardrail_violation, :max_depth, %{depth: 2, max_depth: 1, intent_id: "int_depth_child"}}} =
+             IntentLedger.submit(name, %{
+               id: "int_depth_child",
+               key: "job:depth-child",
+               kind: "job.run",
+               root_intent_id: root.intent.root_intent_id,
+               parent_intent_id: root.intent.id,
+               depth: 2
+             })
+
+    assert {:error, :not_found} = IntentLedger.get(name, "int_depth_child")
+    assert {:error, :not_found} = IntentLedger.history(name, "int_depth_child")
+  end
+
   test "replays duplicate command ids without duplicate lifecycle commits", %{ledger: ledger} do
     {:ok, first} =
       IntentLedger.submit(ledger, %{key: "job:replay", kind: "job.run"}, command_id: "cmd_submit")
