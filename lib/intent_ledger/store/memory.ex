@@ -99,7 +99,9 @@ defmodule IntentLedger.Store.Memory do
 
   @impl true
   def outbox(ref, ledger, request, opts) do
-    GenServer.call(ref, {:store_v1_outbox, ledger, request, opts})
+    Telemetry.instrument_store_outbox(opts, ledger, __MODULE__, request, fn ->
+      GenServer.call(ref, {:store_v1_outbox, ledger, request, opts})
+    end)
   end
 
   def submit(ref, ledger, intent, opts) do

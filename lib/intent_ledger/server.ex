@@ -187,19 +187,23 @@ defmodule IntentLedger.Server do
   end
 
   def handle_call({:replay_intent, intent_id, opts}, _from, state) do
-    {:reply, replay_stream(state, intent_stream(intent_id), opts), state}
+    {:reply, replay_stream(state, intent_stream(intent_id), opts, %{source: :intent, intent_id: to_string(intent_id)}),
+     state}
   end
 
   def handle_call({:replay_queue, queue, shard, opts}, _from, state) do
-    {:reply, replay_stream(state, queue_stream(queue, shard), opts), state}
+    {:reply,
+     replay_stream(state, queue_stream(queue, shard), opts, %{source: :queue, queue: to_string(queue), shard: shard}),
+     state}
   end
 
   def handle_call({:replay_ledger, opts}, _from, state) do
-    {:reply, replay_stream(state, ledger_stream(state.name), opts), state}
+    {:reply, replay_stream(state, ledger_stream(state.name), opts, %{source: :ledger}), state}
   end
 
   def handle_call({:replay_outbox, opts}, _from, state) do
-    {:reply, state.store_module.outbox(state.store_ref, state.name, Outbox.replay(opts), []), state}
+    result = state.store_module.outbox(state.store_ref, state.name, Outbox.replay(opts), state.telemetry)
+    {:reply, result, state}
   end
 
   def handle_call({:claim, queue, owner_id, opts}, _from, state) do
@@ -937,12 +941,48 @@ defmodule IntentLedger.Server do
 
   defp wake_claimable(_state, _result), do: :ok
 
-  defp replay_stream(state, stream, opts) do
-    case state.store_module.read(state.store_ref, state.name, {:stream, stream, opts}, []) do
-      {:ok, %{signals: signals}} -> {:ok, signals}
-      {:error, reason} -> {:error, reason}
-    end
+  defp replay_stream(state, stream, opts, metadata) do
+    start = System.monotonic_time()
+
+    result =
+      case state.store_module.read(state.store_ref, state.name, {:stream, stream, opts}, []) do
+        {:ok, %{signals: signals}} -> {:ok, signals}
+        {:error, reason} -> {:error, reason}
+      end
+
+    emit_replay_stop(state, start, opts, result, Map.put(metadata, :stream, stream))
+    result
   end
+
+  defp emit_replay_stop(state, start, opts, result, metadata) do
+    metadata =
+      metadata
+      |> Map.merge(%{
+        ledger: state.name,
+        status: replay_status(result),
+        cursor: Keyword.get(opts, :cursor),
+        limit: Keyword.get(opts, :limit)
+      })
+      |> maybe_put_error(replay_error(result))
+      |> reject_nil_metadata()
+
+    Telemetry.execute(
+      state.telemetry,
+      :replay_stop,
+      %{duration: System.monotonic_time() - start, count: replay_count(result)},
+      metadata
+    )
+  end
+
+  defp replay_status({:ok, _signals}), do: :ok
+  defp replay_status({:error, _reason}), do: :error
+
+  defp replay_count({:ok, results}) when is_list(results), do: length(results)
+  defp replay_count({:ok, _result}), do: 1
+  defp replay_count(_result), do: 0
+
+  defp replay_error({:error, reason}), do: reason
+  defp replay_error(_result), do: nil
 
   defp context(state, opts) do
     %{

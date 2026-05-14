@@ -16,7 +16,7 @@ defmodule IntentLedger.Telemetry do
   milliseconds.
   """
 
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Outbox}
 
   @default_prefix [:intent_ledger]
 
@@ -150,7 +150,7 @@ defmodule IntentLedger.Telemetry do
       name: [:store, :conflict],
       measurements: [:count],
       required_metadata: [:ledger, :store, :operation, :conflict],
-      optional_metadata: [:command_id, :stream, :intent_id, :claim_id, :queue, :shard, :owner_id]
+      optional_metadata: [:command_id, :stream, :intent_id, :claim_id, :queue, :shard, :owner_id, :consumer, :cursor]
     },
     %{
       event: :claim_stop,
@@ -178,14 +178,14 @@ defmodule IntentLedger.Telemetry do
       name: [:outbox, :read, :stop],
       measurements: [:duration, :count, :lag_ms],
       required_metadata: [:ledger, :consumer, :status],
-      optional_metadata: [:cursor, :limit]
+      optional_metadata: [:cursor, :limit, :store, :error_class]
     },
     %{
       event: :outbox_ack_stop,
       name: [:outbox, :ack, :stop],
       measurements: [:duration, :count],
       required_metadata: [:ledger, :consumer, :status],
-      optional_metadata: [:cursor, :conflict]
+      optional_metadata: [:cursor, :conflict, :store, :error_class]
     },
     %{
       event: :dispatcher_stop,
@@ -199,14 +199,14 @@ defmodule IntentLedger.Telemetry do
       name: [:replay, :stop],
       measurements: [:duration, :count],
       required_metadata: [:ledger, :source, :status],
-      optional_metadata: [:stream, :intent_id, :queue, :shard, :cursor, :limit]
+      optional_metadata: [:store, :stream, :intent_id, :queue, :shard, :cursor, :limit, :error_class]
     },
     %{
       event: :projection_stop,
       name: [:projection, :stop],
       measurements: [:duration, :count],
       required_metadata: [:ledger, :projection, :source, :status],
-      optional_metadata: [:stream, :cursor]
+      optional_metadata: [:stream, :cursor, :intent_id, :queue, :shard, :error_class]
     },
     %{
       event: :inspection_stop,
@@ -372,6 +372,19 @@ defmodule IntentLedger.Telemetry do
   end
 
   @doc false
+  @spec instrument_store_outbox(keyword(), atom(), module(), term(), (-> term())) :: term()
+  def instrument_store_outbox(opts, ledger, store_module, request, fun) when is_function(fun, 0) do
+    start = System.monotonic_time()
+    normalized = normalize_outbox_request(request)
+    result = fun.()
+
+    emit_outbox_event(opts, ledger, store_module, normalized, start, result)
+    emit_store_conflict(opts, outbox_conflict_metadata(ledger, store_module, normalized), result)
+
+    result
+  end
+
+  @doc false
   @spec error_class(term()) :: atom()
   def error_class(%module{}), do: module
   def error_class(reason) when is_atom(reason), do: reason
@@ -487,6 +500,120 @@ defmodule IntentLedger.Telemetry do
   end
 
   defp shard_lease_result_metadata(_result), do: %{status: :unknown}
+
+  defp normalize_outbox_request(%Outbox{} = request), do: request
+
+  defp normalize_outbox_request({type, attrs}) when is_atom(type) and (is_map(attrs) or is_list(attrs)) do
+    Outbox.new(type, attrs)
+  end
+
+  defp normalize_outbox_request(request), do: request
+
+  defp emit_outbox_event(opts, ledger, store_module, %{type: :read} = request, start, result) do
+    execute(
+      opts,
+      :outbox_read_stop,
+      Map.merge(outbox_common_measurements(start, result), %{lag_ms: outbox_lag_ms(result)}),
+      %{
+        ledger: ledger,
+        consumer: request.consumer,
+        status: result_status(result),
+        cursor: request.cursor,
+        limit: request.limit,
+        store: store_module
+      }
+      |> maybe_put_result_error(result)
+      |> reject_nil_metadata()
+    )
+  end
+
+  defp emit_outbox_event(opts, ledger, store_module, %{type: :ack} = request, start, result) do
+    execute(
+      opts,
+      :outbox_ack_stop,
+      outbox_common_measurements(start, result),
+      %{
+        ledger: ledger,
+        consumer: request.consumer,
+        status: result_status(result),
+        cursor: request.key,
+        store: store_module
+      }
+      |> maybe_put_result_error(result)
+      |> reject_nil_metadata()
+    )
+  end
+
+  defp emit_outbox_event(opts, ledger, store_module, %{type: :replay} = request, start, result) do
+    execute(
+      opts,
+      :replay_stop,
+      %{duration: System.monotonic_time() - start, count: result_count(result)},
+      %{
+        ledger: ledger,
+        source: :outbox,
+        status: result_status(result),
+        cursor: request.cursor,
+        limit: request.limit,
+        store: store_module
+      }
+      |> maybe_put_result_error(result)
+      |> reject_nil_metadata()
+    )
+  end
+
+  defp emit_outbox_event(_opts, _ledger, _store_module, _request, _start, _result), do: :ok
+
+  defp outbox_common_measurements(start, result) do
+    %{duration: System.monotonic_time() - start, count: result_count(result)}
+  end
+
+  defp outbox_conflict_metadata(ledger, store_module, %{type: type} = request) do
+    %{
+      ledger: ledger,
+      store: store_module,
+      operation: type,
+      cursor: Map.get(request, :key),
+      consumer: Map.get(request, :consumer)
+    }
+    |> reject_nil_metadata()
+  end
+
+  defp outbox_conflict_metadata(ledger, store_module, _request) do
+    %{
+      ledger: ledger,
+      store: store_module,
+      operation: :outbox
+    }
+  end
+
+  defp result_status({:ok, _result}), do: :ok
+  defp result_status({:error, _reason}), do: :error
+  defp result_status(_result), do: :unknown
+
+  defp result_count({:ok, result}) when is_list(result), do: length(result)
+  defp result_count({:ok, _result}), do: 1
+  defp result_count(_result), do: 0
+
+  defp maybe_put_result_error(metadata, {:error, reason}), do: Map.put(metadata, :error_class, error_class(reason))
+  defp maybe_put_result_error(metadata, _result), do: metadata
+
+  defp outbox_lag_ms({:ok, entries}) when is_list(entries) do
+    now = DateTime.utc_now()
+
+    entries
+    |> Enum.map(&entry_lag_ms(&1, now))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.max(fn -> 0 end)
+  end
+
+  defp outbox_lag_ms(_result), do: 0
+
+  defp entry_lag_ms(%{inserted_at: %DateTime{} = inserted_at}, now) do
+    max(DateTime.diff(now, inserted_at, :millisecond), 0)
+  end
+
+  defp entry_lag_ms(_entry, _now), do: nil
 
   defp emit_store_conflict(opts, metadata, {:error, %Conflict{} = conflict}) do
     execute(

@@ -1,8 +1,21 @@
 defmodule IntentLedger.TelemetryTest do
   use ExUnit.Case, async: true
 
-  alias IntentLedger.Store.CommitRequest
+  alias IntentLedger.{Names, SignalDispatcher}
+  alias IntentLedger.Store.{CommitRequest, Outbox, Write}
   alias IntentLedger.Telemetry
+
+  defmodule CountingProjection do
+    @behaviour IntentLedger.Projection
+
+    @impl true
+    def init(_opts), do: %{count: 0}
+
+    @impl true
+    def apply_signal(_signal, projection, _context) do
+      Map.update!(projection, :count, &(&1 + 1))
+    end
+  end
 
   def handle_event(event, measurements, metadata, parent) do
     send(parent, {:telemetry, event, measurements, metadata})
@@ -307,6 +320,166 @@ defmodule IntentLedger.TelemetryTest do
       assert store_conflict_metadata.conflict == :shard_lease
       assert store_conflict_metadata.queue == "default"
       assert store_conflict_metadata.shard == 0
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  test "outbox read and ack emit telemetry" do
+    store_name = unique_atom(:outbox_telemetry_store)
+    prefix = [unique_atom(:outbox_telemetry_prefix)]
+    read_event = Telemetry.event_name(:outbox_read_stop, telemetry_prefix: prefix)
+    ack_event = Telemetry.event_name(:outbox_ack_stop, telemetry_prefix: prefix)
+    handler_id = attach_events([read_event, ack_event])
+
+    start_supervised!({IntentLedger.Store.Memory, name: store_name})
+
+    inserted_at = DateTime.add(DateTime.utc_now(), -1_000, :millisecond)
+
+    assert {:ok, _commit} =
+             IntentLedger.Store.Memory.commit(
+               store_name,
+               MyApp.IntentLedger,
+               CommitRequest.new(
+                 operation: :seed_outbox,
+                 writes: [
+                   Write.put_outbox("out_telemetry", %{
+                     key: "out_telemetry",
+                     stream: "intent:int_outbox",
+                     signal: %{id: "sig_telemetry", type: "intent_ledger.intent.submitted"},
+                     inserted_at: inserted_at
+                   })
+                 ]
+               ),
+               []
+             )
+
+    try do
+      assert {:ok, [_entry]} =
+               IntentLedger.Store.Memory.outbox(
+                 store_name,
+                 MyApp.IntentLedger,
+                 Outbox.read("dispatcher", cursor: 0, limit: 10),
+                 telemetry_prefix: prefix
+               )
+
+      assert_receive {:telemetry, ^read_event, %{duration: read_duration, count: 1, lag_ms: lag_ms}, read_metadata}
+      assert is_integer(read_duration)
+      assert read_duration >= 0
+      assert lag_ms >= 0
+      assert read_metadata.ledger == MyApp.IntentLedger
+      assert read_metadata.consumer == "dispatcher"
+      assert read_metadata.status == :ok
+      assert read_metadata.store == IntentLedger.Store.Memory
+
+      assert {:ok, _acked} =
+               IntentLedger.Store.Memory.outbox(
+                 store_name,
+                 MyApp.IntentLedger,
+                 Outbox.ack("out_telemetry", "dispatcher"),
+                 telemetry_prefix: prefix
+               )
+
+      assert_receive {:telemetry, ^ack_event, %{duration: ack_duration, count: 1}, ack_metadata}
+      assert is_integer(ack_duration)
+      assert ack_duration >= 0
+      assert ack_metadata.ledger == MyApp.IntentLedger
+      assert ack_metadata.consumer == "dispatcher"
+      assert ack_metadata.status == :ok
+      assert ack_metadata.cursor == "out_telemetry"
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  test "dispatcher polls emit dispatcher telemetry" do
+    ledger = unique_atom(:dispatcher_telemetry_ledger)
+    prefix = [unique_atom(:dispatcher_telemetry_prefix)]
+    dispatcher_event = Telemetry.event_name(:dispatcher_stop, telemetry_prefix: prefix)
+    handler_id = attach_events([dispatcher_event])
+
+    start_supervised!(
+      {IntentLedger,
+       name: ledger, store: IntentLedger.Store.Memory, telemetry_prefix: prefix, dispatcher_interval_ms: 10_000}
+    )
+
+    assert {:ok, _record} =
+             IntentLedger.submit(ledger, %{key: "job:dispatcher-telemetry", kind: "job.run"},
+               command_id: "cmd_dispatcher_telemetry_submit"
+             )
+
+    try do
+      dispatcher = Process.whereis(Names.signal_dispatcher(ledger))
+      assert {:ok, entries} = SignalDispatcher.poll_once(dispatcher)
+
+      assert_receive {:telemetry, ^dispatcher_event, %{duration: duration, count: count, failed: 0}, metadata}
+      assert is_integer(duration)
+      assert duration >= 0
+      assert count == length(entries)
+      assert metadata.ledger == ledger
+      assert metadata.consumer == "intent_ledger.signal_dispatcher"
+      assert metadata.status == :ok
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  test "replay APIs emit replay telemetry" do
+    ledger = unique_atom(:replay_telemetry_ledger)
+    prefix = [unique_atom(:replay_telemetry_prefix)]
+    replay_event = Telemetry.event_name(:replay_stop, telemetry_prefix: prefix)
+    handler_id = attach_events([replay_event])
+
+    start_supervised!({IntentLedger, name: ledger, store: IntentLedger.Store.Memory, telemetry_prefix: prefix})
+
+    assert {:ok, record} =
+             IntentLedger.submit(ledger, %{key: "job:replay-telemetry", kind: "job.run"},
+               command_id: "cmd_replay_telemetry_submit"
+             )
+
+    try do
+      assert {:ok, signals} = IntentLedger.replay_intent(ledger, record.intent.id, cursor: 0, limit: 10)
+
+      assert_receive {:telemetry, ^replay_event, %{duration: duration, count: count}, metadata}
+      assert is_integer(duration)
+      assert duration >= 0
+      assert count == length(signals)
+      assert metadata.ledger == ledger
+      assert metadata.source == :intent
+      assert metadata.intent_id == record.intent.id
+      assert metadata.status == :ok
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  test "projection rebuilds emit projection telemetry" do
+    ledger = unique_atom(:projection_telemetry_ledger)
+    prefix = [unique_atom(:projection_telemetry_prefix)]
+    projection_event = Telemetry.event_name(:projection_stop, telemetry_prefix: prefix)
+    handler_id = attach_events([projection_event])
+
+    start_supervised!({IntentLedger, name: ledger, store: IntentLedger.Store.Memory, telemetry_prefix: prefix})
+
+    assert {:ok, _record} =
+             IntentLedger.submit(ledger, %{key: "job:projection-telemetry", kind: "job.run"},
+               command_id: "cmd_projection_telemetry_submit"
+             )
+
+    try do
+      assert {:ok, projection} =
+               IntentLedger.rebuild_projection(ledger, CountingProjection, source: :ledger, telemetry_prefix: prefix)
+
+      assert projection.count >= 1
+
+      assert_receive {:telemetry, ^projection_event, %{duration: duration, count: count}, metadata}
+      assert is_integer(duration)
+      assert duration >= 0
+      assert count == projection.count
+      assert metadata.ledger == ledger
+      assert metadata.projection == CountingProjection
+      assert metadata.source == :ledger
+      assert metadata.status == :ok
     after
       :telemetry.detach(handler_id)
     end

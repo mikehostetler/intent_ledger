@@ -100,7 +100,11 @@ defmodule IntentLedger.Store.Bedrock do
   @doc false
   @impl true
   @spec outbox(Store.ref(), atom(), Store.outbox_request(), keyword()) :: Store.result()
-  def outbox(ref, ledger, request, opts), do: GenServer.call(ref, {:outbox, ledger, request, opts})
+  def outbox(ref, ledger, request, opts) do
+    Telemetry.instrument_store_outbox(opts, ledger, __MODULE__, request, fn ->
+      GenServer.call(ref, {:outbox, ledger, request, opts})
+    end)
+  end
 
   @impl true
   def handle_call({:commit, ledger, %CommitRequest{} = request, opts}, _from, %__MODULE__{} = state) do

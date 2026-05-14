@@ -30,7 +30,7 @@ defmodule IntentLedger do
       {:ok, _record} = IntentLedger.complete(MyApp.IntentLedger, claimed.claim.id, claimed.claim.token, :ok)
   """
 
-  alias IntentLedger.{Command, Projection}
+  alias IntentLedger.{Command, Projection, Telemetry}
 
   @type ledger :: GenServer.server()
 
@@ -115,12 +115,21 @@ defmodule IntentLedger do
   """
   @spec rebuild_projection(ledger(), module(), keyword()) :: {:ok, term()} | {:error, term()}
   def rebuild_projection(ledger, projection, opts \\ []) when is_atom(projection) do
+    start = System.monotonic_time()
     source = Keyword.get(opts, :source, :ledger)
     replay_opts = Keyword.get(opts, :replay, [])
     projection_opts = Keyword.get(opts, :projection, [])
+    telemetry = Keyword.take(opts, [:telemetry_prefix])
 
-    with {:ok, signals} <- replay_projection_source(ledger, source, replay_opts) do
-      Projection.rebuild(projection, signals, projection_opts)
+    case replay_projection_source(ledger, source, replay_opts) do
+      {:ok, signals} ->
+        result = Projection.rebuild(projection, signals, projection_opts)
+        emit_projection_stop(telemetry, ledger, projection, source, start, length(signals), result)
+        result
+
+      {:error, reason} = error ->
+        emit_projection_stop(telemetry, ledger, projection, source, start, 0, error)
+        {:error, reason}
     end
   end
 
@@ -255,6 +264,47 @@ defmodule IntentLedger do
   end
 
   defp replay_projection_source(_ledger, source, _opts), do: {:error, {:invalid_projection_source, source}}
+
+  defp emit_projection_stop(telemetry, ledger, projection, source, start, count, result) do
+    metadata =
+      source
+      |> projection_source_metadata()
+      |> Map.merge(%{
+        ledger: ledger,
+        projection: projection,
+        status: result_status(result)
+      })
+      |> maybe_put_result_error(result)
+      |> reject_nil_metadata()
+
+    Telemetry.execute(
+      telemetry,
+      :projection_stop,
+      %{duration: System.monotonic_time() - start, count: count},
+      metadata
+    )
+  end
+
+  defp projection_source_metadata(:ledger), do: %{source: :ledger}
+  defp projection_source_metadata({:intent, intent_id}), do: %{source: :intent, intent_id: to_string(intent_id)}
+
+  defp projection_source_metadata({:queue, queue, shard}) do
+    %{source: :queue, queue: to_string(queue), shard: shard}
+  end
+
+  defp projection_source_metadata(source), do: %{source: source}
+
+  defp result_status({:ok, _result}), do: :ok
+  defp result_status({:error, _reason}), do: :error
+
+  defp maybe_put_result_error(metadata, {:error, reason}),
+    do: Map.put(metadata, :error_class, Telemetry.error_class(reason))
+
+  defp maybe_put_result_error(metadata, _result), do: metadata
+
+  defp reject_nil_metadata(metadata) do
+    Map.reject(metadata, fn {_key, value} -> is_nil(value) end)
+  end
 
   defp command_call(ledger, signal, message, opts) do
     case Command.normalize(signal) do

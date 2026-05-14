@@ -98,7 +98,8 @@ defmodule IntentLedger.InstanceSupervisor do
         :dispatcher_consumer,
         :dispatcher_retry_ms,
         :dispatcher_max_retry_ms,
-        :signal_handlers
+        :signal_handlers,
+        :telemetry_prefix
       ])
       |> Keyword.put(:store, {store_module, store_name})
 

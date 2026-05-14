@@ -10,7 +10,7 @@ defmodule IntentLedger.SignalDispatcher do
 
   use GenServer
 
-  alias IntentLedger.{Names, SignalHandler, Time}
+  alias IntentLedger.{Names, SignalHandler, Telemetry, Time}
   alias IntentLedger.Store.Outbox
 
   @default_interval_ms 1_000
@@ -28,6 +28,7 @@ defmodule IntentLedger.SignalDispatcher do
           | {:dispatcher_retry_ms, pos_integer()}
           | {:dispatcher_max_retry_ms, pos_integer()}
           | {:signal_handlers, [SignalHandler.spec()]}
+          | {:telemetry_prefix, [atom()]}
 
   @type t :: %__MODULE__{
           name: atom(),
@@ -38,6 +39,7 @@ defmodule IntentLedger.SignalDispatcher do
           consumer: String.t(),
           retry_ms: pos_integer(),
           max_retry_ms: pos_integer(),
+          telemetry: keyword(),
           handlers: [SignalHandler.normalized()],
           timer_ref: reference() | nil,
           poll_count: non_neg_integer(),
@@ -63,6 +65,7 @@ defmodule IntentLedger.SignalDispatcher do
     :consumer,
     :retry_ms,
     :max_retry_ms,
+    :telemetry,
     :timer_ref,
     handlers: [],
     poll_count: 0,
@@ -121,6 +124,7 @@ defmodule IntentLedger.SignalDispatcher do
       consumer: opts |> Keyword.get(:dispatcher_consumer, @default_consumer) |> to_string(),
       retry_ms: Keyword.get(opts, :dispatcher_retry_ms, @default_retry_ms),
       max_retry_ms: Keyword.get(opts, :dispatcher_max_retry_ms, @default_max_retry_ms),
+      telemetry: Keyword.take(opts, [:telemetry_prefix]),
       handlers: opts |> Keyword.get(:signal_handlers, []) |> SignalHandler.normalize(),
       timer_ref: nil
     }
@@ -149,12 +153,14 @@ defmodule IntentLedger.SignalDispatcher do
   end
 
   defp poll_outbox(%__MODULE__{} = state) do
+    start = System.monotonic_time()
     request = Outbox.read(state.consumer, limit: state.batch_size)
 
-    case state.store_module.outbox(state.store_ref, state.name, request, []) do
+    case state.store_module.outbox(state.store_ref, state.name, request, state.telemetry) do
       {:ok, entries} ->
         now = Time.utc_now()
         {next_state, delivered_count, acked, skipped, errors} = process_entries(state, entries, now)
+        emit_dispatcher_stop(state, start, length(entries), length(errors), dispatcher_status(errors))
 
         next_state = %{
           next_state
@@ -174,6 +180,7 @@ defmodule IntentLedger.SignalDispatcher do
         {{:ok, entries}, next_state}
 
       {:error, reason} ->
+        emit_dispatcher_stop(state, start, 0, 1, :error, reason)
         next_state = %{state | poll_count: state.poll_count + 1, last_error: reason}
         {{:error, reason}, next_state}
     end
@@ -239,7 +246,7 @@ defmodule IntentLedger.SignalDispatcher do
     key = entry_key(entry)
     request = Outbox.ack(key, state.consumer, metadata: %{acked_at: now, handler_count: length(state.handlers)})
 
-    case state.store_module.outbox(state.store_ref, state.name, request, []) do
+    case state.store_module.outbox(state.store_ref, state.name, request, state.telemetry) do
       {:ok, acked_entry} ->
         {:ok, acked_entry, %{state | retries: Map.delete(state.retries, key)}}
 
@@ -267,6 +274,34 @@ defmodule IntentLedger.SignalDispatcher do
     }
 
     %{state | retries: Map.put(state.retries, key, retry)}
+  end
+
+  defp emit_dispatcher_stop(%__MODULE__{} = state, start, count, failed, status, reason \\ nil) do
+    metadata =
+      %{
+        ledger: state.name,
+        consumer: state.consumer,
+        status: status
+      }
+      |> maybe_put_error(reason)
+      |> reject_nil_metadata()
+
+    Telemetry.execute(
+      state.telemetry,
+      :dispatcher_stop,
+      %{duration: System.monotonic_time() - start, count: count, failed: failed},
+      metadata
+    )
+  end
+
+  defp maybe_put_error(metadata, nil), do: metadata
+  defp maybe_put_error(metadata, reason), do: Map.put(metadata, :error_class, Telemetry.error_class(reason))
+
+  defp dispatcher_status([]), do: :ok
+  defp dispatcher_status(_errors), do: :error
+
+  defp reject_nil_metadata(metadata) do
+    Map.reject(metadata, fn {_key, value} -> is_nil(value) end)
   end
 
   defp backoff_ms(%__MODULE__{} = state, retry_count) do
