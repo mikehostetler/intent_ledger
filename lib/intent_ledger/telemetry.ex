@@ -1,12 +1,318 @@
 defmodule IntentLedger.Telemetry do
-  @moduledoc false
+  @moduledoc """
+  Stable telemetry event catalogue and metadata policy.
+
+  Intent Ledger telemetry events are emitted under `[:intent_ledger]` by
+  default. Pass `:telemetry_prefix` when starting a ledger instance to emit the
+  same event suffixes under an application-owned prefix.
+
+  Telemetry metadata is intentionally operational. Events may include ledger
+  names, low-cardinality operation and status atoms, durable identifiers,
+  queue/shard coordinates, consumer names, projection names, and lineage
+  identifiers. Events must not include intent payloads, command payloads,
+  command results, raw failure payloads, claim tokens, token hashes, headers, or
+  secrets. Measurements use native telemetry units for `:duration` and
+  `:system_time`; counts are integer counters; lag measurements are
+  milliseconds.
+  """
 
   @default_prefix [:intent_ledger]
+
+  @type event ::
+          :command_start
+          | :command_stop
+          | :command_exception
+          | :store_commit_start
+          | :store_commit_stop
+          | :store_commit_exception
+          | :store_conflict
+          | :claim_stop
+          | :shard_lease_stop
+          | :recovery_stop
+          | :outbox_read_stop
+          | :outbox_ack_stop
+          | :dispatcher_stop
+          | :replay_stop
+          | :projection_stop
+          | :inspection_stop
+
+  @type field :: atom()
+  @type definition :: %{
+          required(:event) => event(),
+          required(:name) => [atom()],
+          required(:measurements) => [field()],
+          required(:required_metadata) => [field()],
+          required(:optional_metadata) => [field()]
+        }
+
+  @lineage_metadata_fields [
+    :actor,
+    :causation_id,
+    :correlation_id,
+    :root_intent_id,
+    :parent_intent_id,
+    :depth
+  ]
+
+  @base_metadata_fields [
+    :ledger,
+    :operation,
+    :status,
+    :store,
+    :intent_id,
+    :claim_id,
+    :command_id,
+    :idempotency_key,
+    :queue,
+    :shard,
+    :owner_id,
+    :consumer,
+    :handler,
+    :projection,
+    :source,
+    :stream,
+    :cursor,
+    :limit,
+    :conflict,
+    :exception_kind,
+    :error_class,
+    :classification,
+    :retry_at,
+    :lease_until,
+    :replayed?
+  ]
+
+  @safe_metadata_fields @base_metadata_fields ++ @lineage_metadata_fields
+
+  @sensitive_metadata_fields [
+    :payload,
+    :command_payload,
+    :result,
+    :error,
+    :reason,
+    :token,
+    :token_hash,
+    :secret,
+    :password,
+    :authorization,
+    :headers,
+    :private_key,
+    :access_key
+  ]
+
+  @definitions [
+    %{
+      event: :command_start,
+      name: [:command, :start],
+      measurements: [:system_time],
+      required_metadata: [:ledger, :operation],
+      optional_metadata: [:command_id, :idempotency_key | @lineage_metadata_fields]
+    },
+    %{
+      event: :command_stop,
+      name: [:command, :stop],
+      measurements: [:duration, :count],
+      required_metadata: [:ledger, :operation, :status],
+      optional_metadata: [:command_id, :idempotency_key | @lineage_metadata_fields]
+    },
+    %{
+      event: :command_exception,
+      name: [:command, :exception],
+      measurements: [:duration],
+      required_metadata: [:ledger, :operation, :exception_kind],
+      optional_metadata: [:command_id, :idempotency_key, :error_class | @lineage_metadata_fields]
+    },
+    %{
+      event: :store_commit_start,
+      name: [:store, :commit, :start],
+      measurements: [:system_time],
+      required_metadata: [:ledger, :store, :operation],
+      optional_metadata: [:command_id, :stream]
+    },
+    %{
+      event: :store_commit_stop,
+      name: [:store, :commit, :stop],
+      measurements: [:duration, :writes, :signals, :outbox_entries],
+      required_metadata: [:ledger, :store, :operation, :status],
+      optional_metadata: [:command_id, :stream, :replayed?]
+    },
+    %{
+      event: :store_commit_exception,
+      name: [:store, :commit, :exception],
+      measurements: [:duration],
+      required_metadata: [:ledger, :store, :operation, :exception_kind],
+      optional_metadata: [:command_id, :stream, :error_class]
+    },
+    %{
+      event: :store_conflict,
+      name: [:store, :conflict],
+      measurements: [:count],
+      required_metadata: [:ledger, :store, :operation, :conflict],
+      optional_metadata: [:command_id, :stream, :intent_id, :claim_id, :queue, :shard]
+    },
+    %{
+      event: :claim_stop,
+      name: [:claim, :stop],
+      measurements: [:duration, :count],
+      required_metadata: [:ledger, :queue, :owner_id, :status],
+      optional_metadata: [:shard, :limit, :intent_id, :claim_id]
+    },
+    %{
+      event: :shard_lease_stop,
+      name: [:shard_lease, :stop],
+      measurements: [:duration],
+      required_metadata: [:ledger, :queue, :shard, :operation, :status],
+      optional_metadata: [:owner_id, :lease_until, :conflict]
+    },
+    %{
+      event: :recovery_stop,
+      name: [:recovery, :stop],
+      measurements: [:duration, :count],
+      required_metadata: [:ledger, :queue, :status],
+      optional_metadata: [:shard, :limit, :classification]
+    },
+    %{
+      event: :outbox_read_stop,
+      name: [:outbox, :read, :stop],
+      measurements: [:duration, :count, :lag_ms],
+      required_metadata: [:ledger, :consumer, :status],
+      optional_metadata: [:cursor, :limit]
+    },
+    %{
+      event: :outbox_ack_stop,
+      name: [:outbox, :ack, :stop],
+      measurements: [:duration, :count],
+      required_metadata: [:ledger, :consumer, :status],
+      optional_metadata: [:cursor, :conflict]
+    },
+    %{
+      event: :dispatcher_stop,
+      name: [:dispatcher, :stop],
+      measurements: [:duration, :count, :failed],
+      required_metadata: [:ledger, :consumer, :status],
+      optional_metadata: [:handler, :retry_at, :error_class]
+    },
+    %{
+      event: :replay_stop,
+      name: [:replay, :stop],
+      measurements: [:duration, :count],
+      required_metadata: [:ledger, :source, :status],
+      optional_metadata: [:stream, :intent_id, :queue, :shard, :cursor, :limit]
+    },
+    %{
+      event: :projection_stop,
+      name: [:projection, :stop],
+      measurements: [:duration, :count],
+      required_metadata: [:ledger, :projection, :source, :status],
+      optional_metadata: [:stream, :cursor]
+    },
+    %{
+      event: :inspection_stop,
+      name: [:inspection, :stop],
+      measurements: [:duration, :count],
+      required_metadata: [:ledger, :operation, :status],
+      optional_metadata: [:queue, :shard, :intent_id, :claim_id, :consumer, :projection, :limit]
+    }
+  ]
+
+  @by_event Map.new(@definitions, &{&1.event, &1})
+  @by_name Map.new(@definitions, &{&1.name, &1})
+  @metadata_policy %{
+    required: [:ledger],
+    allowed: @safe_metadata_fields,
+    lineage: @lineage_metadata_fields,
+    sensitive: @sensitive_metadata_fields,
+    measurement_units: %{
+      duration: :native,
+      system_time: :native,
+      count: :count,
+      writes: :count,
+      signals: :count,
+      outbox_entries: :count,
+      failed: :count,
+      lag_ms: :millisecond
+    }
+  }
+
+  @doc """
+  Returns all telemetry event definitions in their stable catalogue order.
+  """
+  @spec all() :: [definition()]
+  def all, do: @definitions
+
+  @doc """
+  Returns all telemetry event identifiers in their stable catalogue order.
+  """
+  @spec events() :: [event()]
+  def events, do: Enum.map(@definitions, & &1.event)
+
+  @doc """
+  Returns the default event prefix.
+  """
+  @spec default_prefix() :: [atom()]
+  def default_prefix, do: @default_prefix
+
+  @doc """
+  Returns the metadata policy for Intent Ledger telemetry events.
+  """
+  @spec metadata_policy() :: %{
+          required: [field()],
+          allowed: [field()],
+          lineage: [field()],
+          sensitive: [field()],
+          measurement_units: %{field() => atom()}
+        }
+  def metadata_policy, do: @metadata_policy
+
+  @doc """
+  Returns the allowed metadata field names.
+  """
+  @spec allowed_metadata_fields() :: [field()]
+  def allowed_metadata_fields, do: @safe_metadata_fields
+
+  @doc """
+  Returns metadata field names that must not be emitted.
+  """
+  @spec sensitive_metadata_fields() :: [field()]
+  def sensitive_metadata_fields, do: @sensitive_metadata_fields
+
+  @doc """
+  Fetches a telemetry event definition.
+  """
+  @spec fetch(event() | [atom()]) :: {:ok, definition()} | :error
+  def fetch(event) when is_atom(event), do: Map.fetch(@by_event, event)
+  def fetch(name) when is_list(name), do: Map.fetch(@by_name, name)
+
+  @doc """
+  Fetches a telemetry event definition or raises when the event is unknown.
+  """
+  @spec fetch!(event() | [atom()]) :: definition()
+  def fetch!(event_or_name) do
+    case fetch(event_or_name) do
+      {:ok, definition} -> definition
+      :error -> raise ArgumentError, "unknown intent ledger telemetry event: #{inspect(event_or_name)}"
+    end
+  end
+
+  @doc """
+  Returns the fully prefixed telemetry event name.
+  """
+  @spec event_name(event(), keyword()) :: [atom()]
+  def event_name(event, opts \\ []) do
+    prefix(opts) ++ fetch!(event).name
+  end
+
+  @doc false
+  @spec execute(keyword(), event(), map(), map()) :: :ok
+  def execute(opts, event, measurements, metadata) when is_atom(event) do
+    :telemetry.execute(event_name(event, opts), measurements, metadata)
+  end
 
   @doc false
   @spec execute(keyword(), atom(), list(atom()), map(), map()) :: :ok
   def execute(opts, operation, event, measurements, metadata) do
-    prefix = Keyword.get(opts, :telemetry_prefix, @default_prefix)
-    :telemetry.execute(prefix ++ [operation | event], measurements, metadata)
+    :telemetry.execute(prefix(opts) ++ [operation | event], measurements, metadata)
   end
+
+  defp prefix(opts), do: Keyword.get(opts, :telemetry_prefix, @default_prefix)
 end

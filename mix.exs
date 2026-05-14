@@ -140,6 +140,7 @@ defmodule IntentLedger.MixProject do
           IntentLedger.RecoveryServer,
           IntentLedger.SignalDispatcher,
           IntentLedger.SignalHandler,
+          IntentLedger.Telemetry,
           IntentLedger.Store,
           IntentLedger.Store.Commit,
           IntentLedger.Store.CommitRequest,
