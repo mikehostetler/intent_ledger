@@ -3,7 +3,7 @@ defmodule IntentLedger.StoreEctoCommitTest do
 
   alias IntentLedger.Error.AdapterRuntimeError
   alias IntentLedger.{Intent, IntentState, Signal}
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Precondition, Write}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Precondition, Write}
   alias IntentLedger.Store.Ecto, as: EctoStore
 
   defmodule PostgresRepo do
@@ -35,6 +35,11 @@ defmodule IntentLedger.StoreEctoCommitTest do
         [] ->
           nil
       end
+    end
+
+    def all(query) do
+      record({:all, query})
+      Process.get(:rows, [])
     end
 
     def insert_all(source, rows, opts) do
@@ -379,6 +384,56 @@ defmodule IntentLedger.StoreEctoCommitTest do
 
     assert_receive {:transaction, []}
     assert_receive {:ops, [{:one, %Ecto.Query{}}, {:insert_all, {"intent_ledger_shard_leases", _schema}, [_], _opts}]}
+  end
+
+  test "lists due intents with deterministic ordering", %{store: store} do
+    future = ~U[2026-01-01 00:01:00Z]
+
+    rows = [
+      state_row(intent_id: "int_low", status: "available", visible_at: @now, priority: 1),
+      state_row(intent_id: "int_high", status: "available", visible_at: @now, priority: 10),
+      state_row(intent_id: "int_future", status: "available", visible_at: future, priority: 20),
+      state_row(intent_id: "int_other_shard", status: "available", shard: 1, visible_at: @now, priority: 30),
+      state_row(intent_id: "int_claimed", status: "claimed", visible_at: @now, priority: 40)
+    ]
+
+    assert {:ok, due} =
+             EctoStore.listing(
+               store,
+               @ledger,
+               Listing.due_intents(:default, 0, @now, limit: 2),
+               transaction_opts: [test_pid: self(), rows: rows]
+             )
+
+    assert Enum.map(due, & &1.intent_id) == ["int_high", "int_low"]
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:all, %Ecto.Query{}}]}
+  end
+
+  test "lists expired claims across queue shards", %{store: store} do
+    future = ~U[2026-01-01 00:01:00Z]
+    earlier = ~U[2025-12-31 23:59:00Z]
+
+    rows = [
+      state_row(intent_id: "int_later", status: "claimed", lease_until: @now),
+      state_row(intent_id: "int_earlier", status: "claimed", shard: 1, lease_until: earlier),
+      state_row(intent_id: "int_future", status: "claimed", lease_until: future),
+      state_row(intent_id: "int_available", status: "available", lease_until: earlier)
+    ]
+
+    assert {:ok, expired} =
+             EctoStore.listing(
+               store,
+               @ledger,
+               {:expired_claims, %{queue: :default, shard: nil, at: @now}},
+               transaction_opts: [test_pid: self(), rows: rows]
+             )
+
+    assert Enum.map(expired, & &1.intent_id) == ["int_earlier", "int_later"]
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:all, %Ecto.Query{}}]}
   end
 
   test "writes claims shard leases outbox and delete operations", %{store: store} do

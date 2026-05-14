@@ -23,7 +23,7 @@ defmodule IntentLedger.Store.Ecto do
   use GenServer
 
   alias IntentLedger.{Error, Store, Time}
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Outbox}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Outbox}
   alias IntentLedger.Store.Ecto.{Query, Schema}
 
   @dependencies [:ecto_sql, :postgrex]
@@ -155,8 +155,17 @@ defmodule IntentLedger.Store.Ecto do
     {:reply, result, state}
   end
 
+  def handle_call({:listing, ledger, request, opts}, _from, %__MODULE__{} = state) do
+    result =
+      transact(state.repo, transaction_opts(opts), fn ->
+        apply_listing_request(state, ledger, request)
+      end)
+
+    {:reply, result, state}
+  end
+
   def handle_call({operation, _ledger, request, _opts}, _from, %__MODULE__{} = state)
-      when operation in [:read, :listing, :outbox] do
+      when operation in [:read, :outbox] do
     {:reply, not_implemented(operation, request), state}
   end
 
@@ -614,6 +623,68 @@ defmodule IntentLedger.Store.Ecto do
 
   defp do_apply_lease_request(_state, _ledger, operation, _key, _attrs, _opts, _now),
     do: {:error, {:unsupported_store_v1_request, :lease, {:shard, operation}}}
+
+  defp apply_listing_request(%__MODULE__{} = state, ledger, request) do
+    with {:ok, listing} <- normalize_listing_request(request) do
+      opts = source_opts(state)
+
+      query = Query.listing(listing, ledger, opts)
+
+      rows =
+        state.repo.all(query)
+        |> Enum.map(&state_value/1)
+        |> filter_sort_take_listing(listing)
+
+      {:ok, rows}
+    end
+  end
+
+  defp normalize_listing_request(%Listing{} = listing), do: {:ok, listing}
+
+  defp normalize_listing_request({type, attrs})
+       when type in [:due_intents, :expired_claims] and (is_map(attrs) or is_list(attrs)) do
+    {:ok, Listing.new(type, attrs)}
+  end
+
+  defp normalize_listing_request(request), do: {:error, {:unsupported_store_v1_request, :listing, request}}
+
+  defp filter_sort_take_listing(states, %Listing{} = listing) do
+    states
+    |> Enum.filter(&listing_match?(&1, listing))
+    |> Enum.sort_by(&listing_sort_key(&1, listing))
+    |> Enum.take(listing.limit)
+  end
+
+  defp listing_match?(state, %Listing{type: :due_intents} = listing) do
+    state_queue(state) == listing.queue and shard_match?(state, listing) and
+      status_value(field(state, :status)) in [:available, :retry_scheduled] and
+      datetime_not_after?(field(state, :visible_at), listing.at)
+  end
+
+  defp listing_match?(state, %Listing{type: :expired_claims} = listing) do
+    state_queue(state) == listing.queue and shard_match?(state, listing) and
+      status_value(field(state, :status)) == :claimed and
+      datetime_not_after?(field(state, :lease_until), listing.at)
+  end
+
+  defp shard_match?(_state, %Listing{shard: nil}), do: true
+  defp shard_match?(state, %Listing{shard: shard}), do: field(state, :shard) == shard
+
+  defp state_queue(state), do: state |> field(:queue, "default") |> to_string()
+
+  defp listing_sort_key(state, %Listing{type: :due_intents}) do
+    {-field(state, :priority, 0), datetime_sort_key(field(state, :visible_at)), field(state, :intent_id)}
+  end
+
+  defp listing_sort_key(state, %Listing{type: :expired_claims}) do
+    {datetime_sort_key(field(state, :lease_until)), field(state, :intent_id)}
+  end
+
+  defp datetime_not_after?(%DateTime{} = value, %DateTime{} = at), do: DateTime.compare(value, at) != :gt
+  defp datetime_not_after?(_value, _at), do: false
+
+  defp datetime_sort_key(%DateTime{} = value), do: DateTime.to_unix(value, :microsecond)
+  defp datetime_sort_key(_value), do: 0
 
   defp not_implemented(operation, request) do
     {:error,

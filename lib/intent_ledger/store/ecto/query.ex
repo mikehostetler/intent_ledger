@@ -7,6 +7,7 @@ if Code.ensure_loaded?(Ecto.Query) do
     import Ecto.Query
 
     alias IntentLedger.Store.Ecto.{Migration, Schema}
+    alias IntentLedger.Store.Listing
 
     @type table :: Migration.table()
     @type option :: Migration.option()
@@ -27,6 +28,48 @@ if Code.ensure_loaded?(Ecto.Query) do
       end)
     end
 
+    @doc """
+    Builds the SQL query for a Store V1 listing request.
+    """
+    @spec listing(Listing.t(), atom() | String.t(), [option()]) :: Ecto.Query.t()
+    def listing(listing, ledger, opts \\ [])
+
+    def listing(%Listing{type: :due_intents} = listing, ledger, opts) do
+      listing
+      |> base_listing_query(ledger, opts)
+      |> where([row], row.status in ["available", "retry_scheduled"])
+      |> where([row], row.visible_at <= ^listing.at)
+      |> order_by([row], desc: row.priority, asc: row.visible_at, asc: row.intent_id)
+      |> limit(^listing.limit)
+    end
+
+    def listing(%Listing{type: :expired_claims} = listing, ledger, opts) do
+      listing
+      |> base_listing_query(ledger, opts)
+      |> where([row], row.status == "claimed")
+      |> where([row], row.lease_until <= ^listing.at)
+      |> order_by([row], asc: row.lease_until, asc: row.intent_id)
+      |> limit(^listing.limit)
+    end
+
+    defp base_listing_query(%Listing{} = listing, ledger, opts) do
+      source = Schema.source(:states, opts)
+      prefix = Migration.prefix(opts)
+      ledger = ledger_key(ledger)
+
+      query =
+        from(row in source,
+          prefix: ^prefix,
+          where: row.ledger == ^ledger,
+          where: row.queue == ^listing.queue
+        )
+
+      case listing.shard do
+        nil -> query
+        shard -> from(row in query, where: row.shard == ^shard)
+      end
+    end
+
     defp ledger_key(ledger), do: ledger |> inspect() |> String.trim_leading("Elixir.")
   end
 else
@@ -41,6 +84,7 @@ else
 
     alias IntentLedger.Error
     alias IntentLedger.Store.Ecto.Migration
+    alias IntentLedger.Store.Listing
 
     @type table :: Migration.table()
     @type option :: Migration.option()
@@ -50,6 +94,19 @@ else
     """
     @spec by_fields(table(), atom() | String.t(), keyword(), [option()]) :: no_return()
     def by_fields(_table, _ledger, _filters, _opts \\ []) do
+      raise Error.adapter_runtime(
+              "Ecto SQL and Postgrex dependencies are required to use IntentLedger.Store.Ecto.Query",
+              adapter: __MODULE__,
+              reason: :missing_dependency,
+              dependencies: [:ecto_sql, :postgrex]
+            )
+    end
+
+    @doc """
+    Raises a normalized adapter error because Ecto is not installed.
+    """
+    @spec listing(Listing.t(), atom() | String.t(), [option()]) :: no_return()
+    def listing(_listing, _ledger, _opts \\ []) do
       raise Error.adapter_runtime(
               "Ecto SQL and Postgrex dependencies are required to use IntentLedger.Store.Ecto.Query",
               adapter: __MODULE__,
