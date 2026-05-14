@@ -670,7 +670,7 @@ defmodule IntentLedger.Store.Ecto do
     with {:ok, listing} <- normalize_listing_request(request) do
       opts = source_opts(state)
 
-      query = Query.listing(listing, ledger, opts)
+      query = query_listing(listing, ledger, opts)
 
       rows =
         state.repo.all(query)
@@ -689,6 +689,10 @@ defmodule IntentLedger.Store.Ecto do
   end
 
   defp normalize_listing_request(request), do: {:error, {:unsupported_store_v1_request, :listing, request}}
+
+  defp query_listing(%Listing{} = listing, ledger, opts), do: apply(Query, :listing, [listing, ledger, opts])
+
+  defp query_outbox_entries(ledger, opts), do: apply(Query, :outbox_entries, [ledger, opts])
 
   defp filter_sort_take_listing(states, %Listing{} = listing) do
     states
@@ -987,7 +991,7 @@ defmodule IntentLedger.Store.Ecto do
   end
 
   defp outbox_entries(%__MODULE__{} = state, ledger, opts) do
-    query = Query.outbox_entries(ledger, opts)
+    query = query_outbox_entries(ledger, opts)
 
     entries =
       state.repo.all(query)

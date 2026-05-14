@@ -108,7 +108,7 @@ else
     @doc """
     Raises a normalized adapter error because Ecto is not installed.
     """
-    @spec by_fields(table(), atom() | String.t(), keyword(), [option()]) :: no_return()
+    @spec by_fields(table(), atom() | String.t(), keyword(), [option()]) :: term()
     def by_fields(_table, _ledger, _filters, _opts \\ []) do
       raise Error.adapter_runtime(
               "Ecto SQL and Postgrex dependencies are required to use IntentLedger.Store.Ecto.Query",
@@ -121,7 +121,7 @@ else
     @doc """
     Raises a normalized adapter error because Ecto is not installed.
     """
-    @spec listing(Listing.t(), atom() | String.t(), [option()]) :: no_return()
+    @spec listing(Listing.t(), atom() | String.t(), [option()]) :: term()
     def listing(_listing, _ledger, _opts \\ []) do
       raise Error.adapter_runtime(
               "Ecto SQL and Postgrex dependencies are required to use IntentLedger.Store.Ecto.Query",
@@ -134,7 +134,7 @@ else
     @doc """
     Raises a normalized adapter error because Ecto is not installed.
     """
-    @spec outbox_entries(atom() | String.t(), [option()]) :: no_return()
+    @spec outbox_entries(atom() | String.t(), [option()]) :: term()
     def outbox_entries(_ledger, _opts \\ []) do
       raise Error.adapter_runtime(
               "Ecto SQL and Postgrex dependencies are required to use IntentLedger.Store.Ecto.Query",
