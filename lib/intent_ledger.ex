@@ -53,6 +53,7 @@ defmodule IntentLedger do
     intents = Keyword.fetch!(opts, :intents)
     queues = Keyword.get(opts, :queues)
     default_queue = Keyword.get(opts, :default_queue)
+    ledger_module = __CALLER__.module
 
     quote location: :keep do
       import Kernel, except: [inspect: 1, inspect: 2]
@@ -67,7 +68,8 @@ defmodule IntentLedger do
         use Bedrock.JobQueue,
           otp_app: unquote(otp_app),
           repo: unquote(repo),
-          workers: IntentLedger.Config.handlers_from_intents!(unquote(intents))
+          workers: IntentLedger.Config.handlers_from_intents!(unquote(intents)),
+          on_action: {IntentLedger.JobQueueHook, :apply, [unquote(ledger_module)]}
       end
 
       @doc """

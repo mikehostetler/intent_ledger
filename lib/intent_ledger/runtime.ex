@@ -1,7 +1,7 @@
 defmodule IntentLedger.Runtime do
   @moduledoc false
 
-  alias Bedrock.JobQueue.{Internal, Item, Store}
+  alias Bedrock.JobQueue.{Internal, Item, Lease, Store}
   alias IntentLedger.{BedrockStore, Config, Context, Intent, Telemetry, Time}
 
   @type replay_source :: :ledger | :outbox | {:intent, String.t()}
@@ -225,6 +225,26 @@ defmodule IntentLedger.Runtime do
     result
   end
 
+  @doc false
+  @spec apply_queue_action(module(), module(), Lease.t(), term(), term(), term()) :: :ok | {:error, term()}
+  def apply_queue_action(ledger, repo, %Lease{} = lease, action, handler_result, queue_result) do
+    root = BedrockStore.root_keyspace(ledger)
+
+    with :ok <- ensure_queue_result(queue_result) do
+      case BedrockStore.fetch(repo, root, lease.item_id) do
+        {:ok, %Intent{} = intent} ->
+          if Intent.runnable?(intent) do
+            apply_lifecycle_after_queue_action(repo, root, ledger, intent, action, handler_result, queue_result)
+          else
+            :ok
+          end
+
+        {:error, :not_found} ->
+          :ok
+      end
+    end
+  end
+
   defp execute_handler(ledger, handler, %Intent{} = intent, job_meta) do
     with {:ok, started} <- mark_started(ledger, intent, job_meta),
          {:ok, payload} <- validate_payload(handler, started.payload) do
@@ -232,57 +252,81 @@ defmodule IntentLedger.Runtime do
 
       handler
       |> safe_handle(payload, context)
-      |> finalize_handler_result(ledger, handler, started, job_meta)
+      |> normalize_handler_result(handler)
     else
       {:error, {:invalid_payload, _errors} = reason} ->
-        lifecycle_result(mark_discarded(ledger, intent, reason), {:discard, reason})
+        {:discard, reason}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp finalize_handler_result(:ok, ledger, _handler, intent, _job_meta) do
-    lifecycle_result(mark_completed(ledger, intent, nil), :ok)
-  end
+  defp normalize_handler_result(:ok, _handler), do: :ok
 
-  defp finalize_handler_result({:ok, result}, ledger, handler, intent, _job_meta) do
+  defp normalize_handler_result({:ok, result}, handler) do
     case validate_result(handler, result) do
-      {:ok, result} ->
-        lifecycle_result(mark_completed(ledger, intent, result), {:ok, result})
-
-      {:error, reason} ->
-        lifecycle_result(mark_discarded(ledger, intent, reason), {:discard, reason})
+      {:ok, result} -> {:ok, result}
+      {:error, reason} -> {:discard, reason}
     end
   end
 
-  defp finalize_handler_result({:discard, reason}, ledger, _handler, intent, _job_meta) do
-    lifecycle_result(mark_discarded(ledger, intent, reason), {:discard, reason})
-  end
+  defp normalize_handler_result({:discard, reason}, _handler), do: {:discard, reason}
 
-  defp finalize_handler_result({:snooze, delay_ms}, ledger, _handler, intent, job_meta)
+  defp normalize_handler_result({:snooze, delay_ms}, _handler)
        when is_integer(delay_ms) and delay_ms >= 0 do
-    lifecycle_result(mark_retry_scheduled(ledger, intent, job_meta, {:snooze, delay_ms}), {:snooze, delay_ms})
+    {:snooze, delay_ms}
   end
 
-  defp finalize_handler_result({:error, reason}, ledger, _handler, intent, job_meta) do
-    lifecycle =
-      if Map.fetch!(job_meta, :attempt) >= intent.max_attempts do
-        mark_failed(ledger, intent, job_meta, reason)
-      else
-        mark_retry_scheduled(ledger, intent, job_meta, reason)
-      end
+  defp normalize_handler_result({:error, reason}, _handler), do: {:error, reason}
 
-    lifecycle_result(lifecycle, {:error, reason})
-  end
-
-  defp finalize_handler_result(other, ledger, _handler, intent, _job_meta) do
+  defp normalize_handler_result(other, _handler) do
     reason = {:invalid_handler_return, other}
-    lifecycle_result(mark_discarded(ledger, intent, reason), {:discard, reason})
+    {:discard, reason}
   end
 
-  defp lifecycle_result({:ok, _intent}, queue_result), do: queue_result
-  defp lifecycle_result({:error, reason}, _queue_result), do: {:error, {:intent_lifecycle_update_failed, reason}}
+  defp apply_lifecycle_after_queue_action(repo, root, ledger, intent, :complete, :ok, :ok) do
+    hook_result(mark_completed(repo, root, ledger, intent, nil))
+  end
+
+  defp apply_lifecycle_after_queue_action(repo, root, ledger, intent, :complete, {:ok, result}, :ok) do
+    hook_result(mark_completed(repo, root, ledger, intent, result))
+  end
+
+  defp apply_lifecycle_after_queue_action(repo, root, ledger, intent, :complete, {:discard, reason}, :ok) do
+    hook_result(mark_discarded(repo, root, ledger, intent, reason))
+  end
+
+  defp apply_lifecycle_after_queue_action(
+         repo,
+         root,
+         ledger,
+         intent,
+         {:snooze, delay_ms},
+         {:snooze, delay_ms},
+         {:ok, :requeued}
+       ) do
+    hook_result(mark_retry_scheduled(repo, root, ledger, intent, {:snooze, delay_ms}))
+  end
+
+  defp apply_lifecycle_after_queue_action(repo, root, ledger, intent, :requeue, {:error, reason}, {:ok, :requeued}) do
+    hook_result(mark_retry_scheduled(repo, root, ledger, intent, reason))
+  end
+
+  defp apply_lifecycle_after_queue_action(repo, root, ledger, intent, :requeue, {:error, reason}, {:ok, :dead_lettered}) do
+    hook_result(mark_failed(repo, root, ledger, intent, reason))
+  end
+
+  defp apply_lifecycle_after_queue_action(_repo, _root, _ledger, _intent, _action, _handler_result, _queue_result) do
+    :ok
+  end
+
+  defp hook_result({:ok, _intent}), do: :ok
+  defp hook_result({:error, reason}), do: {:error, {:intent_lifecycle_update_failed, reason}}
+
+  defp ensure_queue_result(:ok), do: :ok
+  defp ensure_queue_result({:ok, _status}), do: :ok
+  defp ensure_queue_result({:error, reason}), do: {:error, reason}
 
   defp mark_started(ledger, intent, job_meta) do
     BedrockStore.update_intent(
@@ -296,25 +340,33 @@ defmodule IntentLedger.Runtime do
     )
   end
 
-  defp mark_completed(ledger, intent, result) do
-    BedrockStore.update_intent(ledger, intent.id, :completed, %{attempt: intent.attempt, result: result}, fn intent,
-                                                                                                             now ->
-      %{intent | status: :completed, result: result, updated_at: now, completed_at: now}
-    end)
+  defp mark_completed(repo, root, ledger, intent, result) do
+    BedrockStore.update_intent(
+      repo,
+      root,
+      ledger,
+      intent.id,
+      :completed,
+      %{attempt: intent.attempt, result: result},
+      fn intent, now ->
+        %{intent | status: :completed, result: result, updated_at: now, completed_at: now}
+      end
+    )
   end
 
-  defp mark_failed(ledger, intent, job_meta, reason) do
+  defp mark_failed(repo, root, ledger, intent, reason) do
     BedrockStore.update_intent(
+      repo,
+      root,
       ledger,
       intent.id,
       :failed,
-      %{attempt: Map.fetch!(job_meta, :attempt), error: reason},
+      %{attempt: intent.attempt, error: reason},
       fn intent, now ->
         %{
           intent
           | status: :failed,
             error: reason,
-            attempt: Map.fetch!(job_meta, :attempt),
             updated_at: now,
             completed_at: now
         }
@@ -322,20 +374,22 @@ defmodule IntentLedger.Runtime do
     )
   end
 
-  defp mark_retry_scheduled(ledger, intent, job_meta, reason) do
+  defp mark_retry_scheduled(repo, root, ledger, intent, reason) do
     BedrockStore.update_intent(
+      repo,
+      root,
       ledger,
       intent.id,
       :retry_scheduled,
-      %{attempt: Map.fetch!(job_meta, :attempt), error: reason},
+      %{attempt: intent.attempt, error: reason},
       fn intent, now ->
-        %{intent | status: :retry_scheduled, error: reason, attempt: Map.fetch!(job_meta, :attempt), updated_at: now}
+        %{intent | status: :retry_scheduled, error: reason, updated_at: now}
       end
     )
   end
 
-  defp mark_discarded(ledger, intent, reason) do
-    BedrockStore.update_intent(ledger, intent.id, :discarded, %{reason: reason}, fn intent, now ->
+  defp mark_discarded(repo, root, ledger, intent, reason) do
+    BedrockStore.update_intent(repo, root, ledger, intent.id, :discarded, %{reason: reason}, fn intent, now ->
       %{intent | status: :discarded, error: reason, updated_at: now, completed_at: now}
     end)
   end

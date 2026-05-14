@@ -212,12 +212,15 @@ defmodule IntentLedger.RuntimeTest do
     queue_payload = %{raw: :erlang.term_to_binary(%{ledger: TestIntents, intent_id: intent.id})}
 
     assert {:ok, %{sent: true}} =
+             result =
              SendInvoice.perform(queue_payload, %{
                topic: "invoice.send",
                queue_id: "default",
                item_id: intent.id,
                attempt: 1
              })
+
+    finalize_perform(TestIntents, intent, result)
 
     intent_id = intent.id
     assert_receive {:handled, 123, ^intent_id, 1}
@@ -299,7 +302,7 @@ defmodule IntentLedger.RuntimeTest do
     assert retrying.error == :boom
     assert_handler_telemetry(:error, intent, error_kind: :boom, attempt: 1)
 
-    assert {:error, :boom} = perform_edge(intent, attempt: 2)
+    assert {:error, :boom} = perform_edge(intent, attempt: 2, queue_result: {:ok, :dead_lettered})
     assert {:ok, failed} = EdgeIntents.fetch(intent.id)
     assert failed.status == :failed
     assert failed.error == :boom
@@ -397,7 +400,9 @@ defmodule IntentLedger.RuntimeTest do
     attach_telemetry(:handler)
 
     assert {:ok, exception_intent} = enqueue_edge(:exception, max_attempts: 1)
-    assert {:error, {:exception, %RuntimeError{message: "handler exploded"}}} = perform_edge(exception_intent)
+
+    assert {:error, {:exception, %RuntimeError{message: "handler exploded"}}} =
+             perform_edge(exception_intent, queue_result: {:ok, :dead_lettered})
 
     assert {:ok, failed_exception} = EdgeIntents.fetch(exception_intent.id)
     assert failed_exception.status == :failed
@@ -405,7 +410,7 @@ defmodule IntentLedger.RuntimeTest do
     assert_handler_telemetry(:error, exception_intent, error_kind: :exception)
 
     assert {:ok, throw_intent} = enqueue_edge(:throw, max_attempts: 1)
-    assert {:error, {:throw, :handler_threw}} = perform_edge(throw_intent)
+    assert {:error, {:throw, :handler_threw}} = perform_edge(throw_intent, queue_result: {:ok, :dead_lettered})
 
     assert {:ok, failed_throw} = EdgeIntents.fetch(throw_intent.id)
     assert failed_throw.status == :failed
@@ -419,6 +424,7 @@ defmodule IntentLedger.RuntimeTest do
     queue_payload = %{raw: :erlang.term_to_binary(%{ledger: TestIntents, intent_id: intent.id})}
 
     assert {:error, :boom} =
+             result =
              FailingIntent.perform(queue_payload, %{
                topic: "invoice.fail",
                queue_id: "default",
@@ -426,16 +432,21 @@ defmodule IntentLedger.RuntimeTest do
                attempt: 1
              })
 
+    finalize_perform(TestIntents, intent, result, action: :requeue, queue_result: {:ok, :requeued})
+
     assert {:ok, retrying} = TestIntents.fetch(intent.id)
     assert retrying.status == :retry_scheduled
 
     assert {:error, :boom} =
+             result =
              FailingIntent.perform(queue_payload, %{
                topic: "invoice.fail",
                queue_id: "default",
                item_id: intent.id,
                attempt: 2
              })
+
+    finalize_perform(TestIntents, intent, result, action: :requeue, queue_result: {:ok, :dead_lettered})
 
     assert {:ok, failed} = TestIntents.fetch(intent.id)
     assert failed.status == :failed
@@ -470,12 +481,15 @@ defmodule IntentLedger.RuntimeTest do
     queue_payload = %{raw: :erlang.term_to_binary(%{ledger: TestIntents, intent_id: intent.id})}
 
     assert {:error, :boom} =
+             result =
              FailingIntent.perform(queue_payload, %{
                topic: "invoice.fail",
                queue_id: "default",
                item_id: intent.id,
                attempt: 1
              })
+
+    finalize_perform(TestIntents, intent, result, action: :requeue, queue_result: {:ok, :dead_lettered})
 
     assert {:ok, failed} = TestIntents.fetch(intent.id)
     assert failed.status == :failed
@@ -532,16 +546,58 @@ defmodule IntentLedger.RuntimeTest do
     EdgeIntents.enqueue("intent.edge", %{mode: mode, test_pid: self()}, opts)
   end
 
-  defp perform_edge(intent, meta \\ []) do
-    EdgeIntent.perform(queue_payload(EdgeIntents, intent.id), %{
-      topic: "intent.edge",
-      queue_id: "default",
-      item_id: intent.id,
-      attempt: Keyword.get(meta, :attempt, 1)
-    })
+  defp perform_edge(intent, meta) do
+    result =
+      EdgeIntent.perform(queue_payload(EdgeIntents, intent.id), %{
+        topic: "intent.edge",
+        queue_id: "default",
+        item_id: intent.id,
+        attempt: Keyword.get(meta, :attempt, 1)
+      })
+
+    if Keyword.get(meta, :finalize, true) do
+      finalize_perform(EdgeIntents, intent, result, meta)
+    end
+
+    result
   end
 
   defp queue_payload(ledger, intent_id), do: %{raw: :erlang.term_to_binary(%{ledger: ledger, intent_id: intent_id})}
+
+  defp finalize_perform(ledger, intent, handler_result, opts \\ []) do
+    action = Keyword.get(opts, :action, action_for_result(handler_result))
+    queue_result = Keyword.get(opts, :queue_result, queue_result_for_action(action))
+
+    lease = %Bedrock.JobQueue.Lease{
+      id: "test-lease",
+      item_id: intent.id,
+      queue_id: intent.queue,
+      holder: "test",
+      obtained_at: 0,
+      expires_at: 1,
+      item_key: nil
+    }
+
+    assert :ok =
+             IntentLedger.Runtime.apply_queue_action(
+               ledger,
+               IntentLedger.FakeRepo,
+               lease,
+               action,
+               handler_result,
+               queue_result
+             )
+  end
+
+  defp action_for_result(:ok), do: :complete
+  defp action_for_result({:ok, _result}), do: :complete
+  defp action_for_result({:discard, _reason}), do: :complete
+  defp action_for_result({:error, _reason}), do: :requeue
+  defp action_for_result({:snooze, delay_ms}), do: {:snooze, delay_ms}
+
+  defp queue_result_for_action(:complete), do: :ok
+  defp queue_result_for_action(:requeue), do: {:ok, :requeued}
+  defp queue_result_for_action({:snooze, _delay_ms}), do: {:ok, :requeued}
 
   defp assert_history(ledger, intent, expected_types) do
     assert {:ok, signals} = ledger.history(intent.id)

@@ -46,8 +46,27 @@ defmodule IntentLedger.BedrockJobQueueScenarioTest do
     assert item.topic == "invoice.archive"
     assert :erlang.binary_to_term(item.payload) == %{ledger: ScenarioIntents, intent_id: intent.id}
 
+    assert {:ok, lease} =
+             Store.obtain_lease(IntentLedger.FakeRepo, queue_root, item, "test-holder", 30_000)
+
     assert {:ok, %{archived: true}} =
+             result =
              Worker.execute(item, %{"invoice.archive" => ArchiveInvoice})
+
+    assert :ok =
+             IntentLedger.FakeRepo.transact(fn ->
+               queue_result = Store.complete(IntentLedger.FakeRepo, queue_root, lease)
+
+               IntentLedger.JobQueueHook.apply(
+                 IntentLedger.FakeRepo,
+                 queue_root,
+                 lease,
+                 :complete,
+                 result,
+                 queue_result,
+                 ScenarioIntents
+               )
+             end)
 
     assert_receive {:archived, ^attachment, intent_id}
     assert intent_id == intent.id

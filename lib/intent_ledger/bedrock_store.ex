@@ -84,14 +84,30 @@ defmodule IntentLedger.BedrockStore do
   def update_intent(ledger, intent_id, event, data, update_fun)
       when is_atom(event) and is_map(data) and is_function(update_fun, 2) do
     transact(ledger, fn repo, root ->
-      with {:ok, intent} <- fetch(repo, root, intent_id) do
-        now = Time.utc_now()
-        next = update_fun.(intent, now)
-        repo.put(intent_keyspace(root), next.id, encode(next))
-        append_lifecycle(repo, root, ledger, next, event, data)
-        {:ok, next}
-      end
+      update_intent(repo, root, ledger, intent_id, event, data, update_fun)
     end)
+  end
+
+  @doc false
+  @spec update_intent(
+          module(),
+          Keyspace.t(),
+          module(),
+          String.t(),
+          atom(),
+          map(),
+          (Intent.t(), DateTime.t() -> Intent.t())
+        ) ::
+          {:ok, Intent.t()} | {:error, term()}
+  def update_intent(repo, root, ledger, intent_id, event, data, update_fun)
+      when is_atom(event) and is_map(data) and is_function(update_fun, 2) do
+    with {:ok, intent} <- fetch(repo, root, intent_id) do
+      now = Time.utc_now()
+      next = update_fun.(intent, now)
+      repo.put(intent_keyspace(root), next.id, encode(next))
+      append_lifecycle(repo, root, ledger, next, event, data)
+      {:ok, next}
+    end
   end
 
   @doc false
