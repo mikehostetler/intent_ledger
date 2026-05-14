@@ -396,6 +396,14 @@ defmodule IntentLedgerTest do
     assert record.intent.parent_intent_id == "int_parent"
     assert record.intent.depth == 2
     assert record.intent.actor == "agent"
+
+    {:ok, history} = IntentLedger.history(ledger, record.intent.id)
+    assert Enum.all?(history, &(&1.data.correlation_id == "corr_1"))
+    assert Enum.all?(history, &(&1.data.causation_id == "cmd_parent"))
+    assert Enum.all?(history, &(&1.data.root_intent_id == "int_root"))
+    assert Enum.all?(history, &(&1.data.parent_intent_id == "int_parent"))
+    assert Enum.all?(history, &(&1.data.depth == 2))
+    assert Enum.all?(history, &(&1.data.actor == "agent"))
   end
 
   test "replays duplicate command ids without duplicate lifecycle commits", %{ledger: ledger} do

@@ -28,6 +28,7 @@ defmodule IntentLedger.SignalTest do
       assert definition.version == 1
       assert is_list(definition.required)
       assert is_list(definition.optional)
+      assert Enum.all?(Signal.lineage_fields(), &(&1 in definition.optional))
       assert Signal.fetch!(definition.type) == definition
     end
   end
@@ -38,7 +39,9 @@ defmodule IntentLedger.SignalTest do
         claim_id: "clm_1",
         owner_id: "worker-1",
         attempt: 1,
-        lease_until: ~U[2026-01-01 00:00:00Z]
+        lease_until: ~U[2026-01-01 00:00:00Z],
+        correlation_id: "corr_1",
+        depth: 2
       })
 
     assert %Jido.Signal{} = signal
@@ -49,6 +52,8 @@ defmodule IntentLedger.SignalTest do
     assert signal.dataschema == "https://hexdocs.pm/intent_ledger/lifecycle/intent_claimed/v1.json"
     assert signal.data.schema_version == 1
     assert signal.data.lease_until == "2026-01-01T00:00:00Z"
+    assert signal.data.correlation_id == "corr_1"
+    assert signal.data.depth == 2
   end
 
   test "lifecycle builder rejects data missing required schema fields" do

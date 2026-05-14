@@ -724,7 +724,12 @@ defmodule IntentLedger.Store.Memory do
   end
 
   defp signal(ledger, event, %Intent{} = intent, data) do
-    Signal.lifecycle(event, ledger, "intent:" <> intent.id, normalize_signal_data(data))
+    data =
+      data
+      |> Map.merge(intent_lineage_data(intent))
+      |> normalize_signal_data()
+
+    Signal.lifecycle(event, ledger, "intent:" <> intent.id, data)
   end
 
   defp maybe_available_signal(ledger, intent, now) do
@@ -754,6 +759,18 @@ defmodule IntentLedger.Store.Memory do
       {key, %DateTime{} = value} -> {key, DateTime.to_iso8601(value)}
       {key, value} -> {key, value}
     end)
+  end
+
+  defp intent_lineage_data(%Intent{} = intent) do
+    %{
+      correlation_id: intent.correlation_id,
+      causation_id: intent.causation_id,
+      root_intent_id: intent.root_intent_id,
+      parent_intent_id: intent.parent_intent_id,
+      depth: intent.depth,
+      actor: intent.actor
+    }
+    |> Map.reject(fn {_field, value} -> is_nil(value) end)
   end
 
   defp append(state, ledger, %Intent{} = intent, signals) do

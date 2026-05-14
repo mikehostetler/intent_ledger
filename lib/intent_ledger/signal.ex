@@ -25,6 +25,14 @@ defmodule IntentLedger.Signal do
         }
 
   @source_prefix "/intent_ledger"
+  @lineage_fields [
+    :correlation_id,
+    :causation_id,
+    :root_intent_id,
+    :parent_intent_id,
+    :depth,
+    :actor
+  ]
 
   @definitions [
     %{
@@ -41,77 +49,77 @@ defmodule IntentLedger.Signal do
         :max_attempts,
         :ambiguity_policy
       ],
-      optional: [:idempotency_key]
+      optional: [:idempotency_key | @lineage_fields]
     },
     %{
       event: :intent_available,
       type: "intent_ledger.intent.available",
       version: 1,
       required: [:visible_at],
-      optional: []
+      optional: @lineage_fields
     },
     %{
       event: :intent_claimed,
       type: "intent_ledger.intent.claimed",
       version: 1,
       required: [:claim_id, :owner_id, :attempt, :lease_until],
-      optional: []
+      optional: @lineage_fields
     },
     %{
       event: :intent_completed,
       type: "intent_ledger.intent.completed",
       version: 1,
       required: [:claim_id, :result],
-      optional: []
+      optional: @lineage_fields
     },
     %{
       event: :intent_failed,
       type: "intent_ledger.intent.failed",
       version: 1,
       required: [:claim_id, :error, :attempt],
-      optional: []
+      optional: @lineage_fields
     },
     %{
       event: :intent_retry_scheduled,
       type: "intent_ledger.intent.retry_scheduled",
       version: 1,
       required: [:retry_at],
-      optional: [:attempt]
+      optional: [:attempt | @lineage_fields]
     },
     %{
       event: :intent_cancelled,
       type: "intent_ledger.intent.cancelled",
       version: 1,
       required: [:reason],
-      optional: []
+      optional: @lineage_fields
     },
     %{
       event: :intent_marked_ambiguous,
       type: "intent_ledger.intent.marked_ambiguous",
       version: 1,
       required: [:reason],
-      optional: [:error]
+      optional: [:error | @lineage_fields]
     },
     %{
       event: :intent_released,
       type: "intent_ledger.intent.released",
       version: 1,
       required: [:claim_id],
-      optional: []
+      optional: @lineage_fields
     },
     %{
       event: :claim_heartbeat,
       type: "intent_ledger.claim.heartbeat",
       version: 1,
       required: [:claim_id, :lease_until],
-      optional: []
+      optional: @lineage_fields
     },
     %{
       event: :claim_lease_expired,
       type: "intent_ledger.claim.lease_expired",
       version: 1,
       required: [:claim_id, :lease_until],
-      optional: []
+      optional: @lineage_fields
     }
   ]
 
@@ -125,6 +133,10 @@ defmodule IntentLedger.Signal do
   @doc false
   @spec events() :: [event()]
   def events, do: Enum.map(@definitions, & &1.event)
+
+  @doc false
+  @spec lineage_fields() :: [field()]
+  def lineage_fields, do: @lineage_fields
 
   @doc false
   @spec fetch(event() | String.t()) :: {:ok, definition()} | :error
