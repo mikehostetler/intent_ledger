@@ -37,6 +37,10 @@ Handlers return one of:
 Intent Ledger maps those results to Intent lifecycle states. The queue layer maps
 the same result to complete, requeue, discard, or snooze behavior.
 
+Manual `requeue/2` currently accepts failed or discarded Intents only. That
+avoids duplicating live queue items for Intents that are still pending,
+processing, retry-scheduled, or parked as ambiguous.
+
 ## Current Caveat
 
 The alpha runtime still needs a transaction hook in `bedrock_job_queue`, or a

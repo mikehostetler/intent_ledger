@@ -201,6 +201,10 @@ execution, and dead-letter mechanics. Intent Ledger records the domain lifecycle
 around those mechanics so application code can inspect, replay, and project what
 happened.
 
+Manual `requeue/2` is intentionally narrow in the current alpha: it accepts
+failed or discarded Intents. Ambiguous Intents are parked for reconciliation and
+should not be blindly requeued until the queue-state repair path is explicit.
+
 ## Signals And Replay
 
 Every lifecycle transition is recorded as a durable signal.

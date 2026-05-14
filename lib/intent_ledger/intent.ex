@@ -89,6 +89,7 @@ defmodule IntentLedger.Intent do
             :metadata
           ])
   @terminal_statuses [:completed, :failed, :discarded, :canceled]
+  @runnable_statuses [:enqueued, :started, :retry_scheduled]
 
   @doc """
   Builds and validates an Intent from attrs.
@@ -169,6 +170,12 @@ defmodule IntentLedger.Intent do
   """
   @spec terminal?(t()) :: boolean()
   def terminal?(%__MODULE__{status: status}), do: status in @terminal_statuses
+
+  @doc """
+  Returns true when the Intent can be handed to a handler.
+  """
+  @spec runnable?(t()) :: boolean()
+  def runnable?(%__MODULE__{status: status}), do: status in @runnable_statuses
 
   @doc """
   Returns the Zoi schema for `t:IntentLedger.Intent.t/0`.

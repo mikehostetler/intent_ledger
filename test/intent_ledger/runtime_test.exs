@@ -66,6 +66,31 @@ defmodule IntentLedger.RuntimeTest do
     assert {:ok, %{"default" => %{pending_count: 1, processing_count: 0}}} = TestIntents.stats(queue: "default")
   end
 
+  test "enqueue_many accepts string-keyed map entries" do
+    assert {:ok, [intent]} =
+             TestIntents.enqueue_many([
+               %{
+                 "topic" => "invoice.send",
+                 "payload" => %{invoice_id: 123},
+                 "key" => "invoice:123:send",
+                 "queue" => "tenant:beta"
+               }
+             ])
+
+    assert intent.key == "invoice:123:send"
+    assert intent.queue == "tenant:beta"
+  end
+
+  test "ledger replay starts from the target stream cursor, not the global stream keyspace" do
+    for invoice_id <- 1..12 do
+      assert {:ok, _intent} = TestIntents.enqueue("invoice.send", %{invoice_id: invoice_id})
+    end
+
+    assert {:ok, [first, second]} = TestIntents.replay(:ledger, cursor: 10, limit: 2)
+    assert first.type == "intent.enqueued"
+    assert second.type == "intent.enqueued"
+  end
+
   test "handler execution updates Intent lifecycle state" do
     assert {:ok, intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123, test_pid: self()})
 
@@ -116,6 +141,48 @@ defmodule IntentLedger.RuntimeTest do
 
     assert {:ok, failed} = TestIntents.fetch(intent.id)
     assert failed.status == :failed
+  end
+
+  test "ambiguous intents are parked and not handed to handlers" do
+    assert {:ok, intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123, test_pid: self()})
+    assert {:ok, ambiguous} = TestIntents.mark_ambiguous(intent.id, :manual_review)
+    assert ambiguous.status == :ambiguous
+
+    queue_payload = %{raw: :erlang.term_to_binary(%{ledger: TestIntents, intent_id: intent.id})}
+
+    assert :ok =
+             SendInvoice.perform(queue_payload, %{
+               topic: "invoice.send",
+               queue_id: "default",
+               item_id: intent.id,
+               attempt: 1
+             })
+
+    refute_receive {:handled, _, _, _}
+    assert {:ok, still_ambiguous} = TestIntents.fetch(intent.id)
+    assert still_ambiguous.status == :ambiguous
+  end
+
+  test "manual requeue only accepts failed intents" do
+    assert {:ok, intent} = TestIntents.enqueue("invoice.fail", %{}, max_attempts: 1)
+
+    assert {:error, {:not_requeueable, :enqueued}} = TestIntents.requeue(intent.id)
+
+    queue_payload = %{raw: :erlang.term_to_binary(%{ledger: TestIntents, intent_id: intent.id})}
+
+    assert {:error, :boom} =
+             FailingIntent.perform(queue_payload, %{
+               topic: "invoice.fail",
+               queue_id: "default",
+               item_id: intent.id,
+               attempt: 1
+             })
+
+    assert {:ok, failed} = TestIntents.fetch(intent.id)
+    assert failed.status == :failed
+
+    assert {:ok, requeued} = TestIntents.requeue(failed.id)
+    assert requeued.status == :retry_scheduled
   end
 
   test "health exposes the configured runtime" do

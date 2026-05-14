@@ -126,7 +126,7 @@ defmodule IntentLedger.Error do
   @spec from_reason(term()) :: Exception.t()
   def from_reason({:unknown_topic, topic}), do: invalid("Unknown Intent topic", field: :topic, value: topic)
   def from_reason({:invalid_entry, entry}), do: invalid("Invalid Intent enqueue entry", value: entry)
-  def from_reason({:terminal_intent, status}), do: conflict(:terminal_intent, status: status)
+  def from_reason({:not_requeueable, status}), do: conflict(:not_requeueable, status: status)
   def from_reason(:not_found), do: invalid("Intent not found")
   def from_reason(reason), do: runtime("Intent ledger failure", reason: reason)
 

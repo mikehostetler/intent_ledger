@@ -106,14 +106,14 @@ defmodule IntentLedger.BedrockStore do
       stream = stream_name(source)
       cursor = Keyword.get(opts, :cursor, 0)
       limit = Keyword.get(opts, :limit, 100)
+      keyspace = stream_keyspace(root, stream)
 
       entries =
-        root
-        |> stream_keyspace()
-        |> repo.get_range(limit: Keyword.get(opts, :scan_limit, limit * 10))
+        keyspace
+        |> range_from_cursor(cursor)
+        |> repo.get_range(limit: limit)
         |> Stream.map(fn {_key, value} -> decode(value) end)
-        |> Stream.filter(&(&1.stream == stream and &1.cursor > cursor))
-        |> Enum.take(limit)
+        |> Enum.to_list()
 
       {:ok, Enum.map(entries, & &1.signal)}
     end)
@@ -125,14 +125,14 @@ defmodule IntentLedger.BedrockStore do
     transact(ledger, fn repo, root ->
       cursor = Keyword.get(opts, :cursor, 0)
       limit = Keyword.get(opts, :limit, 100)
+      keyspace = outbox_keyspace(root)
 
       entries =
-        root
-        |> outbox_keyspace()
-        |> repo.get_range(limit: Keyword.get(opts, :scan_limit, limit * 10))
+        keyspace
+        |> range_from_cursor(cursor)
+        |> repo.get_range(limit: limit)
         |> Stream.map(fn {_key, value} -> decode(value) end)
-        |> Stream.filter(&(&1.cursor > cursor))
-        |> Enum.take(limit)
+        |> Enum.to_list()
 
       {:ok, entries}
     end)
@@ -154,9 +154,9 @@ defmodule IntentLedger.BedrockStore do
 
   defp append_stream(repo, root, stream, signal) do
     versions = stream_version_keyspace(root)
-    streams = stream_keyspace(root)
+    streams = stream_keyspace(root, stream)
     cursor = next_counter(repo, versions, stream)
-    repo.put(streams, {stream, cursor}, encode(%{stream: stream, cursor: cursor, signal: signal}))
+    repo.put(streams, cursor, encode(%{stream: stream, cursor: cursor, signal: signal}))
     cursor
   end
 
@@ -209,7 +209,12 @@ defmodule IntentLedger.BedrockStore do
   defp stream_version_keyspace(root), do: Keyspace.partition(root, "stream_versions/")
   defp outbox_version_keyspace(root), do: Keyspace.partition(root, "outbox_versions/")
   defp outbox_keyspace(root), do: Keyspace.partition(root, "outbox/", key_encoding: TupleEncoding)
-  defp stream_keyspace(root), do: Keyspace.partition(root, "streams/", key_encoding: TupleEncoding)
+  defp stream_keyspace(root, stream), do: Keyspace.partition(root, "streams/#{stream}/", key_encoding: TupleEncoding)
+
+  defp range_from_cursor(keyspace, cursor) when is_integer(cursor) and cursor >= 0 do
+    prefix = Keyspace.prefix(keyspace)
+    {Keyspace.pack(keyspace, cursor + 1), prefix <> <<0xFF>>}
+  end
 
   defp encode(term), do: :erlang.term_to_binary(term)
   defp decode(binary), do: :erlang.binary_to_term(binary)

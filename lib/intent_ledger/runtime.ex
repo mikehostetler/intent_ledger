@@ -149,10 +149,10 @@ defmodule IntentLedger.Runtime do
   def perform(handler, queue_payload, job_meta) do
     with {:ok, %{ledger: ledger, intent_id: intent_id}} <- decode_queue_payload(queue_payload),
          {:ok, intent} <- BedrockStore.fetch(ledger, intent_id) do
-      if Intent.terminal?(intent) do
-        :ok
-      else
+      if Intent.runnable?(intent) do
         execute_handler(ledger, handler, intent, normalize_job_meta(job_meta))
+      else
+        :ok
       end
     else
       {:error, :not_found} -> {:discard, :intent_not_found}
@@ -170,8 +170,7 @@ defmodule IntentLedger.Runtime do
       |> finalize_handler_result(ledger, handler, started, job_meta)
     else
       {:error, {:invalid_payload, _errors} = reason} ->
-        mark_discarded(ledger, intent, reason)
-        {:discard, reason}
+        lifecycle_result(mark_discarded(ledger, intent, reason), {:discard, reason})
 
       {:error, reason} ->
         {:error, reason}
@@ -179,48 +178,46 @@ defmodule IntentLedger.Runtime do
   end
 
   defp finalize_handler_result(:ok, ledger, _handler, intent, _job_meta) do
-    mark_completed(ledger, intent, nil)
-    :ok
+    lifecycle_result(mark_completed(ledger, intent, nil), :ok)
   end
 
   defp finalize_handler_result({:ok, result}, ledger, handler, intent, _job_meta) do
     case validate_result(handler, result) do
       {:ok, result} ->
-        mark_completed(ledger, intent, result)
-        {:ok, result}
+        lifecycle_result(mark_completed(ledger, intent, result), {:ok, result})
 
       {:error, reason} ->
-        mark_discarded(ledger, intent, reason)
-        {:discard, reason}
+        lifecycle_result(mark_discarded(ledger, intent, reason), {:discard, reason})
     end
   end
 
   defp finalize_handler_result({:discard, reason}, ledger, _handler, intent, _job_meta) do
-    mark_discarded(ledger, intent, reason)
-    {:discard, reason}
+    lifecycle_result(mark_discarded(ledger, intent, reason), {:discard, reason})
   end
 
   defp finalize_handler_result({:snooze, delay_ms}, ledger, _handler, intent, job_meta)
        when is_integer(delay_ms) and delay_ms >= 0 do
-    mark_retry_scheduled(ledger, intent, job_meta, {:snooze, delay_ms})
-    {:snooze, delay_ms}
+    lifecycle_result(mark_retry_scheduled(ledger, intent, job_meta, {:snooze, delay_ms}), {:snooze, delay_ms})
   end
 
   defp finalize_handler_result({:error, reason}, ledger, _handler, intent, job_meta) do
-    if Map.fetch!(job_meta, :attempt) >= intent.max_attempts do
-      mark_failed(ledger, intent, job_meta, reason)
-    else
-      mark_retry_scheduled(ledger, intent, job_meta, reason)
-    end
+    lifecycle =
+      if Map.fetch!(job_meta, :attempt) >= intent.max_attempts do
+        mark_failed(ledger, intent, job_meta, reason)
+      else
+        mark_retry_scheduled(ledger, intent, job_meta, reason)
+      end
 
-    {:error, reason}
+    lifecycle_result(lifecycle, {:error, reason})
   end
 
   defp finalize_handler_result(other, ledger, _handler, intent, _job_meta) do
     reason = {:invalid_handler_return, other}
-    mark_discarded(ledger, intent, reason)
-    {:discard, reason}
+    lifecycle_result(mark_discarded(ledger, intent, reason), {:discard, reason})
   end
+
+  defp lifecycle_result({:ok, _intent}, queue_result), do: queue_result
+  defp lifecycle_result({:error, reason}, _queue_result), do: {:error, {:intent_lifecycle_update_failed, reason}}
 
   defp mark_started(ledger, intent, job_meta) do
     BedrockStore.update_intent(
@@ -350,12 +347,18 @@ defmodule IntentLedger.Runtime do
   defp normalize_map_entry(ledger, entry, topic, payload, opts) do
     entry_opts = Keyword.merge(Map.get(entry, :opts, []) || [], Map.get(entry, "opts", []) || [])
 
-    merged_opts =
+    attrs =
       opts
       |> Keyword.merge(entry_opts)
-      |> Keyword.merge(entry |> Map.drop([:topic, "topic", :payload, "payload", :opts, "opts"]) |> Map.to_list())
+      |> Map.new()
+      |> Map.merge(Map.drop(entry, [:topic, "topic", :payload, "payload", :opts, "opts"]))
+      |> Map.merge(%{topic: topic, payload: payload})
 
-    normalize_entry(ledger, {topic, payload, merged_opts}, [])
+    topic = normalize_topic(topic)
+
+    with {:ok, _handler} <- handler_for(ledger, topic) do
+      {:ok, %{attrs | topic: topic}}
+    end
   end
 
   defp handler_for(ledger, topic) do
@@ -384,8 +387,8 @@ defmodule IntentLedger.Runtime do
 
   defp queue_payload(ledger, intent_id), do: :erlang.term_to_binary(%{ledger: ledger, intent_id: intent_id})
 
-  defp decode_queue_payload(%{raw: binary}) when is_binary(binary), do: {:ok, :erlang.binary_to_term(binary)}
-  defp decode_queue_payload(%{"raw" => binary}) when is_binary(binary), do: {:ok, :erlang.binary_to_term(binary)}
+  defp decode_queue_payload(%{raw: binary}) when is_binary(binary), do: decode_raw_queue_payload(binary)
+  defp decode_queue_payload(%{"raw" => binary}) when is_binary(binary), do: decode_raw_queue_payload(binary)
   defp decode_queue_payload(%{ledger: ledger, intent_id: intent_id}), do: {:ok, %{ledger: ledger, intent_id: intent_id}}
 
   defp decode_queue_payload(%{"ledger" => ledger, "intent_id" => intent_id}) when is_binary(ledger) do
@@ -407,10 +410,14 @@ defmodule IntentLedger.Runtime do
 
   defp queue_root(ledger), do: Internal.root_keyspace(ledger.__intent_ledger__().job_queue)
 
-  defp ensure_requeueable(%Intent{status: status}) when status in [:completed, :canceled],
-    do: {:error, {:terminal_intent, status}}
+  defp decode_raw_queue_payload(binary) do
+    {:ok, :erlang.binary_to_term(binary, [:safe])}
+  rescue
+    ArgumentError -> {:error, :invalid_queue_payload}
+  end
 
-  defp ensure_requeueable(%Intent{}), do: :ok
+  defp ensure_requeueable(%Intent{status: status}) when status in [:failed, :discarded], do: :ok
+  defp ensure_requeueable(%Intent{status: status}), do: {:error, {:not_requeueable, status}}
 
   defp result_count({:ok, values}) when is_list(values), do: length(values)
   defp result_count(_result), do: 0
