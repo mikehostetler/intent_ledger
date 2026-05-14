@@ -5,11 +5,11 @@ It models work as **Intents**: explicit records of something an application want
 to happen later, with lifecycle history, replay, projections, and operational
 inspection built in.
 
-The package is being hard-refactored around
+The package has been hard-refactored around
 [`bedrock_job_queue`](https://github.com/bedrock-kv/job_queue) and
 [`bedrock`](https://github.com/bedrock-kv/bedrock). The examples below describe
-the intended public API for this direction. The current implementation is still
-moving toward this shape, so expect breaking changes before any stable release.
+the current alpha API for this direction. Expect breaking changes before any
+stable release.
 
 If you are interested in the design or want to build with it during alpha, join
 the Jido Discord: <https://jido.run/discord>.
@@ -19,7 +19,7 @@ the Jido Discord: <https://jido.run/discord>.
 This project is **alpha**.
 
 - The public API is not stable.
-- Postgres/Ecto support is being removed.
+- Postgres/Ecto support has been removed from the runtime surface.
 - Bedrock is the intended durable runtime.
 - `bedrock_job_queue` provides scheduling, leasing, retry, and concurrent
   execution machinery.
@@ -87,9 +87,9 @@ defmodule MyApp.Intents.SendInvoice do
   use IntentLedger.Handler, topic: "invoice.send"
 
   @impl true
-  def handle(%IntentLedger.Intent{} = intent, _ctx) do
-    invoice_id = intent.payload.invoice_id
-    MyApp.Billing.send_invoice(invoice_id)
+  def handle(%{invoice_id: invoice_id}, ctx) do
+    MyApp.Billing.send_invoice(invoice_id, ctx)
+    {:ok, %{sent: true}}
   end
 end
 ```
@@ -149,10 +149,10 @@ MyApp.Intents.stats(opts)
 MyApp.Intents.health(opts)
 ```
 
-Handler modules receive Intents, not queue internals:
+Handler modules receive the Intent payload and an `IntentLedger.Context`:
 
 ```elixir
-@callback handle(IntentLedger.Intent.t(), IntentLedger.Context.t()) ::
+@callback handle(payload :: term(), context :: IntentLedger.Context.t()) ::
             :ok
             | {:ok, term()}
             | {:error, term()}
@@ -210,7 +210,6 @@ Replay is source-based:
 ```elixir
 MyApp.Intents.replay({:intent, intent_id}, cursor: 0, limit: 100)
 MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
-MyApp.Intents.replay(:outbox, cursor: 0, limit: 100)
 ```
 
 Signals are the audit log and the source for rebuildable read models. They are
@@ -243,11 +242,11 @@ The intended projection workflow is:
 
 ## Persistence
 
-Intent Ledger is moving to a Bedrock-only durable persistence story.
+Intent Ledger now uses a Bedrock-only durable persistence story.
 
 `bedrock_job_queue` stores queue state inside Bedrock transactions. Intent Ledger
-stores Intent state, lifecycle signals, command replay metadata, outbox entries,
-and projection offsets in the same Bedrock-backed system.
+stores Intent state, lifecycle signals, and outbox entries in the same
+Bedrock-backed system.
 
 Postgres is intentionally not part of the new runtime plan. Teams that want a
 familiar operational substrate can run Bedrock with local filesystem persistence
@@ -255,15 +254,11 @@ or object storage such as S3/MinIO as Bedrock support matures.
 
 ## Operations
 
-The intended inspection surface is view-based:
+The current inspection surface is view-based:
 
 ```elixir
 MyApp.Intents.inspect(:queues)
-MyApp.Intents.inspect(:intents)
-MyApp.Intents.inspect(:retries)
-MyApp.Intents.inspect(:ambiguous)
 MyApp.Intents.inspect(:outbox)
-MyApp.Intents.inspect(:projections)
 ```
 
 Telemetry will cover:
@@ -276,17 +271,15 @@ Telemetry will cover:
 - outbox dispatch;
 - replay and projection catch-up.
 
-## Current Refactor Work
+## Next Refactor Work
 
-The active implementation work is:
+The remaining implementation work is:
 
-1. Replace the old shard/claim runtime with `bedrock_job_queue`.
-2. Remove Postgres/Ecto modules, tests, docs, and dependency surface.
-3. Replace the top-level API with configured Intents modules.
-4. Keep Signals, replay, outbox, projections, and lineage as first-class
-   concepts.
-5. Add opt-in Bedrock integration tests for the new runtime before expanding to
-   multi-node scenarios.
+1. Add a `bedrock_job_queue` transaction hook or direct executor so queue state
+   and Intent lifecycle state commit atomically after handler results.
+2. Expand opt-in Bedrock tests into restart and multi-node scenarios.
+3. Tighten projection offsets and durable outbox consumer APIs.
+4. Publish once `bedrock_job_queue` has a Hex release path.
 
 ## Development
 

@@ -1,0 +1,216 @@
+defmodule IntentLedger.BedrockStore do
+  @moduledoc false
+
+  alias Bedrock.Encoding.Tuple, as: TupleEncoding
+  alias Bedrock.Keyspace
+  alias IntentLedger.{Intent, Signal, Time}
+
+  @type stream_source :: :ledger | {:intent, String.t()}
+
+  @doc false
+  @spec transact(module(), (module(), Keyspace.t() -> term()), keyword()) :: term()
+  def transact(ledger, fun, opts \\ []) when is_atom(ledger) and is_function(fun, 2) do
+    repo = repo!(ledger)
+    root = root_keyspace(ledger)
+
+    repo.transact(fn -> fun.(repo, root) end, opts)
+  end
+
+  @doc false
+  @spec create_intent(module(), module(), Keyspace.t(), Intent.t(), keyword()) ::
+          {:ok, Intent.t(), :created | :existing}
+  def create_intent(ledger, repo, root, %Intent{} = intent, opts \\ []) do
+    keys = key_index_keyspace(root)
+    intents = intent_keyspace(root)
+
+    case existing_by_key(repo, keys, intents, intent.key) do
+      {:ok, %Intent{} = existing} ->
+        {:ok, existing, :existing}
+
+      :error ->
+        now = Keyword.get(opts, :now, Time.utc_now())
+        intent = %{intent | created_at: intent.created_at || now, updated_at: now}
+
+        repo.put(intents, intent.id, encode(intent))
+
+        if intent.key do
+          repo.put(keys, intent.key, intent.id)
+        end
+
+        append_lifecycle(repo, root, ledger, intent, :enqueued, %{
+          key: intent.key,
+          topic: intent.topic,
+          queue: intent.queue,
+          scheduled_at: intent.scheduled_at,
+          max_attempts: intent.max_attempts,
+          priority: intent.priority
+        })
+
+        {:ok, intent, :created}
+    end
+  end
+
+  @doc false
+  @spec fetch(module(), String.t()) :: {:ok, Intent.t()} | {:error, :not_found}
+  def fetch(ledger, intent_id) do
+    transact(ledger, fn repo, root -> fetch(repo, root, intent_id) end)
+  end
+
+  @doc false
+  @spec fetch(module(), Keyspace.t(), String.t()) :: {:ok, Intent.t()} | {:error, :not_found}
+  def fetch(repo, root, intent_id) when is_binary(intent_id) do
+    case repo.get(intent_keyspace(root), intent_id) do
+      nil -> {:error, :not_found}
+      value -> {:ok, decode(value)}
+    end
+  end
+
+  @doc false
+  @spec put_intent(module(), Keyspace.t(), Intent.t()) :: :ok
+  def put_intent(repo, root, %Intent{} = intent) do
+    repo.put(intent_keyspace(root), intent.id, encode(intent))
+  end
+
+  @doc false
+  @spec record_lifecycle(module(), Keyspace.t(), module(), Intent.t(), atom(), map()) :: Jido.Signal.t()
+  def record_lifecycle(repo, root, ledger, %Intent{} = intent, event, data) do
+    append_lifecycle(repo, root, ledger, intent, event, data)
+  end
+
+  @doc false
+  @spec update_intent(module(), String.t(), atom(), map(), (Intent.t(), DateTime.t() -> Intent.t())) ::
+          {:ok, Intent.t()} | {:error, term()}
+  def update_intent(ledger, intent_id, event, data, update_fun)
+      when is_atom(event) and is_map(data) and is_function(update_fun, 2) do
+    transact(ledger, fn repo, root ->
+      with {:ok, intent} <- fetch(repo, root, intent_id) do
+        now = Time.utc_now()
+        next = update_fun.(intent, now)
+        repo.put(intent_keyspace(root), next.id, encode(next))
+        append_lifecycle(repo, root, ledger, next, event, data)
+        {:ok, next}
+      end
+    end)
+  end
+
+  @doc false
+  @spec history(module(), String.t(), keyword()) :: {:ok, [Jido.Signal.t()]} | {:error, term()}
+  def history(ledger, intent_id, opts \\ []) do
+    replay(ledger, {:intent, intent_id}, opts)
+  end
+
+  @doc false
+  @spec replay(module(), stream_source(), keyword()) :: {:ok, [Jido.Signal.t()]} | {:error, term()}
+  def replay(ledger, source, opts \\ []) do
+    transact(ledger, fn repo, root ->
+      stream = stream_name(source)
+      cursor = Keyword.get(opts, :cursor, 0)
+      limit = Keyword.get(opts, :limit, 100)
+
+      entries =
+        root
+        |> stream_keyspace()
+        |> repo.get_range(limit: Keyword.get(opts, :scan_limit, limit * 10))
+        |> Stream.map(fn {_key, value} -> decode(value) end)
+        |> Stream.filter(&(&1.stream == stream and &1.cursor > cursor))
+        |> Enum.take(limit)
+
+      {:ok, Enum.map(entries, & &1.signal)}
+    end)
+  end
+
+  @doc false
+  @spec outbox(module(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def outbox(ledger, opts \\ []) do
+    transact(ledger, fn repo, root ->
+      cursor = Keyword.get(opts, :cursor, 0)
+      limit = Keyword.get(opts, :limit, 100)
+
+      entries =
+        root
+        |> outbox_keyspace()
+        |> repo.get_range(limit: Keyword.get(opts, :scan_limit, limit * 10))
+        |> Stream.map(fn {_key, value} -> decode(value) end)
+        |> Stream.filter(&(&1.cursor > cursor))
+        |> Enum.take(limit)
+
+      {:ok, entries}
+    end)
+  end
+
+  @doc false
+  @spec root_keyspace(module()) :: Keyspace.t()
+  def root_keyspace(ledger), do: Keyspace.new("intent_ledger/#{module_key(ledger)}/")
+
+  defp append_lifecycle(repo, root, ledger, %Intent{} = intent, event, data) do
+    signal = Signal.lifecycle(event, ledger, intent, data)
+
+    append_stream(repo, root, "ledger", signal)
+    append_stream(repo, root, "intent:#{intent.id}", signal)
+    append_outbox(repo, root, signal)
+
+    signal
+  end
+
+  defp append_stream(repo, root, stream, signal) do
+    versions = stream_version_keyspace(root)
+    streams = stream_keyspace(root)
+    cursor = next_counter(repo, versions, stream)
+    repo.put(streams, {stream, cursor}, encode(%{stream: stream, cursor: cursor, signal: signal}))
+    cursor
+  end
+
+  defp append_outbox(repo, root, signal) do
+    cursor = next_counter(repo, outbox_version_keyspace(root), "global")
+    repo.put(outbox_keyspace(root), cursor, encode(%{cursor: cursor, signal: signal}))
+    cursor
+  end
+
+  defp next_counter(repo, keyspace, key) do
+    next =
+      case repo.get(keyspace, key) do
+        nil -> 1
+        value -> decode(value) + 1
+      end
+
+    repo.put(keyspace, key, encode(next))
+    next
+  end
+
+  defp existing_by_key(_repo, _keys, _intents, nil), do: :error
+
+  defp existing_by_key(repo, keys, intents, key) do
+    case repo.get(keys, key) do
+      nil ->
+        :error
+
+      intent_id ->
+        case repo.get(intents, intent_id) do
+          nil -> :error
+          value -> {:ok, decode(value)}
+        end
+    end
+  end
+
+  defp stream_name(:ledger), do: "ledger"
+  defp stream_name({:intent, intent_id}) when is_binary(intent_id), do: "intent:#{intent_id}"
+
+  defp repo!(ledger), do: ledger.__intent_ledger__().repo
+
+  defp module_key(module) do
+    module
+    |> Module.split()
+    |> Enum.join("_")
+    |> Macro.underscore()
+  end
+
+  defp intent_keyspace(root), do: Keyspace.partition(root, "intents/")
+  defp key_index_keyspace(root), do: Keyspace.partition(root, "keys/")
+  defp stream_version_keyspace(root), do: Keyspace.partition(root, "stream_versions/")
+  defp outbox_version_keyspace(root), do: Keyspace.partition(root, "outbox_versions/")
+  defp outbox_keyspace(root), do: Keyspace.partition(root, "outbox/", key_encoding: TupleEncoding)
+  defp stream_keyspace(root), do: Keyspace.partition(root, "streams/", key_encoding: TupleEncoding)
+
+  defp encode(term), do: :erlang.term_to_binary(term)
+  defp decode(binary), do: :erlang.binary_to_term(binary)
+end

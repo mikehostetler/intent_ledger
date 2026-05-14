@@ -48,8 +48,7 @@ defmodule IntentLedger.MixProject do
         "test.fast": :test,
         "test.integration": :test,
         "test.bedrock": :test,
-        "test.multi_node": :test,
-        "test.postgres": :test
+        "test.multi_node": :test
       ]
     ]
   end
@@ -72,10 +71,9 @@ defmodule IntentLedger.MixProject do
       {:telemetry, "~> 1.0"},
       {:zoi, "~> 0.17.1"},
 
-      # Optional durable adapters
-      {:bedrock, "~> 0.5.0", optional: true},
-      {:ecto_sql, "~> 3.13", optional: true},
-      {:postgrex, "~> 0.22.2", optional: true},
+      # Bedrock runtime
+      {:bedrock, path: "../bedrock", override: true},
+      {:bedrock_job_queue, path: "../job_queue"},
 
       # Dev/Test
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
@@ -92,13 +90,11 @@ defmodule IntentLedger.MixProject do
     [
       setup: ["deps.get"],
       install_hooks: ["git_hooks.install"],
-      test: "test --exclude flaky --exclude integration --exclude bedrock --exclude multi_node --exclude postgres",
-      "test.fast":
-        "test --exclude flaky --exclude integration --exclude bedrock --exclude multi_node --exclude postgres",
+      test: "test --exclude flaky --exclude integration --exclude bedrock --exclude multi_node",
+      "test.fast": "test --exclude flaky --exclude integration --exclude bedrock --exclude multi_node",
       "test.integration": "test --exclude flaky --only integration",
       "test.bedrock": "test --exclude flaky --only bedrock --exclude multi_node",
       "test.multi_node": "test --exclude flaky --only multi_node",
-      "test.postgres": "test --exclude flaky --only postgres",
       q: ["quality"],
       quality: [
         "format --check-formatted",
@@ -119,9 +115,7 @@ defmodule IntentLedger.MixProject do
         "docs/operations.md",
         "docs/reliability.md",
         "docs/clustering.md",
-        "docs/memory.md",
         "docs/bedrock.md",
-        "docs/ecto.md",
         "CHANGELOG.md",
         "CONTRIBUTING.md",
         "LICENSE"
@@ -129,44 +123,18 @@ defmodule IntentLedger.MixProject do
       groups_for_modules: [
         "Public API": [
           IntentLedger,
-          IntentLedger.Command,
-          IntentLedger.Inspection,
+          IntentLedger.Context,
+          IntentLedger.Handler,
           IntentLedger.Intent,
-          IntentLedger.IntentState,
-          IntentLedger.Claim,
-          IntentLedger.Claimed,
           IntentLedger.Error,
-          IntentLedger.Record
+          IntentLedger.Projection
         ],
         Runtime: [
           IntentLedger.Application,
-          IntentLedger.Instance,
-          IntentLedger.InstanceSupervisor,
-          IntentLedger.Lifecycle,
-          IntentLedger.Notifier,
-          IntentLedger.Projection,
-          IntentLedger.QueueSupervisor,
-          IntentLedger.QueueShardServer,
-          IntentLedger.RecoveryServer,
-          IntentLedger.SignalDispatcher,
-          IntentLedger.SignalHandler,
-          IntentLedger.Telemetry,
-          IntentLedger.Store,
-          IntentLedger.Store.Commit,
-          IntentLedger.Store.CommitRequest,
-          IntentLedger.Store.Bedrock,
-          IntentLedger.Store.Bedrock.Keyspace,
-          IntentLedger.Store.Bedrock.Value,
-          IntentLedger.Store.Ecto,
-          IntentLedger.Store.Ecto.Migration,
-          IntentLedger.Store.Ecto.Query,
-          IntentLedger.Store.Ecto.Schema,
-          IntentLedger.Store.Conflict,
-          IntentLedger.Store.Listing,
-          IntentLedger.Store.Memory,
-          IntentLedger.Store.Outbox,
-          IntentLedger.Store.Precondition,
-          IntentLedger.Store.Write
+          IntentLedger.BedrockStore,
+          IntentLedger.Runtime,
+          IntentLedger.Signal,
+          IntentLedger.Telemetry
         ]
       ]
     ]
@@ -177,7 +145,6 @@ defmodule IntentLedger.MixProject do
       name: :intent_ledger,
       files: [
         "lib",
-        "examples",
         "mix.exs",
         ".formatter.exs",
         "README.md",
