@@ -30,9 +30,10 @@ defmodule IntentLedger do
       {:ok, _record} = IntentLedger.complete(MyApp.IntentLedger, claimed.claim.id, claimed.claim.token, :ok)
   """
 
-  alias IntentLedger.{Command, Projection, Telemetry}
+  alias IntentLedger.{Command, Inspection, Projection, Telemetry}
 
   @type ledger :: GenServer.server()
+  @type inspection_result :: {:ok, [map()] | map()} | {:error, term()}
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   defdelegate child_spec(opts), to: IntentLedger.Instance
@@ -101,6 +102,78 @@ defmodule IntentLedger do
   @spec replay_outbox(ledger(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def replay_outbox(ledger, opts \\ []) do
     GenServer.call(ledger, {:replay_outbox, opts})
+  end
+
+  @doc """
+  Inspects queue backlog and lifecycle counts.
+
+  Options include `:queue`, `:shard`, `:at`, and `:limit`.
+  """
+  @spec inspect_queues(ledger(), keyword()) :: inspection_result()
+  def inspect_queues(ledger, opts \\ []) do
+    GenServer.call(ledger, {:inspect, Inspection.queues(opts)})
+  end
+
+  @doc """
+  Inspects configured queue shard ownership and per-shard backlog.
+
+  Options include `:queue`, `:shard`, and `:at`.
+  """
+  @spec inspect_shards(ledger(), keyword()) :: inspection_result()
+  def inspect_shards(ledger, opts \\ []) do
+    GenServer.call(ledger, {:inspect, Inspection.shards(opts)})
+  end
+
+  @doc """
+  Inspects active claim leases without exposing claim tokens or token hashes.
+
+  Options include `:queue`, `:shard`, `:at`, and `:limit`.
+  """
+  @spec inspect_claims(ledger(), keyword()) :: inspection_result()
+  def inspect_claims(ledger, opts \\ []) do
+    GenServer.call(ledger, {:inspect, Inspection.claims(opts)})
+  end
+
+  @doc """
+  Inspects retry-scheduled intents.
+
+  Options include `:queue`, `:shard`, `:at`, and `:limit`.
+  """
+  @spec inspect_retries(ledger(), keyword()) :: inspection_result()
+  def inspect_retries(ledger, opts \\ []) do
+    GenServer.call(ledger, {:inspect, Inspection.retries(opts)})
+  end
+
+  @doc """
+  Inspects ambiguous intents requiring manual or reconciliation handling.
+
+  Options include `:queue`, `:shard`, and `:limit`.
+  """
+  @spec inspect_ambiguity(ledger(), keyword()) :: inspection_result()
+  def inspect_ambiguity(ledger, opts \\ []) do
+    GenServer.call(ledger, {:inspect, Inspection.ambiguous(opts)})
+  end
+
+  @doc """
+  Inspects durable outbox lag.
+
+  Pass `:consumer` or `:cursor` to evaluate lag for a specific delivery
+  consumer or checkpoint.
+  """
+  @spec inspect_outbox_lag(ledger(), keyword()) :: inspection_result()
+  def inspect_outbox_lag(ledger, opts \\ []) do
+    GenServer.call(ledger, {:inspect, Inspection.outbox_lag(opts)})
+  end
+
+  @doc """
+  Inspects projection lag against a lifecycle stream.
+
+  Pass `:cursor` with the projection's last applied stream version. `:stream`
+  defaults to the ledger-wide stream.
+  """
+  @spec inspect_projection_lag(ledger(), String.t() | atom(), keyword()) :: inspection_result()
+  def inspect_projection_lag(ledger, projection, opts \\ []) do
+    GenServer.call(ledger, {:inspect, Inspection.projection_lag(projection, opts)})
   end
 
   @doc """

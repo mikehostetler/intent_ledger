@@ -13,7 +13,7 @@ defmodule IntentLedger.Store.Bedrock do
 
   use GenServer
 
-  alias IntentLedger.{Error, IntentState, Store, Telemetry}
+  alias IntentLedger.{Error, Inspection, IntentState, Store, Telemetry}
   alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Lineage, Listing, Outbox}
   alias IntentLedger.Store.Bedrock.{Keyspace, Value}
 
@@ -148,8 +148,23 @@ defmodule IntentLedger.Store.Bedrock do
     {:reply, normalize_transact_result(result), state}
   end
 
-  def handle_call({:read, _ledger, request, _opts}, _from, %__MODULE__{} = state) do
-    {:reply, {:error, {:unsupported_store_v1_request, :read, request}}, state}
+  def handle_call({:read, ledger, request, opts}, _from, %__MODULE__{} = state) do
+    case normalize_inspection_request(request) do
+      {:ok, inspection} ->
+        result =
+          transact(
+            state.repo,
+            fn repo ->
+              read_inspection(repo, ledger, inspection)
+            end,
+            transaction_opts(state, opts)
+          )
+
+        {:reply, normalize_transact_result(result), state}
+
+      :unsupported ->
+        {:reply, {:error, {:unsupported_store_v1_request, :read, request}}, state}
+    end
   end
 
   @impl true
@@ -499,6 +514,62 @@ defmodule IntentLedger.Store.Bedrock do
       {:ok, %{stream: stream, version: length(signals), signals: window(signals, opts)}}
     end
   end
+
+  defp normalize_inspection_request(%Inspection{} = inspection), do: {:ok, inspection}
+
+  defp normalize_inspection_request({:inspect, type, attrs}) when is_map(attrs) or is_list(attrs) do
+    {:ok, Inspection.new(type, attrs)}
+  rescue
+    FunctionClauseError -> :unsupported
+  end
+
+  defp normalize_inspection_request(_request), do: :unsupported
+
+  defp read_inspection(repo, ledger, %Inspection{} = request) do
+    with {:ok, intents} <- read_intents(repo, ledger),
+         {:ok, states} <- read_states(repo, ledger),
+         {:ok, claims} <- read_claims(repo, ledger),
+         {:ok, shard_leases} <- read_shard_leases(repo, ledger),
+         {:ok, outbox} <- outbox_entries(repo, ledger) do
+      Inspection.evaluate(request, %{
+        intents: intents,
+        states: states,
+        claims: claims,
+        shard_leases: shard_leases,
+        outbox: outbox,
+        stream_version: inspection_stream_version(repo, ledger, request)
+      })
+    end
+  end
+
+  defp read_claims(repo, ledger) do
+    repo
+    |> get_range(Keyspace.table_range(ledger, :claim))
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.reduce_while({:ok, []}, fn {_key, encoded}, {:ok, claims} ->
+      case Value.unpack_claim(encoded) do
+        {:ok, claim} -> {:cont, {:ok, claims ++ [claim]}}
+        {:error, reason} -> {:halt, {:error, adapter_error("invalid Bedrock claim value", reason: reason)}}
+      end
+    end)
+  end
+
+  defp read_shard_leases(repo, ledger) do
+    repo
+    |> get_range(Keyspace.table_range(ledger, :shard))
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.reduce_while({:ok, []}, fn {_key, encoded}, {:ok, leases} ->
+      case Value.unpack_shard_lease(encoded) do
+        {:ok, lease} -> {:cont, {:ok, leases ++ [lease]}}
+        {:error, reason} -> {:halt, {:error, adapter_error("invalid Bedrock shard lease value", reason: reason)}}
+      end
+    end)
+  end
+
+  defp inspection_stream_version(repo, ledger, %Inspection{stream: stream}) when is_binary(stream),
+    do: stream_version(repo, ledger, stream)
+
+  defp inspection_stream_version(_repo, _ledger, _request), do: 0
 
   defp stream_version(repo, ledger, stream), do: repo |> stream_entries(ledger, stream) |> length()
 

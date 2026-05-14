@@ -108,6 +108,7 @@ defmodule IntentLedger.Store do
   development, and as the executable contract for durable adapters.
   """
 
+  alias IntentLedger.Inspection
   alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Outbox}
 
   @type ref :: GenServer.server()
@@ -118,6 +119,8 @@ defmodule IntentLedger.Store do
           | {:history, String.t()}
           | {:stream, String.t(), keyword()}
           | {:lineage_counts, keyword() | map()}
+          | Inspection.t()
+          | {:inspect, Inspection.kind(), keyword() | map()}
           | map()
   @type shard_lease_operation :: :acquire | :renew | :release | :expire | :takeover
   @type lease_request :: {:shard, shard_lease_operation(), map()} | map()

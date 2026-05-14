@@ -22,7 +22,7 @@ defmodule IntentLedger.Store.Ecto do
 
   use GenServer
 
-  alias IntentLedger.{Error, Store, Telemetry, Time}
+  alias IntentLedger.{Error, Inspection, Store, Telemetry, Time}
   alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Lineage, Listing, Outbox}
   alias IntentLedger.Store.Ecto.{Query, Schema}
 
@@ -168,8 +168,19 @@ defmodule IntentLedger.Store.Ecto do
     {:reply, result, state}
   end
 
-  def handle_call({:read, _ledger, request, _opts}, _from, %__MODULE__{} = state) do
-    {:reply, not_implemented(:read, request), state}
+  def handle_call({:read, ledger, request, opts}, _from, %__MODULE__{} = state) do
+    case normalize_inspection_request(request) do
+      {:ok, inspection} ->
+        result =
+          transact(state.repo, transaction_opts(opts), fn ->
+            apply_read_request(state, ledger, inspection)
+          end)
+
+        {:reply, result, state}
+
+      :unsupported ->
+        {:reply, not_implemented(:read, request), state}
+    end
   end
 
   def handle_call({:lease, ledger, request, opts}, _from, %__MODULE__{} = state) do
@@ -827,7 +838,62 @@ defmodule IntentLedger.Store.Ecto do
       {:error, adapter_error("invalid Ecto lineage count value", reason: error)}
   end
 
+  defp apply_read_request(%__MODULE__{} = state, ledger, %Inspection{} = request) do
+    opts = source_opts(state)
+
+    with {:ok, outbox} <- outbox_entries(state, ledger, opts) do
+      Inspection.evaluate(request, %{
+        intents: read_intents(state, ledger, opts),
+        states: read_states(state, ledger, opts),
+        claims: read_claims(state, ledger, opts),
+        shard_leases: read_shard_leases(state, ledger, opts),
+        outbox: outbox,
+        stream_version: inspection_stream_version(state, ledger, request, opts)
+      })
+    end
+  rescue
+    error ->
+      {:error, adapter_error("invalid Ecto inspection value", reason: error)}
+  end
+
   defp apply_read_request(_state, _ledger, request), do: {:error, {:unsupported_store_v1_request, :read, request}}
+
+  defp normalize_inspection_request(%Inspection{} = inspection), do: {:ok, inspection}
+
+  defp normalize_inspection_request({:inspect, type, attrs}) when is_map(attrs) or is_list(attrs) do
+    {:ok, Inspection.new(type, attrs)}
+  rescue
+    FunctionClauseError -> :unsupported
+  end
+
+  defp normalize_inspection_request(_request), do: :unsupported
+
+  defp read_intents(%__MODULE__{} = state, ledger, opts) do
+    state.repo.all(Query.by_fields(:intents, ledger, [], opts))
+    |> Enum.map(&intent_value/1)
+  end
+
+  defp read_states(%__MODULE__{} = state, ledger, opts) do
+    state.repo.all(Query.by_fields(:states, ledger, [], opts))
+    |> Enum.map(&state_value/1)
+  end
+
+  defp read_claims(%__MODULE__{} = state, ledger, opts) do
+    state.repo.all(Query.by_fields(:claims, ledger, [], opts))
+    |> Enum.map(&claim_value/1)
+  end
+
+  defp read_shard_leases(%__MODULE__{} = state, ledger, opts) do
+    state.repo.all(Query.by_fields(:shard_leases, ledger, [], opts))
+    |> Enum.map(&shard_lease_value(&1, field(&1, :queue), field(&1, :shard)))
+  end
+
+  defp inspection_stream_version(%__MODULE__{} = state, ledger, %Inspection{stream: stream}, opts)
+       when is_binary(stream) do
+    stream_version(state, ledger, stream, opts)
+  end
+
+  defp inspection_stream_version(_state, _ledger, _request, _opts), do: 0
 
   defp source_opts(%__MODULE__{} = state), do: [prefix: state.prefix, tables: state.tables]
 

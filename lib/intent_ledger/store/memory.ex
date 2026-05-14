@@ -15,6 +15,7 @@ defmodule IntentLedger.Store.Memory do
   alias IntentLedger.{
     Claim,
     Claimed,
+    Inspection,
     Intent,
     IntentState,
     OutboxEntry,
@@ -215,7 +216,10 @@ defmodule IntentLedger.Store.Memory do
   end
 
   def handle_call({:store_v1_read, _ledger, request, _opts}, _from, state) do
-    {:reply, unsupported_store_v1(:read, request), state}
+    case normalize_inspection_request(request) do
+      {:ok, inspection} -> {:reply, Inspection.evaluate(inspection, inspection_data(state, inspection)), state}
+      :unsupported -> {:reply, unsupported_store_v1(:read, request), state}
+    end
   end
 
   def handle_call({:store_v1_lease, _ledger, request, _opts}, _from, state) do
@@ -1201,6 +1205,32 @@ defmodule IntentLedger.Store.Memory do
   end
 
   defp apply_shard_lease_request(_state, _request), do: :unsupported
+
+  defp normalize_inspection_request(%Inspection{} = inspection), do: {:ok, inspection}
+
+  defp normalize_inspection_request({:inspect, type, attrs}) when is_map(attrs) or is_list(attrs) do
+    {:ok, Inspection.new(type, attrs)}
+  rescue
+    FunctionClauseError -> :unsupported
+  end
+
+  defp normalize_inspection_request(_request), do: :unsupported
+
+  defp inspection_data(state, request) do
+    %{
+      intents: Map.values(state.intents),
+      states: Map.values(state.states),
+      claims: Enum.map(state.claims, fn {claim_id, claim} -> Map.put(claim, :claim_id, claim_id) end),
+      shard_leases: Map.values(state.shard_leases),
+      outbox: Map.values(state.outbox),
+      stream_version: inspection_stream_version(state, request)
+    }
+  end
+
+  defp inspection_stream_version(state, %Inspection{stream: stream}) when is_binary(stream),
+    do: stream_version(state, stream)
+
+  defp inspection_stream_version(_state, _request), do: 0
 
   defp normalize_listing_request(%Listing{} = listing), do: {:ok, listing}
 

@@ -3,7 +3,7 @@ defmodule IntentLedger.Server do
 
   use GenServer
 
-  alias IntentLedger.{Intent, Lifecycle, Notifier, Record, Telemetry, Time}
+  alias IntentLedger.{Inspection, Intent, Lifecycle, Notifier, Record, Telemetry, Time}
   alias IntentLedger.Store.Outbox
 
   require Logger
@@ -203,6 +203,16 @@ defmodule IntentLedger.Server do
 
   def handle_call({:replay_outbox, opts}, _from, state) do
     result = state.store_module.outbox(state.store_ref, state.name, Outbox.replay(opts), state.telemetry)
+    {:reply, result, state}
+  end
+
+  def handle_call({:inspect, %Inspection{} = request}, _from, state) do
+    request = prepare_inspection_request(state, request)
+    start = System.monotonic_time()
+    result = state.store_module.read(state.store_ref, state.name, request, state.telemetry)
+
+    emit_inspection_stop(state, start, request, result)
+
     {:reply, result, state}
   end
 
@@ -897,6 +907,48 @@ defmodule IntentLedger.Server do
 
   defp recovery_error({:error, reason}), do: reason
   defp recovery_error(_result), do: nil
+
+  defp prepare_inspection_request(%__MODULE__{} = state, %Inspection{} = request) do
+    %{
+      request
+      | queue_config: state.queues,
+        stream: request.stream || ledger_stream(state.name)
+    }
+  end
+
+  defp emit_inspection_stop(state, start, %Inspection{} = request, result) do
+    metadata =
+      %{
+        ledger: state.name,
+        operation: request.type,
+        status: inspection_status(result),
+        queue: request.queue,
+        shard: request.shard,
+        consumer: request.consumer,
+        projection: request.projection,
+        limit: request.limit
+      }
+      |> maybe_put_error(inspection_error(result))
+      |> reject_nil_metadata()
+
+    Telemetry.execute(
+      state.telemetry,
+      :inspection_stop,
+      %{duration: System.monotonic_time() - start, count: inspection_count(result)},
+      metadata
+    )
+  end
+
+  defp inspection_status({:ok, _result}), do: :ok
+  defp inspection_status({:error, _reason}), do: :error
+  defp inspection_status(_result), do: :unknown
+
+  defp inspection_count({:ok, results}) when is_list(results), do: length(results)
+  defp inspection_count({:ok, _result}), do: 1
+  defp inspection_count(_result), do: 0
+
+  defp inspection_error({:error, reason}), do: reason
+  defp inspection_error(_result), do: nil
 
   defp maybe_put_error(metadata, nil), do: metadata
   defp maybe_put_error(metadata, %{type: type}), do: Map.put(metadata, :conflict, type)

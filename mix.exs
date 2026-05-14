@@ -121,6 +121,7 @@ defmodule IntentLedger.MixProject do
         "Public API": [
           IntentLedger,
           IntentLedger.Command,
+          IntentLedger.Inspection,
           IntentLedger.Intent,
           IntentLedger.IntentState,
           IntentLedger.Claim,
