@@ -381,6 +381,9 @@ Landed:
 - Public inspection supports `:queues`, `:intents`, `:retries`,
   `:ambiguous`, `:outbox`, and `:projections`, with unsupported views and
   invalid options normalized through `IntentLedger.Error`.
+- Opt-in `@tag :bedrock` integration scenarios cover pointer payloads, handler
+  success, retry, max-attempt failure, discard, snooze, cancellation
+  neutralization, and outbox replay after storage process restart.
 - Splode-backed public error normalization and telemetry stop events exist.
 - Fast unit tests cover handler result, validation, telemetry, replay, and
   projection cursor edge cases.
@@ -397,7 +400,7 @@ Missing:
 
 - Durable outbox dispatch/ack policy.
 - Projection lag inspection.
-- Bedrock restart and multi-node opt-in scenarios.
+- Multi-node opt-in scenarios.
 - Final `mix docs`, `mix hex.build`, dependency review, and Hex release timing
   decision.
 

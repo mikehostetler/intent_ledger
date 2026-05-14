@@ -16,30 +16,49 @@ defmodule IntentLedger.FakeRepo do
     Agent.update(__MODULE__, fn _state -> %{} end)
   end
 
+  def snapshot! do
+    ensure_started()
+    Agent.get(__MODULE__, & &1)
+  end
+
+  def restart!(state \\ %{}) when is_map(state) do
+    ensure_started()
+    Agent.stop(__MODULE__, :normal)
+    {:ok, _pid} = start_link([])
+    Agent.update(__MODULE__, fn _state -> state end)
+    :ok
+  end
+
   def transact(fun, _opts \\ []) when is_function(fun, 0) do
     ensure_started()
 
-    Agent.get_and_update(__MODULE__, fn state ->
-      Process.put(@tx_state, state)
+    case Process.get(@tx_state) do
+      nil ->
+        Agent.get_and_update(__MODULE__, fn state ->
+          Process.put(@tx_state, state)
 
-      try do
-        result = fun.()
-        next_state = Process.get(@tx_state)
-        {{:ok, result}, next_state}
-      rescue
-        exception ->
-          {{:raised, exception, __STACKTRACE__}, state}
-      catch
-        kind, reason ->
-          {{:caught, kind, reason}, state}
-      after
-        Process.delete(@tx_state)
-      end
-    end)
-    |> case do
-      {:ok, result} -> result
-      {:raised, exception, stacktrace} -> reraise exception, stacktrace
-      {:caught, kind, reason} -> :erlang.raise(kind, reason, [])
+          try do
+            result = fun.()
+            next_state = Process.get(@tx_state)
+            {{:ok, result}, next_state}
+          rescue
+            exception ->
+              {{:raised, exception, __STACKTRACE__}, state}
+          catch
+            kind, reason ->
+              {{:caught, kind, reason}, state}
+          after
+            Process.delete(@tx_state)
+          end
+        end)
+        |> case do
+          {:ok, result} -> result
+          {:raised, exception, stacktrace} -> reraise exception, stacktrace
+          {:caught, kind, reason} -> :erlang.raise(kind, reason, [])
+        end
+
+      _state ->
+        fun.()
     end
   end
 
@@ -74,8 +93,13 @@ defmodule IntentLedger.FakeRepo do
       state
       |> Enum.filter(fn {key, _value} -> String.starts_with?(key, prefix) end)
       |> Enum.sort_by(fn {key, _value} -> key end)
+      |> Enum.flat_map(fn {key, value} ->
+        case unpack(keyspace, key) do
+          {:ok, unpacked} -> [{unpacked, value}]
+          :error -> []
+        end
+      end)
       |> Enum.take(limit)
-      |> Enum.map(fn {key, value} -> {Keyspace.unpack(keyspace, key), value} end)
     end)
   end
 
@@ -121,6 +145,12 @@ defmodule IntentLedger.FakeRepo do
       nil -> Agent.update(__MODULE__, fun)
       state -> Process.put(@tx_state, fun.(state))
     end
+  end
+
+  defp unpack(keyspace, key) do
+    {:ok, Keyspace.unpack(keyspace, key)}
+  rescue
+    ArgumentError -> :error
   end
 
   defp max_binary(left, right) when left >= right, do: left
