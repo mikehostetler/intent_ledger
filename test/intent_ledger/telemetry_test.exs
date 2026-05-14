@@ -1,6 +1,7 @@
 defmodule IntentLedger.TelemetryTest do
   use ExUnit.Case, async: true
 
+  alias IntentLedger.Store.CommitRequest
   alias IntentLedger.Telemetry
 
   def handle_event(event, measurements, metadata, parent) do
@@ -97,5 +98,105 @@ defmodule IntentLedger.TelemetryTest do
     after
       :telemetry.detach(handler_id)
     end
+  end
+
+  test "public commands emit command handling telemetry" do
+    ledger = unique_atom(:command_telemetry_ledger)
+    prefix = [unique_atom(:command_telemetry_prefix)]
+    start_event = Telemetry.event_name(:command_start, telemetry_prefix: prefix)
+    stop_event = Telemetry.event_name(:command_stop, telemetry_prefix: prefix)
+    handler_id = attach_events([start_event, stop_event])
+
+    start_supervised!({IntentLedger, name: ledger, store: IntentLedger.Store.Memory, telemetry_prefix: prefix})
+
+    try do
+      assert {:ok, _record} =
+               IntentLedger.submit(
+                 ledger,
+                 %{key: "job:telemetry", kind: "job.run"},
+                 command_id: "cmd_telemetry_submit",
+                 actor: "worker-1",
+                 correlation_id: "corr_1"
+               )
+
+      assert_receive {:telemetry, ^start_event, %{system_time: system_time}, start_metadata}
+      assert is_integer(system_time)
+      assert start_metadata.ledger == ledger
+      assert start_metadata.operation == :submit
+      assert start_metadata.command_id == "cmd_telemetry_submit"
+      assert start_metadata.actor == "worker-1"
+      assert start_metadata.correlation_id == "corr_1"
+      assert start_metadata.depth == 0
+      refute Map.has_key?(start_metadata, :payload)
+
+      assert_receive {:telemetry, ^stop_event, %{duration: duration, count: 1}, stop_metadata}
+      assert is_integer(duration)
+      assert duration >= 0
+      assert stop_metadata.status == :ok
+      assert stop_metadata.replayed? == false
+      assert stop_metadata.ledger == ledger
+      assert stop_metadata.operation == :submit
+      assert stop_metadata.command_id == "cmd_telemetry_submit"
+      refute Map.has_key?(stop_metadata, :result)
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  test "store v1 commits emit commit telemetry" do
+    store_name = unique_atom(:store_telemetry)
+    prefix = [unique_atom(:store_telemetry_prefix)]
+    start_event = Telemetry.event_name(:store_commit_start, telemetry_prefix: prefix)
+    stop_event = Telemetry.event_name(:store_commit_stop, telemetry_prefix: prefix)
+    handler_id = attach_events([start_event, stop_event])
+
+    start_supervised!({IntentLedger.Store.Memory, name: store_name})
+
+    request =
+      CommitRequest.new(
+        command_id: "cmd_store_telemetry",
+        operation: :submit
+      )
+
+    try do
+      assert {:ok, _commit} =
+               IntentLedger.Store.Memory.commit(
+                 store_name,
+                 MyApp.IntentLedger,
+                 request,
+                 telemetry_prefix: prefix
+               )
+
+      assert_receive {:telemetry, ^start_event, %{system_time: system_time}, start_metadata}
+      assert is_integer(system_time)
+      assert start_metadata.ledger == MyApp.IntentLedger
+      assert start_metadata.store == IntentLedger.Store.Memory
+      assert start_metadata.operation == :submit
+      assert start_metadata.command_id == "cmd_store_telemetry"
+
+      assert_receive {:telemetry, ^stop_event, %{duration: duration, writes: 0, signals: 0, outbox_entries: 0},
+                      stop_metadata}
+
+      assert is_integer(duration)
+      assert duration >= 0
+      assert stop_metadata.status == :ok
+      assert stop_metadata.replayed? == false
+      assert stop_metadata.store == IntentLedger.Store.Memory
+      refute Map.has_key?(stop_metadata, :result)
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  defp attach_events(events) do
+    handler_id = {__MODULE__, self(), make_ref()}
+
+    :ok = :telemetry.attach_many(handler_id, events, &__MODULE__.handle_event/4, self())
+
+    handler_id
+  end
+
+  defp unique_atom(prefix) do
+    String.to_atom("#{prefix}_#{System.unique_integer([:positive])}")
   end
 end

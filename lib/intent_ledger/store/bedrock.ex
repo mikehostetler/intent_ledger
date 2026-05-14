@@ -13,7 +13,7 @@ defmodule IntentLedger.Store.Bedrock do
 
   use GenServer
 
-  alias IntentLedger.{Error, IntentState, Store}
+  alias IntentLedger.{Error, IntentState, Store, Telemetry}
   alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Lineage, Listing, Outbox}
   alias IntentLedger.Store.Bedrock.{Keyspace, Value}
 
@@ -72,7 +72,11 @@ defmodule IntentLedger.Store.Bedrock do
   @doc false
   @impl true
   @spec commit(Store.ref(), atom(), Store.CommitRequest.t(), keyword()) :: Store.commit_result()
-  def commit(ref, ledger, %CommitRequest{} = request, opts), do: GenServer.call(ref, {:commit, ledger, request, opts})
+  def commit(ref, ledger, %CommitRequest{} = request, opts) do
+    Telemetry.instrument_store_commit(opts, ledger, __MODULE__, request, fn ->
+      GenServer.call(ref, {:commit, ledger, request, opts})
+    end)
+  end
 
   @doc false
   @impl true

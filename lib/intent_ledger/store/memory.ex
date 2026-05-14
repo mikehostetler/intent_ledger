@@ -20,6 +20,7 @@ defmodule IntentLedger.Store.Memory do
     OutboxEntry,
     Record,
     Signal,
+    Telemetry,
     Time
   }
 
@@ -74,7 +75,9 @@ defmodule IntentLedger.Store.Memory do
 
   @impl true
   def commit(ref, ledger, %CommitRequest{} = request, opts) do
-    GenServer.call(ref, {:store_v1_commit, ledger, request, opts})
+    Telemetry.instrument_store_commit(opts, ledger, __MODULE__, request, fn ->
+      GenServer.call(ref, {:store_v1_commit, ledger, request, opts})
+    end)
   end
 
   @impl true

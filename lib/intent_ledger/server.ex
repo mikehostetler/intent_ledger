@@ -10,6 +10,16 @@ defmodule IntentLedger.Server do
 
   @default_lease_ms 30_000
   @default_queue_opts [shards: 1]
+  @command_metadata_fields [
+    :command_id,
+    :idempotency_key,
+    :actor,
+    :causation_id,
+    :correlation_id,
+    :root_intent_id,
+    :parent_intent_id,
+    :depth
+  ]
 
   @type t :: %__MODULE__{
           name: atom(),
@@ -89,14 +99,41 @@ defmodule IntentLedger.Server do
   end
 
   @impl true
-  def handle_call({:command, %{command_id: command_id}, message}, _from, state) do
-    case Map.fetch(state.command_results, command_id) do
-      {:ok, reply} ->
-        {:reply, reply, state}
+  def handle_call({:command, %{command_id: command_id} = command, message}, _from, state) do
+    start = System.monotonic_time()
+    metadata = command_telemetry_metadata(state, command)
 
-      :error ->
-        {reply, next_state} = execute_public_command(message, state)
-        {:reply, reply, put_command_result(next_state, command_id, reply)}
+    Telemetry.execute(state.telemetry, :command_start, %{system_time: System.system_time()}, metadata)
+
+    try do
+      {reply, next_state, replayed?} =
+        case Map.fetch(state.command_results, command_id) do
+          {:ok, reply} ->
+            {reply, state, true}
+
+          :error ->
+            {reply, next_state} = execute_public_command(message, state)
+            {reply, put_command_result(next_state, command_id, reply), false}
+        end
+
+      Telemetry.execute(
+        state.telemetry,
+        :command_stop,
+        %{duration: System.monotonic_time() - start, count: command_result_count(reply)},
+        command_stop_metadata(metadata, reply, replayed?)
+      )
+
+      {:reply, reply, next_state}
+    catch
+      kind, reason ->
+        Telemetry.execute(
+          state.telemetry,
+          :command_exception,
+          %{duration: System.monotonic_time() - start},
+          command_exception_metadata(metadata, kind, reason)
+        )
+
+        :erlang.raise(kind, reason, __STACKTRACE__)
     end
   end
 
@@ -698,6 +735,40 @@ defmodule IntentLedger.Server do
 
   defp put_command_result(state, command_id, reply) do
     %{state | command_results: Map.put(state.command_results, command_id, reply)}
+  end
+
+  defp command_telemetry_metadata(state, command) do
+    command_metadata =
+      command
+      |> Map.take(@command_metadata_fields)
+      |> reject_nil_metadata()
+
+    Map.merge(%{ledger: state.name, operation: command.operation}, command_metadata)
+  end
+
+  defp command_stop_metadata(metadata, reply, replayed?) do
+    metadata
+    |> Map.merge(%{status: command_status(reply), replayed?: replayed?})
+    |> reject_nil_metadata()
+  end
+
+  defp command_exception_metadata(metadata, kind, reason) do
+    metadata
+    |> Map.merge(%{exception_kind: kind, error_class: Telemetry.error_class(reason)})
+    |> reject_nil_metadata()
+  end
+
+  defp command_status({:ok, _result}), do: :ok
+  defp command_status({:error, _reason}), do: :error
+  defp command_status(:empty), do: :empty
+  defp command_status(_reply), do: :unknown
+
+  defp command_result_count({:ok, result}) when is_list(result), do: length(result)
+  defp command_result_count({:ok, _result}), do: 1
+  defp command_result_count(_reply), do: 0
+
+  defp reject_nil_metadata(metadata) do
+    Map.reject(metadata, fn {_key, value} -> is_nil(value) end)
   end
 
   defp notify(state, signals, operation, measurements, metadata) do

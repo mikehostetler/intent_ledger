@@ -16,6 +16,8 @@ defmodule IntentLedger.Telemetry do
   milliseconds.
   """
 
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict}
+
   @default_prefix [:intent_ledger]
 
   @type event ::
@@ -113,7 +115,7 @@ defmodule IntentLedger.Telemetry do
       name: [:command, :stop],
       measurements: [:duration, :count],
       required_metadata: [:ledger, :operation, :status],
-      optional_metadata: [:command_id, :idempotency_key | @lineage_metadata_fields]
+      optional_metadata: [:command_id, :idempotency_key, :replayed? | @lineage_metadata_fields]
     },
     %{
       event: :command_exception,
@@ -314,5 +316,124 @@ defmodule IntentLedger.Telemetry do
     :telemetry.execute(prefix(opts) ++ [operation | event], measurements, metadata)
   end
 
+  @doc false
+  @spec instrument_store_commit(keyword(), atom(), module(), CommitRequest.t(), (-> term())) :: term()
+  def instrument_store_commit(opts, ledger, store_module, %CommitRequest{} = request, fun) when is_function(fun, 0) do
+    start = System.monotonic_time()
+    metadata = store_commit_metadata(ledger, store_module, request)
+
+    execute(opts, :store_commit_start, %{system_time: System.system_time()}, metadata)
+
+    try do
+      result = fun.()
+
+      execute(
+        opts,
+        :store_commit_stop,
+        store_commit_measurements(start, result),
+        metadata |> Map.merge(store_commit_result_metadata(result)) |> reject_nil_metadata()
+      )
+
+      result
+    catch
+      kind, reason ->
+        execute(
+          opts,
+          :store_commit_exception,
+          %{duration: System.monotonic_time() - start},
+          metadata
+          |> Map.merge(%{exception_kind: kind, error_class: error_class(reason)})
+          |> reject_nil_metadata()
+        )
+
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    end
+  end
+
+  @doc false
+  @spec error_class(term()) :: atom()
+  def error_class(%module{}), do: module
+  def error_class(reason) when is_atom(reason), do: reason
+
+  def error_class(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
+    case elem(reason, 0) do
+      class when is_atom(class) -> class
+      _other -> :unknown
+    end
+  end
+
+  def error_class(_reason), do: :unknown
+
   defp prefix(opts), do: Keyword.get(opts, :telemetry_prefix, @default_prefix)
+
+  defp store_commit_metadata(ledger, store_module, %CommitRequest{} = request) do
+    %{
+      ledger: ledger,
+      store: store_module,
+      operation: request.operation,
+      command_id: request.command_id,
+      stream: first_stream(request)
+    }
+    |> reject_nil_metadata()
+  end
+
+  defp first_stream(%CommitRequest{} = request) do
+    request.writes
+    |> Enum.find_value(fn
+      %{stream: stream} -> stream
+      _write -> nil
+    end)
+  end
+
+  defp store_commit_measurements(start, {:ok, %Commit{} = commit}) do
+    %{
+      duration: System.monotonic_time() - start,
+      writes: length(commit.writes),
+      signals: length(commit.signals),
+      outbox_entries: count_outbox_entries(commit.writes)
+    }
+  end
+
+  defp store_commit_measurements(start, _result) do
+    %{
+      duration: System.monotonic_time() - start,
+      writes: 0,
+      signals: 0,
+      outbox_entries: 0
+    }
+  end
+
+  defp store_commit_result_metadata({:ok, %Commit{} = commit}) do
+    %{
+      status: :ok,
+      replayed?: commit.replayed
+    }
+  end
+
+  defp store_commit_result_metadata({:error, %Conflict{} = conflict}) do
+    %{
+      status: :error,
+      conflict: conflict.type
+    }
+  end
+
+  defp store_commit_result_metadata({:error, reason}) do
+    %{
+      status: :error,
+      error_class: error_class(reason)
+    }
+  end
+
+  defp store_commit_result_metadata(_result), do: %{status: :unknown}
+
+  defp count_outbox_entries(writes) do
+    Enum.count(writes, fn
+      %{type: :put_outbox} -> true
+      _write -> false
+    end)
+  end
+
+  defp reject_nil_metadata(metadata) do
+    Map.reject(metadata, fn {_key, value} -> is_nil(value) end)
+  end
 end
