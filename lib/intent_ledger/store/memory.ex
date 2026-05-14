@@ -927,6 +927,7 @@ defmodule IntentLedger.Store.Memory do
       Enum.all?(
         request.writes,
         &(&1.type in [
+            :put_intent,
             :append_signal,
             :put_idempotency,
             :put_state,
@@ -1018,6 +1019,10 @@ defmodule IntentLedger.Store.Memory do
         entry = %{signature: command_signature(request), result: result}
 
         {%{acc_state | commands: Map.put(acc_state.commands, command_id, entry)}, result, signals}
+
+      %{type: :put_intent, key: key, value: value}, {acc_state, result, signals} ->
+        intent_id = key || value.id
+        {%{acc_state | intents: Map.put(acc_state.intents, intent_id, value)}, result, signals}
 
       %{type: :put_state, key: key, value: value}, {acc_state, result, signals} ->
         {%{acc_state | states: Map.put(acc_state.states, key, value)}, result, signals}

@@ -261,6 +261,82 @@ defmodule IntentLedger.StoreCase.SemanticTests do
           assert Enum.map(expired_claims, & &1.intent_id) == ["int_expired"]
         end
 
+        test "reads lineage counts used by recursive guardrails", context do
+          now = ~U[2026-01-01 00:00:00Z]
+
+          {:ok, root} =
+            IntentLedger.Intent.new(%{
+              id: "int_lineage_root",
+              key: "lineage:root",
+              kind: "job.run"
+            })
+
+          {:ok, child_open} =
+            IntentLedger.Intent.new(%{
+              id: "int_lineage_child_open",
+              key: "lineage:child-open",
+              kind: "job.run",
+              root_intent_id: root.id,
+              parent_intent_id: root.id,
+              depth: 1
+            })
+
+          {:ok, child_completed} =
+            IntentLedger.Intent.new(%{
+              id: "int_lineage_child_completed",
+              key: "lineage:child-completed",
+              kind: "job.run",
+              root_intent_id: root.id,
+              parent_intent_id: root.id,
+              depth: 1
+            })
+
+          {:ok, grandchild_claimed} =
+            IntentLedger.Intent.new(%{
+              id: "int_lineage_grandchild_claimed",
+              key: "lineage:grandchild-claimed",
+              kind: "job.run",
+              root_intent_id: root.id,
+              parent_intent_id: child_open.id,
+              depth: 2
+            })
+
+          root_state = IntentLedger.IntentState.new(root, now)
+          child_open_state = IntentLedger.IntentState.new(child_open, now)
+          child_completed_state = %{IntentLedger.IntentState.new(child_completed, now) | status: :completed}
+          grandchild_claimed_state = %{IntentLedger.IntentState.new(grandchild_claimed, now) | status: :claimed}
+
+          seed =
+            CommitRequest.new(
+              command_id: "cmd_lineage_guardrail_counts",
+              operation: :seed,
+              writes: [
+                Write.new(:put_intent, key: root.id, value: root),
+                Write.new(:put_state, key: root.id, value: root_state),
+                Write.new(:put_intent, key: child_open.id, value: child_open),
+                Write.new(:put_state, key: child_open.id, value: child_open_state),
+                Write.new(:put_intent, key: child_completed.id, value: child_completed),
+                Write.new(:put_state, key: child_completed.id, value: child_completed_state),
+                Write.new(:put_intent, key: grandchild_claimed.id, value: grandchild_claimed),
+                Write.new(:put_state, key: grandchild_claimed.id, value: grandchild_claimed_state)
+              ]
+            )
+
+          assert {:ok, %Commit{}} = commit(context, seed)
+
+          assert {:ok, counts} =
+                   read(context, {:lineage_counts, parent_intent_id: root.id, root_intent_id: root.id})
+
+          assert counts.children == 2
+          assert counts.open_descendants == 2
+
+          assert {:ok, child_counts} =
+                   read(context, {:lineage_counts, parent_intent_id: child_open.id, root_intent_id: child_open.id})
+
+          assert child_counts.children == 1
+          assert child_counts.open_descendants == 0
+        end
+
         test "reads acks and replays durable outbox entries", context do
           now = ~U[2026-01-01 00:00:00Z]
           signal = %{id: "sig_outbox", type: "intent_ledger.intent.completed"}

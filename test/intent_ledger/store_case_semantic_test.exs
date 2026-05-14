@@ -14,6 +14,8 @@ defmodule IntentLedger.StoreCaseSemanticHarnessStore do
                streams: %{},
                idempotency: %{},
                intents: %{},
+               lineage_intents: %{},
+               lineage_states: %{},
                claims: %{},
                shard_leases: %{},
                outbox: %{},
@@ -54,6 +56,19 @@ defmodule IntentLedger.StoreCaseSemanticHarnessStore do
         {:error, conflict} ->
           {{:error, conflict}, state}
       end
+    end)
+  end
+
+  def read(ref, _ledger, {:lineage_counts, attrs}, _opts) do
+    Agent.get(ref, fn state ->
+      counts =
+        IntentLedger.Store.Lineage.counts(
+          Map.values(state.lineage_intents),
+          Map.values(state.lineage_states),
+          attrs
+        )
+
+      {:ok, counts}
     end)
   end
 
@@ -184,8 +199,17 @@ defmodule IntentLedger.StoreCaseSemanticHarnessStore do
     {put_in(state, [:idempotency, command_id], entry), value}
   end
 
+  defp apply_write(state, %{type: :put_intent, key: key, value: value}, _request) do
+    {put_in(state, [:lineage_intents, key], value), nil}
+  end
+
   defp apply_write(state, %{type: :put_state, key: key, value: value}, _request) do
-    {put_in(state, [:intents, key], value), nil}
+    next_state =
+      state
+      |> put_in([:intents, key], value)
+      |> put_in([:lineage_states, key], value)
+
+    {next_state, nil}
   end
 
   defp apply_write(state, %{type: :put_claim, key: key, value: value}, _request) do
