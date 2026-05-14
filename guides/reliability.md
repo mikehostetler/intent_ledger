@@ -20,7 +20,7 @@ Non-goals:
 - exactly-once external side effects;
 - hiding the fact that retries can run the same Intent more than once;
 - generic workflow orchestration;
-- Postgres-backed queue or Intent persistence.
+- non-Bedrock queue or Intent persistence.
 
 ## Handler Results
 
@@ -43,11 +43,11 @@ processing, retry-scheduled, or parked as ambiguous.
 
 ## Current Caveat
 
-The alpha runtime still needs a transaction hook in `bedrock_job_queue`, or a
-thin direct executor, so handler result handling can update queue state and
-Intent lifecycle state in one Bedrock transaction. Until then, enqueue has the
-strongest atomicity guarantee, while completion/retry lifecycle state is updated
-by the bridge worker before the queue manager finalizes the queue item.
+Handler result handling uses the `bedrock_job_queue` action hook so queue state
+and Intent lifecycle state commit in one Bedrock transaction for complete,
+retry, max-attempt failure, discard, and snooze paths.
 
 Application handlers should remain idempotent and should record external
 side-effect evidence in the application domain whenever side effects matter.
+Worker crash and expired-lease recovery scenarios are still being hardened with
+`bedrock_job_queue` and are not part of the alpha contract yet.

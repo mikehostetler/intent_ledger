@@ -84,8 +84,7 @@ defmodule IntentLedger.MixProject do
       {:zoi, "~> 0.17.1"},
 
       # Bedrock runtime
-      {:bedrock, path: "../bedrock", override: true},
-      {:bedrock_job_queue, path: "../job_queue"},
+      bedrock_deps(),
 
       # Dev/Test
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
@@ -96,7 +95,24 @@ defmodule IntentLedger.MixProject do
       {:git_hooks, "~> 0.8", only: [:dev, :test], runtime: false},
       {:git_ops, "~> 2.9", only: :dev, runtime: false}
     ]
+    |> List.flatten()
   end
+
+  defp bedrock_deps do
+    if hex_build?() do
+      [
+        {:bedrock, "~> 0.5"},
+        {:bedrock_job_queue, "~> 0.1"}
+      ]
+    else
+      [
+        {:bedrock, path: "../bedrock", override: true},
+        {:bedrock_job_queue, path: "../job_queue"}
+      ]
+    end
+  end
+
+  defp hex_build?, do: "hex.build" in System.argv()
 
   defp aliases do
     [

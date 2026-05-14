@@ -8,25 +8,23 @@ Initial public release candidate for the `intent_ledger` package.
 
 ### Added
 
-- Supervised named ledgers for durable intent submission, claim, completion,
-  failure, retry, cancellation, ambiguity, recovery, and operational
-  inspection workflows.
-- Public lifecycle structs with Zoi schemas, typespecs, and JSON encoders for
-  intents, intent state, claims, queue shard state, records, inspection
-  requests, and Store V1 commit primitives.
-- Jido.Signal command and lifecycle contracts for submit, claim, completion,
-  retry, cancellation, ambiguity, and recovery events.
-- Store V1 behaviour plus semantic commit, listing, outbox, precondition,
-  conflict, and write request structs.
-- In-memory reference store for tests, examples, and local development.
-- Optional Bedrock adapter with value/keyspace helpers and clustered
-  durability documentation.
-- Optional Ecto/Postgres adapter with schema, query, and migration helpers for
-  local durable storage.
-- At-least-once reliability semantics covering idempotent commands, claim
-  fencing, lease expiry, retry scheduling, outbox delivery, and ambiguity
-  handling.
-- Compile-tested examples for memory workflows, retry lifecycle handling,
-  signal audit handlers, and status projections.
-- Operations, reliability, clustering, Memory, Bedrock, and Ecto documentation
-  included in the Hex package.
+- Bedrock-first Intent runtime built around configured `use IntentLedger`
+  modules.
+- Topic-based Intents with `IntentLedger.Handler` callbacks, Zoi payload
+  validation, and Zoi result validation.
+- `bedrock_job_queue` integration for queue visibility, leasing, retry,
+  discard, snooze, and completion mechanics.
+- Atomic enqueue of Intent state, lifecycle signal, outbox entry, and queue
+  pointer.
+- Atomic queue action hook for committing queue completion/retry/discard/snooze
+  together with Intent lifecycle transitions.
+- Full Erlang-term payload storage in Bedrock while queue items carry only an
+  Intent pointer.
+- Idempotent enqueue keys and lifecycle commands for cancel, requeue, and
+  ambiguous reconciliation.
+- Durable lifecycle replay for `:ledger`, `{:intent, intent_id}`, and `:outbox`.
+- Projection cursor read/write helpers for application-owned projections.
+- View-based operational inspection for queues, Intents, retries, ambiguous
+  Intents, outbox entries, and projection cursors.
+- Splode-backed public error normalization and telemetry stop events.
+- Opt-in Bedrock and simulated multi-node integration scenarios.

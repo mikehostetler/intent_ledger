@@ -387,6 +387,8 @@ Landed:
 - Opt-in `@tag :multi_node` integration scenario covers simulated node A
   enqueue/idempotency race, node B queue lease execution, and node C
   inspection/replay after storage process restart.
+- Release gates pass for `mix quality`, `mix docs`, and `mix hex.build`; docs
+  and package metadata reflect the alpha Bedrock-first runtime.
 - Splode-backed public error normalization and telemetry stop events exist.
 - Fast unit tests cover handler result, validation, telemetry, replay, and
   projection cursor edge cases.
@@ -405,8 +407,7 @@ Missing:
 - Projection lag inspection.
 - Worker crash and lease-expiry recovery scenarios once `bedrock_job_queue`
   exposes a stable expired-lease recovery path.
-- Final `mix docs`, `mix hex.build`, dependency review, and Hex release timing
-  decision.
+- Hex publish timing decision after Bedrock dependency availability is settled.
 
 ## Release Gates
 

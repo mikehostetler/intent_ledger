@@ -26,4 +26,5 @@ separate actions requiring additional permission.
 - Public modules live under `IntentLedger`.
 - Core structs should expose Zoi schemas.
 - External/runtime failures should be normalized through `IntentLedger.Error`.
-- Store adapters must implement `IntentLedger.Store`.
+- Runtime persistence is Bedrock-first through `IntentLedger.BedrockStore` and
+  `bedrock_job_queue`.

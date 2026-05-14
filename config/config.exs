@@ -1,7 +1,7 @@
 import Config
 
 config :git_hooks,
-  auto_install: Mix.env() == :dev,
+  auto_install: false,
   verbose: true,
   hooks: [
     pre_commit: [
