@@ -11,6 +11,8 @@ Current guarantees:
 - enqueue is durable and atomic across Intent state, lifecycle signals, outbox,
   and queue item insert;
 - business keys are idempotent at the Intent boundary;
+- signal-native enqueue commands are idempotent by signal ID when no explicit
+  key is supplied;
 - handler payloads are validated before execution when a Zoi schema is provided;
 - successful handler results are validated when a result schema is provided;
 - lifecycle transitions are replayable from ledger and per-intent streams.
@@ -49,6 +51,10 @@ processing, retry-scheduled, or parked as ambiguous.
 Handler result handling uses the `bedrock_job_queue` action hook so queue state
 and Intent lifecycle state commit in one Bedrock transaction for complete,
 retry, max-attempt failure, discard, and snooze paths.
+
+Duplicate or stale queue lifecycle callbacks are treated as boundary conditions:
+terminal Intents are left unchanged, duplicate terminal hooks do not append
+duplicate lifecycle facts, and failed queue actions do not advance Intent state.
 
 Cancellation and ambiguity updates remove an unleased queue item in the same
 transaction when the item is still pending. If the item is already leased or

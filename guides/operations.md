@@ -4,6 +4,8 @@ The alpha operational surface is intentionally small.
 
 ```elixir
 MyApp.Intents.fetch(intent_id)
+MyApp.Intents.submit(signal)
+MyApp.Intents.command_signal(:enqueue, topic: "invoice.send", payload: %{id: 1})
 MyApp.Intents.history(intent_id)
 MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
 MyApp.Intents.replay({:intent, intent_id}, cursor: 0, limit: 100)
@@ -24,6 +26,24 @@ MyApp.Intents.stats()
 MyApp.Intents.stats(queue: "default")
 MyApp.Intents.health()
 ```
+
+## Signal-Native Ingress
+
+Intent Ledger stays transport-neutral. It does not expose `IntentLedger.Plug`
+and does not depend on Plug or Phoenix. Web and bus integrations should decode
+their inbound envelope into `%Jido.Signal{}` and submit it:
+
+```elixir
+with {:ok, signal} <- Jido.Signal.new(params),
+     {:ok, intent} <- MyApp.Intents.submit(signal) do
+  {:ok, intent}
+end
+```
+
+The direct APIs and `submit/2` share the same command path. Signal-native
+enqueue uses the signal ID as the default idempotency key when no key is present
+in the signal data, so at-least-once delivery can safely redeliver the same
+command envelope.
 
 ## Queue Stats
 

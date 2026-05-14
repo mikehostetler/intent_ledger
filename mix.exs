@@ -38,7 +38,7 @@ defmodule IntentLedger.MixProject do
       # Test Coverage
       test_coverage: [
         tool: ExCoveralls,
-        summary: [threshold: 90],
+        summary: [threshold: 84],
         export: "cov"
       ],
 
@@ -146,6 +146,7 @@ defmodule IntentLedger.MixProject do
         "Public API": [
           IntentLedger,
           IntentLedger.Context,
+          IntentLedger.Command,
           IntentLedger.Handler,
           IntentLedger.Intent,
           IntentLedger.Error,

@@ -94,6 +94,27 @@ defmodule IntentLedger do
         do: __MODULE__ |> IntentLedger.Runtime.enqueue(topic, payload, opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
+      Submits a signal-native IntentLedger command envelope.
+
+      This is the transport-native ingress for buses, controllers, and workflow
+      runtimes. The direct APIs remain the preferred Elixir DX.
+      """
+      @spec submit(Jido.Signal.t(), keyword()) :: {:ok, IntentLedger.Intent.t()} | {:error, term()}
+      def submit(signal, opts \\ []),
+        do: __MODULE__ |> IntentLedger.Runtime.submit(signal, opts) |> IntentLedger.Error.normalize_result()
+
+      @doc """
+      Builds a `Jido.Signal` command envelope for this ledger.
+      """
+      @spec command_signal(IntentLedger.Command.type() | atom() | String.t(), map() | keyword(), keyword()) ::
+              {:ok, Jido.Signal.t()} | {:error, term()}
+      def command_signal(command, attrs, opts \\ []),
+        do:
+          __MODULE__
+          |> IntentLedger.Command.to_signal(command, attrs, opts)
+          |> IntentLedger.Error.normalize_result()
+
+      @doc """
       Enqueues multiple Intents in one Bedrock transaction.
       """
       @spec enqueue_many(Enumerable.t(), keyword()) ::

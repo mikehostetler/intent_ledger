@@ -44,6 +44,7 @@ defmodule IntentLedger.Telemetry do
   defp reason_kind(reason) when is_atom(reason), do: reason
   defp reason_kind({kind, _details}) when is_atom(kind), do: kind
   defp reason_kind({kind, _details, _extra}) when is_atom(kind), do: kind
+  defp reason_kind(reason) when is_tuple(reason) and is_atom(elem(reason, 0)), do: elem(reason, 0)
   defp reason_kind(%{__exception__: true, __struct__: module}), do: module
   defp reason_kind(_reason), do: :unknown
 end

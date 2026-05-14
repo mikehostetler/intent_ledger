@@ -29,6 +29,7 @@ The package owns:
 - the public configured `MyApp.Intents` API;
 - `IntentLedger.Handler` and handler validation;
 - lifecycle signals;
+- signal-native command envelopes at the transport boundary;
 - command/idempotency records;
 - durable outbox;
 - replay;
@@ -56,6 +57,9 @@ The package does not own:
 - Build `IntentLedger.Handler` directly on Zoi.
 - Keep dependency surface thin.
 - Use `jido_signal` only for signal envelopes.
+- Keep direct Elixir APIs as the primary DX while supporting `submit/2` for
+  signal-native ingress.
+- Do not expose `IntentLedger.Plug` or depend on Plug/Phoenix in this package.
 - Use `bedrock_job_queue` for queue visibility, leasing, scheduling, retry,
   backoff, and concurrent execution.
 - Use Bedrock as the durable persistence substrate.
@@ -127,6 +131,8 @@ The intended public functions are:
 ```elixir
 MyApp.Intents.enqueue(topic, payload, opts)
 MyApp.Intents.enqueue_many(entries, opts)
+MyApp.Intents.submit(signal, opts)
+MyApp.Intents.command_signal(command, attrs, opts)
 
 MyApp.Intents.fetch(intent_id)
 MyApp.Intents.history(intent_id, opts)
@@ -145,6 +151,16 @@ MyApp.Intents.inspect(view, opts)
 MyApp.Intents.stats(opts)
 MyApp.Intents.health(opts)
 ```
+
+Signal-native command types:
+
+- `intent.command.enqueue`;
+- `intent.command.cancel`;
+- `intent.command.requeue`;
+- `intent.command.mark_ambiguous`.
+
+Signals are transport envelopes. They normalize to internal
+`IntentLedger.Command` structs before reaching the runtime state machine.
 
 ## Handler Contract
 
@@ -440,6 +456,7 @@ Unit gates:
 
 - `Intent` schema tests;
 - `IntentLedger.Handler` schema and callback tests;
+- `IntentLedger.Command` direct and signal-native command tests;
 - payload validation tests;
 - result validation tests;
 - lifecycle result mapping tests;
@@ -449,6 +466,8 @@ Unit gates:
 - projection catch-up tests;
 - outbox tests;
 - public API examples compile.
+- fast-suite coverage must stay at or above the ratcheted ExCoveralls
+  `minimum_coverage` in `coveralls.json`;
 
 Integration gates:
 

@@ -148,6 +148,8 @@ The intended API is intentionally small:
 ```elixir
 MyApp.Intents.enqueue(topic, payload, opts)
 MyApp.Intents.enqueue_many(entries, opts)
+MyApp.Intents.submit(signal, opts)
+MyApp.Intents.command_signal(command, attrs, opts)
 
 MyApp.Intents.fetch(intent_id)
 MyApp.Intents.history(intent_id, opts)
@@ -168,6 +170,35 @@ MyApp.Intents.inspect(view, opts)
 MyApp.Intents.stats(opts)
 MyApp.Intents.health(opts)
 ```
+
+## Signal-Native Commands
+
+Signals are transport envelopes, not the internal domain model. The direct API
+is the preferred Elixir DX, while `submit/2` gives buses, controllers, and
+workflow runtimes a signal-native ingress without adding Plug or Phoenix as
+dependencies.
+
+```elixir
+{:ok, signal} =
+  MyApp.Intents.command_signal(:enqueue,
+    topic: "invoice.send",
+    payload: %{invoice_id: 123}
+  )
+
+{:ok, intent} = MyApp.Intents.submit(signal)
+```
+
+Supported command signal types are:
+
+- `intent.command.enqueue`;
+- `intent.command.cancel`;
+- `intent.command.requeue`;
+- `intent.command.mark_ambiguous`.
+
+Signal-native enqueue defaults the idempotency key to `"signal:#{signal.id}"`
+when no key is supplied, which makes command redelivery safe. A Plug or Phoenix
+controller should decode the request into a `%Jido.Signal{}` and call
+`MyApp.Intents.submit/2`; Intent Ledger does not ship a web adapter.
 
 Handler modules receive the Intent payload and an `IntentLedger.Context`:
 

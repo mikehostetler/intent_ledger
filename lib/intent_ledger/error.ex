@@ -130,6 +130,22 @@ defmodule IntentLedger.Error do
   def from_reason({:unknown_queue, queue}), do: invalid("Unknown Intent queue", field: :queue, value: queue)
   def from_reason({:invalid_queue, queue}), do: invalid("Invalid Intent queue", field: :queue, value: queue)
   def from_reason({:invalid_entry, entry}), do: invalid("Invalid Intent enqueue entry", value: entry)
+  def from_reason({:invalid_command, errors}), do: invalid("Invalid Intent command", errors: errors)
+
+  def from_reason({:unsupported_command, command}),
+    do: invalid("Unsupported Intent command", field: :command, value: command)
+
+  def from_reason({:unsupported_command_signal, type}),
+    do: invalid("Unsupported Intent command signal", field: :type, value: type)
+
+  def from_reason({:invalid_command_signal, signal}),
+    do: invalid("Invalid Intent command signal", field: :signal, value: signal)
+
+  def from_reason({:invalid_command_signal_data, data}),
+    do: invalid("Invalid Intent command signal data", field: :data, value: data)
+
+  def from_reason({:missing_command_field, field}),
+    do: invalid("Intent command signal is missing a required field", field: field)
 
   def from_reason({:unsupported_inspection_view, view}),
     do: invalid("Unsupported inspection view", field: :view, value: view)
