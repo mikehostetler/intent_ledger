@@ -22,6 +22,39 @@ defmodule IntentLedger.RuntimeTest do
     def handle(_payload, _ctx), do: {:error, :boom}
   end
 
+  defmodule EdgeIntent do
+    use IntentLedger.Handler,
+      topic: "intent.edge",
+      payload_schema: Zoi.map(),
+      result_schema: Zoi.map()
+
+    @impl true
+    def handle(%{mode: mode, test_pid: test_pid}, ctx) do
+      send(test_pid, {:edge_handled, mode, ctx.intent.id, ctx.attempt})
+
+      case mode do
+        :ok -> :ok
+        :result -> {:ok, %{handled: true}}
+        :error -> {:error, :boom}
+        :discard -> {:discard, :not_useful}
+        :snooze -> {:snooze, 5_000}
+        :invalid_result -> {:ok, :not_a_map}
+        :invalid_return -> {:unexpected, :shape}
+        :exception -> raise RuntimeError, "handler exploded"
+        :throw -> throw(:handler_threw)
+      end
+    end
+  end
+
+  defmodule EdgeIntents do
+    use IntentLedger,
+      otp_app: :intent_ledger,
+      repo: IntentLedger.FakeRepo,
+      intents: %{
+        "intent.edge" => [handler: EdgeIntent, queue: "default"]
+      }
+  end
+
   defmodule TestIntents do
     use IntentLedger,
       otp_app: :intent_ledger,
@@ -185,6 +218,161 @@ defmodule IntentLedger.RuntimeTest do
     refute Map.has_key?(metadata, :payload)
   end
 
+  test "handler :ok return completes without a result" do
+    attach_telemetry(:handler)
+
+    assert {:ok, intent} = enqueue_edge(:ok)
+    assert :ok = perform_edge(intent, attempt: 1)
+
+    assert_receive {:edge_handled, :ok, intent_id, 1}
+    assert intent_id == intent.id
+
+    assert {:ok, completed} = EdgeIntents.fetch(intent.id)
+    assert completed.status == :completed
+    assert completed.result == nil
+    assert_history(EdgeIntents, intent, ["intent.enqueued", "intent.started", "intent.completed"])
+    assert_handler_telemetry(:ok, intent)
+  end
+
+  test "handler {:ok, result} validates result and completes" do
+    assert {:ok, intent} = enqueue_edge(:result)
+
+    assert {:ok, %{handled: true}} = perform_edge(intent, attempt: 1)
+
+    assert_receive {:edge_handled, :result, intent_id, 1}
+    assert intent_id == intent.id
+
+    assert {:ok, completed} = EdgeIntents.fetch(intent.id)
+    assert completed.status == :completed
+    assert completed.result == %{handled: true}
+    assert_history(EdgeIntents, intent, ["intent.enqueued", "intent.started", "intent.completed"])
+  end
+
+  test "handler {:error, reason} retries before max attempts and fails at max attempts" do
+    attach_telemetry(:handler)
+
+    assert {:ok, intent} = enqueue_edge(:error, max_attempts: 2)
+
+    assert {:error, :boom} = perform_edge(intent, attempt: 1)
+    assert {:ok, retrying} = EdgeIntents.fetch(intent.id)
+    assert retrying.status == :retry_scheduled
+    assert retrying.error == :boom
+    assert_handler_telemetry(:error, intent, error_kind: :boom, attempt: 1)
+
+    assert {:error, :boom} = perform_edge(intent, attempt: 2)
+    assert {:ok, failed} = EdgeIntents.fetch(intent.id)
+    assert failed.status == :failed
+    assert failed.error == :boom
+    assert_handler_telemetry(:error, intent, error_kind: :boom, attempt: 2)
+
+    assert_history(EdgeIntents, intent, [
+      "intent.enqueued",
+      "intent.started",
+      "intent.retry_scheduled",
+      "intent.started",
+      "intent.failed"
+    ])
+  end
+
+  test "handler {:discard, reason} discards the Intent" do
+    attach_telemetry(:handler)
+
+    assert {:ok, intent} = enqueue_edge(:discard)
+
+    assert {:discard, :not_useful} = perform_edge(intent, attempt: 1)
+    assert_receive {:edge_handled, :discard, intent_id, 1}
+    assert intent_id == intent.id
+
+    assert {:ok, discarded} = EdgeIntents.fetch(intent.id)
+    assert discarded.status == :discarded
+    assert discarded.error == :not_useful
+    assert_history(EdgeIntents, intent, ["intent.enqueued", "intent.started", "intent.discarded"])
+    assert_handler_telemetry(:discard, intent, error_kind: :not_useful)
+  end
+
+  test "handler {:snooze, delay_ms} schedules retry lifecycle" do
+    attach_telemetry(:handler)
+
+    assert {:ok, intent} = enqueue_edge(:snooze)
+
+    assert {:snooze, 5_000} = perform_edge(intent, attempt: 1)
+    assert_receive {:edge_handled, :snooze, intent_id, 1}
+    assert intent_id == intent.id
+
+    assert {:ok, snoozed} = EdgeIntents.fetch(intent.id)
+    assert snoozed.status == :retry_scheduled
+    assert snoozed.error == {:snooze, 5_000}
+    assert_history(EdgeIntents, intent, ["intent.enqueued", "intent.started", "intent.retry_scheduled"])
+    assert_handler_telemetry(:snooze, intent)
+  end
+
+  test "invalid handler returns are discarded" do
+    attach_telemetry(:handler)
+
+    assert {:ok, intent} = enqueue_edge(:invalid_return)
+
+    assert {:discard, {:invalid_handler_return, {:unexpected, :shape}}} = perform_edge(intent, attempt: 1)
+    assert_receive {:edge_handled, :invalid_return, intent_id, 1}
+    assert intent_id == intent.id
+
+    assert {:ok, discarded} = EdgeIntents.fetch(intent.id)
+    assert discarded.status == :discarded
+    assert discarded.error == {:invalid_handler_return, {:unexpected, :shape}}
+    assert_history(EdgeIntents, intent, ["intent.enqueued", "intent.started", "intent.discarded"])
+    assert_handler_telemetry(:discard, intent, error_kind: :invalid_handler_return)
+  end
+
+  test "payload validation failures discard before handler execution" do
+    attach_telemetry(:handler)
+
+    assert {:ok, intent} = EdgeIntents.enqueue("intent.edge", :not_a_map)
+
+    assert {:discard, {:invalid_payload, _errors}} = perform_edge(intent, attempt: 1)
+
+    refute_receive {:edge_handled, _, _, _}
+    assert {:ok, discarded} = EdgeIntents.fetch(intent.id)
+    assert discarded.status == :discarded
+    assert match?({:invalid_payload, _errors}, discarded.error)
+    assert_history(EdgeIntents, intent, ["intent.enqueued", "intent.started", "intent.discarded"])
+    assert_handler_telemetry(:discard, intent, error_kind: :invalid_payload)
+  end
+
+  test "result validation failures discard after handler execution" do
+    attach_telemetry(:handler)
+
+    assert {:ok, intent} = enqueue_edge(:invalid_result)
+
+    assert {:discard, {:invalid_result, _errors}} = perform_edge(intent, attempt: 1)
+    assert_receive {:edge_handled, :invalid_result, intent_id, 1}
+    assert intent_id == intent.id
+
+    assert {:ok, discarded} = EdgeIntents.fetch(intent.id)
+    assert discarded.status == :discarded
+    assert match?({:invalid_result, _errors}, discarded.error)
+    assert_history(EdgeIntents, intent, ["intent.enqueued", "intent.started", "intent.discarded"])
+    assert_handler_telemetry(:discard, intent, error_kind: :invalid_result)
+  end
+
+  test "handler exceptions and throws become retryable handler errors" do
+    attach_telemetry(:handler)
+
+    assert {:ok, exception_intent} = enqueue_edge(:exception, max_attempts: 1)
+    assert {:error, {:exception, %RuntimeError{message: "handler exploded"}}} = perform_edge(exception_intent)
+
+    assert {:ok, failed_exception} = EdgeIntents.fetch(exception_intent.id)
+    assert failed_exception.status == :failed
+    assert match?({:exception, %RuntimeError{}}, failed_exception.error)
+    assert_handler_telemetry(:error, exception_intent, error_kind: :exception)
+
+    assert {:ok, throw_intent} = enqueue_edge(:throw, max_attempts: 1)
+    assert {:error, {:throw, :handler_threw}} = perform_edge(throw_intent)
+
+    assert {:ok, failed_throw} = EdgeIntents.fetch(throw_intent.id)
+    assert failed_throw.status == :failed
+    assert failed_throw.error == {:throw, :handler_threw}
+    assert_handler_telemetry(:error, throw_intent, error_kind: :throw)
+  end
+
   test "failed handlers schedule retry until max attempts are exhausted" do
     assert {:ok, intent} = TestIntents.enqueue("invoice.fail", %{}, max_attempts: 2)
 
@@ -298,5 +486,47 @@ defmodule IntentLedger.RuntimeTest do
 
   def handle_telemetry(event, measurements, metadata, test_pid) do
     send(test_pid, {:telemetry, event, measurements, metadata})
+  end
+
+  defp enqueue_edge(mode, opts \\ []) do
+    EdgeIntents.enqueue("intent.edge", %{mode: mode, test_pid: self()}, opts)
+  end
+
+  defp perform_edge(intent, meta \\ []) do
+    EdgeIntent.perform(queue_payload(EdgeIntents, intent.id), %{
+      topic: "intent.edge",
+      queue_id: "default",
+      item_id: intent.id,
+      attempt: Keyword.get(meta, :attempt, 1)
+    })
+  end
+
+  defp queue_payload(ledger, intent_id), do: %{raw: :erlang.term_to_binary(%{ledger: ledger, intent_id: intent_id})}
+
+  defp assert_history(ledger, intent, expected_types) do
+    assert {:ok, signals} = ledger.history(intent.id)
+    assert Enum.map(signals, & &1.type) == expected_types
+  end
+
+  defp assert_handler_telemetry(status, intent, opts \\ []) do
+    expected_attempt = Keyword.get(opts, :attempt, 1)
+
+    assert_receive {:telemetry, [:intent_ledger, :handler, :stop], measurements, metadata}
+    assert is_integer(measurements.duration)
+    assert measurements.count == 1
+    assert metadata.ledger == EdgeIntents
+    assert metadata.handler == EdgeIntent
+    assert metadata.intent_id == intent.id
+    assert metadata.topic == "intent.edge"
+    assert metadata.queue == "default"
+    assert metadata.item_id == intent.id
+    assert metadata.attempt == expected_attempt
+    assert metadata.status == status
+    refute Map.has_key?(metadata, :payload)
+
+    case Keyword.fetch(opts, :error_kind) do
+      {:ok, error_kind} -> assert metadata.error_kind == error_kind
+      :error -> refute Map.has_key?(metadata, :error_kind)
+    end
   end
 end
