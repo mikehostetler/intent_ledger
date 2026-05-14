@@ -73,7 +73,7 @@ defmodule IntentLedger.TelemetryTest do
     assert policy.measurement_units.duration == :native
     assert policy.measurement_units.lag_ms == :millisecond
 
-    for sensitive <- [:payload, :command_payload, :result, :error, :token, :token_hash, :headers] do
+    for sensitive <- [:payload, :command_payload, :result, :error, :token, :token_hash, :api_key, :headers] do
       assert sensitive in policy.sensitive
       refute sensitive in policy.allowed
     end
@@ -108,6 +108,45 @@ defmodule IntentLedger.TelemetryTest do
 
       assert_receive {:telemetry, ^event_name, %{duration: 10, count: 1},
                       %{ledger: MyApp.IntentLedger, operation: :submit, status: :ok}}
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  test "execute sanitizes telemetry metadata by default" do
+    event_name = Telemetry.event_name(:command_stop, telemetry_prefix: [:my_app, :redacted_intent_ledger])
+    handler_id = {__MODULE__, self(), :redacted_command_stop}
+    parent = self()
+
+    :ok = :telemetry.attach(handler_id, event_name, &__MODULE__.handle_event/4, parent)
+
+    try do
+      :ok =
+        Telemetry.execute(
+          [telemetry_prefix: [:my_app, :redacted_intent_ledger]],
+          :command_stop,
+          %{duration: 10, count: 1},
+          %{
+            ledger: MyApp.IntentLedger,
+            operation: :submit,
+            status: :ok,
+            command_id: "cmd_safe",
+            payload: %{customer_id: 123},
+            token: "raw-token",
+            headers: %{"authorization" => "Bearer secret"},
+            custom: "not-on-policy"
+          }
+        )
+
+      assert_receive {:telemetry, ^event_name, %{duration: 10, count: 1}, metadata}
+      assert metadata.ledger == MyApp.IntentLedger
+      assert metadata.operation == :submit
+      assert metadata.status == :ok
+      assert metadata.command_id == "cmd_safe"
+      assert metadata.payload == :redacted
+      assert metadata.token == :redacted
+      assert metadata.headers == :redacted
+      refute Map.has_key?(metadata, :custom)
     after
       :telemetry.detach(handler_id)
     end

@@ -97,10 +97,13 @@ defmodule IntentLedger.Telemetry do
     :secret,
     :password,
     :authorization,
+    :credential,
+    :api_key,
     :headers,
     :private_key,
     :access_key
   ]
+  @redacted :redacted
 
   @definitions [
     %{
@@ -279,6 +282,28 @@ defmodule IntentLedger.Telemetry do
   def sensitive_metadata_fields, do: @sensitive_metadata_fields
 
   @doc """
+  Returns telemetry metadata with unsafe top-level fields removed and sensitive
+  fields redacted.
+  """
+  @spec sanitize_metadata(map()) :: map()
+  def sanitize_metadata(metadata) when is_map(metadata) do
+    Enum.reduce(metadata, %{}, fn {key, value}, acc ->
+      cond do
+        allowed_metadata_field?(key) ->
+          Map.put(acc, key, sanitize_value(value))
+
+        sensitive_metadata_field?(key) ->
+          Map.put(acc, key, @redacted)
+
+        true ->
+          acc
+      end
+    end)
+  end
+
+  def sanitize_metadata(_metadata), do: %{}
+
+  @doc """
   Fetches a telemetry event definition.
   """
   @spec fetch(event() | [atom()]) :: {:ok, definition()} | :error
@@ -307,13 +332,13 @@ defmodule IntentLedger.Telemetry do
   @doc false
   @spec execute(keyword(), event(), map(), map()) :: :ok
   def execute(opts, event, measurements, metadata) when is_atom(event) do
-    :telemetry.execute(event_name(event, opts), measurements, metadata)
+    :telemetry.execute(event_name(event, opts), measurements, sanitize_metadata(metadata))
   end
 
   @doc false
   @spec execute(keyword(), atom(), list(atom()), map(), map()) :: :ok
   def execute(opts, operation, event, measurements, metadata) do
-    :telemetry.execute(prefix(opts) ++ [operation | event], measurements, metadata)
+    :telemetry.execute(prefix(opts) ++ [operation | event], measurements, sanitize_metadata(metadata))
   end
 
   @doc false
@@ -641,4 +666,39 @@ defmodule IntentLedger.Telemetry do
 
   defp normalize_attrs(attrs) when is_list(attrs), do: Map.new(attrs)
   defp normalize_attrs(attrs) when is_map(attrs), do: attrs
+
+  defp allowed_metadata_field?(key), do: field_name(key) in Enum.map(@safe_metadata_fields, &Atom.to_string/1)
+
+  defp sensitive_metadata_field?(key) do
+    name = field_name(key)
+
+    name in Enum.map(@sensitive_metadata_fields, &Atom.to_string/1) or
+      String.contains?(name, ["payload", "secret", "password", "token", "authorization", "credential", "api_key"])
+  end
+
+  defp field_name(key) when is_atom(key), do: key |> Atom.to_string() |> String.downcase()
+  defp field_name(key) when is_binary(key), do: String.downcase(key)
+  defp field_name(key), do: key |> inspect() |> String.downcase()
+
+  defp sanitize_value(%DateTime{} = value), do: value
+  defp sanitize_value(value) when is_atom(value) or is_binary(value) or is_number(value) or is_boolean(value), do: value
+  defp sanitize_value(nil), do: nil
+  defp sanitize_value(value) when is_list(value), do: Enum.map(value, &sanitize_nested_value/1)
+  defp sanitize_value(value) when is_map(value), do: sanitize_nested_map(value)
+  defp sanitize_value(_value), do: @redacted
+
+  defp sanitize_nested_value(%DateTime{} = value), do: value
+  defp sanitize_nested_value(value) when is_map(value), do: sanitize_nested_map(value)
+  defp sanitize_nested_value(value) when is_list(value), do: Enum.map(value, &sanitize_nested_value/1)
+  defp sanitize_nested_value(value), do: sanitize_value(value)
+
+  defp sanitize_nested_map(value) do
+    Map.new(value, fn {key, nested_value} ->
+      if sensitive_metadata_field?(key) do
+        {key, @redacted}
+      else
+        {key, sanitize_nested_value(nested_value)}
+      end
+    end)
+  end
 end
