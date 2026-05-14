@@ -157,6 +157,54 @@ The current command signal types are:
 recorded result for the running ledger instance and does not append duplicate
 lifecycle signals. Omit it when replay is not required.
 
+## Recursive Intent Patterns
+
+Intent lineage is durable context, not a workflow runtime. `root_intent_id`,
+`parent_intent_id`, `depth`, `causation_id`, `correlation_id`, and `actor`
+make related work observable and enforceable across stores and lifecycle
+signals. They do not make child intents run synchronously, join back to a
+parent, inherit cancellation automatically, or become an in-memory dependency
+graph.
+
+Use child intents as durable handoffs from already claimed work. A worker that
+needs follow-on work should submit the child with explicit lineage, stable
+idempotency, and a replayable command ID:
+
+```elixir
+{:ok, child} =
+  IntentLedger.submit(
+    MyApp.IntentLedger,
+    %{
+      key: "invoice:123:receipt",
+      kind: "receipt.email",
+      payload: %{invoice_id: 123},
+      idempotency_key: "invoice:123:receipt",
+      root_intent_id: claimed.intent.root_intent_id || claimed.intent.id,
+      parent_intent_id: claimed.intent.id,
+      depth: claimed.intent.depth + 1
+    },
+    command_id: "cmd_invoice_123_receipt",
+    causation_id: claimed.intent.id,
+    correlation_id: claimed.intent.correlation_id,
+    actor: "worker-1"
+  )
+```
+
+Keep recursive workflows bounded by configuring `:max_depth`,
+`:max_children_per_intent` (or `:max_children`), and
+`:max_open_descendants` on the ledger instance. These guardrails reject unsafe
+submissions before an intent is committed. For ambiguous external failures,
+implement `classify_failure/3` and `classify_expired_claim/2` in the configured
+`IntentLedger.Lifecycle` module to choose retry, failure, or ambiguity policy
+at the lifecycle boundary.
+
+Model parent/child coordination through lifecycle signals and projections.
+For example, a projection can derive aggregate progress from child
+`intent_ledger.intent.completed`, `intent_ledger.intent.failed`, and
+`intent_ledger.intent.marked_ambiguous` signals. Treat the projection as the
+coordination view; do not rely on the parent process waiting in memory for
+children to finish.
+
 ## Lifecycle Signals
 
 Lifecycle facts are emitted as `Jido.Signal` structs with stable
