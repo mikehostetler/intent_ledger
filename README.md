@@ -256,6 +256,10 @@ read-only state views without returning payloads or claim secrets:
 See [Operations And Observability](docs/operations.md) for metric mapping,
 dashboard panels, alert guidelines, and runbook checks.
 
+See [Reliability Semantics](docs/reliability.md) for the at-least-once worker
+model, claim fencing, command replay, recovery, ambiguity handling, and outbox
+delivery semantics.
+
 ## Adapter Guides
 
 - [Memory Reference Adapter](docs/memory.md) covers tests, examples, and local

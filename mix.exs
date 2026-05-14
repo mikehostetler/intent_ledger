@@ -112,6 +112,7 @@ defmodule IntentLedger.MixProject do
       extras: [
         "README.md",
         "docs/operations.md",
+        "docs/reliability.md",
         "docs/memory.md",
         "docs/bedrock.md",
         "docs/ecto.md",
