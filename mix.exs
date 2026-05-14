@@ -67,8 +67,7 @@ defmodule IntentLedger.MixProject do
 
   def application do
     [
-      extra_applications: [:crypto, :logger],
-      mod: {IntentLedger.Application, []}
+      extra_applications: [:crypto, :logger]
     ]
   end
 
@@ -153,7 +152,6 @@ defmodule IntentLedger.MixProject do
           IntentLedger.Projection
         ],
         Runtime: [
-          IntentLedger.Application,
           IntentLedger.BedrockStore,
           IntentLedger.Runtime,
           IntentLedger.Signal,
