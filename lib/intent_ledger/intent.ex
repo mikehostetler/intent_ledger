@@ -7,7 +7,8 @@ defmodule IntentLedger.Intent do
   only a minimal pointer to the Intent ID.
   """
 
-  alias IntentLedger.{ID, Time}
+  alias IntentLedger.Time
+  alias Jido.Signal.ID
 
   @type status ::
           :enqueued
@@ -122,7 +123,7 @@ defmodule IntentLedger.Intent do
          {:ok, parent_intent_id} <-
            normalize_optional_string(lineage_attr(attrs, metadata, :parent_intent_id), :parent_intent_id),
          {:ok, actor} <- normalize_optional_string(lineage_attr(attrs, metadata, :actor), :actor) do
-      id = attrs |> Map.get(:id, ID.generate("int")) |> to_string()
+      id = attrs |> Map.get(:id, ID.generate!()) |> to_string()
       correlation_id = correlation_id || id
       root_intent_id = root_intent_id || id
 

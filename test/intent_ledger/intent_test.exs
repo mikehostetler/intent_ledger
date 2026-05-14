@@ -3,6 +3,8 @@ defmodule IntentLedger.IntentTest do
 
   alias IntentLedger.Intent
 
+  @uuid7_pattern ~r/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
   test "normalizes the release Intent shape" do
     assert {:ok, intent} =
              Intent.new(
@@ -16,6 +18,8 @@ defmodule IntentLedger.IntentTest do
 
     assert intent.topic == "invoice_send"
     assert intent.queue == "tenant_acme"
+    assert intent.id =~ @uuid7_pattern
+    assert Jido.Signal.ID.valid?(intent.id)
     assert intent.status == :enqueued
     assert intent.max_attempts == 5
     assert intent.priority == 50
