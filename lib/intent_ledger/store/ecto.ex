@@ -23,7 +23,7 @@ defmodule IntentLedger.Store.Ecto do
   use GenServer
 
   alias IntentLedger.{Error, Store, Time}
-  alias IntentLedger.Store.{Commit, CommitRequest, Outbox}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Outbox}
   alias IntentLedger.Store.Ecto.{Query, Schema}
 
   @dependencies [:ecto_sql, :postgrex]
@@ -211,6 +211,82 @@ defmodule IntentLedger.Store.Ecto do
     now = Time.utc_now()
     opts = source_opts(state)
 
+    with :ok <- check_preconditions(state, ledger, request, opts) do
+      apply_writes(state, ledger, request, now, opts)
+    else
+      {:replay, entry} ->
+        Commit.new(
+          command_id: request.command_id,
+          result: Map.get(entry, :result),
+          replayed: true,
+          replay_of: request.command_id
+        )
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp check_preconditions(%__MODULE__{} = state, ledger, %CommitRequest{} = request, opts) do
+    Enum.reduce_while(request.preconditions, :ok, fn precondition, :ok ->
+      case check_precondition(state, ledger, request, precondition, opts) do
+        :ok -> {:cont, :ok}
+        {:replay, entry} -> {:halt, {:replay, entry}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp check_precondition(state, ledger, %CommitRequest{}, %{type: :command_absent, key: command_id}, opts) do
+    case fetch_command(state, ledger, command_id, opts) do
+      {:ok, nil} -> :ok
+      {:ok, _entry} -> {:error, Conflict.command_conflict(command_id, :absent, :present)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp check_precondition(state, ledger, %CommitRequest{} = request, %{type: :command_replay, key: command_id}, opts) do
+    case fetch_command(state, ledger, command_id, opts) do
+      {:ok, nil} ->
+        {:error, Conflict.new(:command_replay, key: command_id, expected: :present, actual: :absent)}
+
+      {:ok, entry} ->
+        if Map.get(entry, :signature) == command_signature(request) do
+          {:replay, entry}
+        else
+          {:error, Conflict.command_conflict(command_id, Map.get(entry, :signature), command_signature(request))}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp check_precondition(
+         state,
+         ledger,
+         %CommitRequest{},
+         %{type: :stream_version, stream: stream, expected: expected},
+         opts
+       ) do
+    actual = stream_version(state, ledger, stream, opts)
+
+    if actual == expected do
+      :ok
+    else
+      {:error, Conflict.stream_version(stream, expected, actual)}
+    end
+  end
+
+  defp check_precondition(_state, _ledger, _request, precondition, _opts) do
+    {:error,
+     adapter_error("Ecto commit precondition is not implemented yet",
+       reason: :unsupported_precondition,
+       precondition_type: precondition.type
+     )}
+  end
+
+  defp apply_writes(%__MODULE__{} = state, ledger, %CommitRequest{} = request, now, opts) do
     request.writes
     |> Enum.reduce_while({nil, [], %{}}, fn write, {result, signals, stream_versions} ->
       case apply_write(state, ledger, write, request, now, opts, stream_versions) do
@@ -339,7 +415,7 @@ defmodule IntentLedger.Store.Ecto do
       %{
         ledger: ledger_key(ledger),
         command_id: command_id,
-        operation: request.operation |> to_string(),
+        operation: operation_key(request.operation),
         command: encode_value(request.command),
         result: encode_value(result)
       }
@@ -439,21 +515,56 @@ defmodule IntentLedger.Store.Ecto do
     end
   end
 
-  defp next_stream_version(stream, metadata, request, versions) do
-    cond do
-      is_integer(Map.get(metadata, :version)) and Map.get(metadata, :version) >= 0 ->
-        {:ok, Map.fetch!(metadata, :version)}
+  defp fetch_command(%__MODULE__{} = state, ledger, command_id, opts) do
+    case state.repo.one(Query.by_fields(:commands, ledger, [command_id: command_id], opts)) do
+      nil ->
+        {:ok, nil}
 
-      is_integer(Map.get(versions, stream)) ->
-        {:ok, Map.fetch!(versions, stream) + 1}
+      row ->
+        {:ok, %{signature: command_signature(row), result: field(row, :result)}}
+    end
+  rescue
+    error ->
+      {:error, adapter_error("invalid Ecto command replay value", reason: error)}
+  end
 
-      expected = stream_precondition(request, stream) ->
-        {:ok, expected + 1}
-
-      true ->
-        {:ok, 1}
+  defp stream_version(%__MODULE__{} = state, ledger, stream, opts) do
+    case state.repo.one(Query.by_fields(:streams, ledger, [stream: stream], opts)) do
+      nil -> 0
+      row -> field(row, :version, 0)
     end
   end
+
+  defp next_stream_version(stream, metadata, request, versions) do
+    case metadata_version(metadata) do
+      version when is_integer(version) ->
+        {:ok, version}
+
+      nil ->
+        cond do
+          is_integer(Map.get(versions, stream)) ->
+            {:ok, Map.fetch!(versions, stream) + 1}
+
+          expected = stream_precondition(request, stream) ->
+            {:ok, expected + 1}
+
+          true ->
+            {:error,
+             adapter_error("append_signal writes require metadata.version or stream_version precondition",
+               reason: :missing_stream_version
+             )}
+        end
+    end
+  end
+
+  defp metadata_version(%{} = metadata) do
+    case Map.get(metadata, :version) do
+      version when is_integer(version) and version >= 0 -> version
+      _missing_or_invalid -> nil
+    end
+  end
+
+  defp metadata_version(_metadata), do: nil
 
   defp stream_precondition(%CommitRequest{} = request, stream) do
     Enum.find_value(request.preconditions, fn
@@ -461,6 +572,18 @@ defmodule IntentLedger.Store.Ecto do
       _precondition -> nil
     end)
   end
+
+  defp command_signature(%CommitRequest{} = request) do
+    {operation_key(request.operation), canonical_value(request.command)}
+  end
+
+  defp command_signature(row) do
+    {operation_key(field(row, :operation)), canonical_value(field(row, :command))}
+  end
+
+  defp operation_key(operation) when is_binary(operation), do: operation
+  defp operation_key(operation) when is_atom(operation), do: Atom.to_string(operation)
+  defp operation_key(operation), do: to_string(operation)
 
   defp state_row(intent_state, ledger, intent_id) do
     %{
@@ -546,6 +669,21 @@ defmodule IntentLedger.Store.Ecto do
 
   defp encode_value(values) when is_list(values), do: Enum.map(values, &encode_value/1)
   defp encode_value(value), do: value
+
+  defp canonical_value(%DateTime{} = value), do: DateTime.to_iso8601(value)
+
+  defp canonical_value(%{} = value) when not is_struct(value) do
+    Map.new(value, fn {key, nested_value} -> {to_string(key), canonical_value(nested_value)} end)
+  end
+
+  defp canonical_value(%_struct{} = value) do
+    value
+    |> Map.from_struct()
+    |> canonical_value()
+  end
+
+  defp canonical_value(values) when is_list(values), do: Enum.map(values, &canonical_value/1)
+  defp canonical_value(value), do: value
 
   defp field(value, key, default \\ nil)
   defp field(nil, _key, default), do: default

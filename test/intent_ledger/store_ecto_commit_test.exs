@@ -1,8 +1,9 @@
 defmodule IntentLedger.StoreEctoCommitTest do
   use ExUnit.Case, async: true
 
+  alias IntentLedger.Error.AdapterRuntimeError
   alias IntentLedger.{Intent, IntentState, Signal}
-  alias IntentLedger.Store.{Commit, CommitRequest, Precondition, Write}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Precondition, Write}
   alias IntentLedger.Store.Ecto, as: EctoStore
 
   defmodule PostgresRepo do
@@ -11,7 +12,8 @@ defmodule IntentLedger.StoreEctoCommitTest do
     def transaction(fun, opts) do
       test_pid = Keyword.fetch!(opts, :test_pid)
       Process.put(:ops, [])
-      send(test_pid, {:transaction, Keyword.delete(opts, :test_pid)})
+      Process.put(:rows, Keyword.get(opts, :rows, []))
+      send(test_pid, {:transaction, opts |> Keyword.delete(:test_pid) |> Keyword.delete(:rows)})
 
       result = fun.()
       send(test_pid, {:ops, Enum.reverse(Process.get(:ops, []))})
@@ -19,6 +21,20 @@ defmodule IntentLedger.StoreEctoCommitTest do
       {:ok, result}
     after
       Process.delete(:ops)
+      Process.delete(:rows)
+    end
+
+    def one(query) do
+      record({:one, query})
+
+      case Process.get(:rows, []) do
+        [row | rows] ->
+          Process.put(:rows, rows)
+          row
+
+        [] ->
+          nil
+      end
     end
 
     def insert_all(source, rows, opts) do
@@ -83,6 +99,7 @@ defmodule IntentLedger.StoreEctoCommitTest do
     assert_receive {:ops, ops}
 
     assert [
+             {:one, %Ecto.Query{}},
              {:insert_all, {"custom_intents", IntentLedger.Store.Ecto.Schema.Intent}, [intent_row], intent_opts},
              {:insert_all, {"intent_ledger_states", IntentLedger.Store.Ecto.Schema.State}, [state_row], _state_opts},
              {:insert_all, {"intent_ledger_streams", IntentLedger.Store.Ecto.Schema.Stream}, [stream_row],
@@ -104,6 +121,111 @@ defmodule IntentLedger.StoreEctoCommitTest do
     assert signal_row.version == 1
     assert signal_row.signal.type == "intent_ledger.intent.available"
     assert command_row.result == result
+  end
+
+  test "checks command_absent before writing command replay records", %{store: store} do
+    result = %{intent_id: "int_1"}
+
+    request =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        operation: :submit,
+        command: %{key: "job:1"},
+        preconditions: [Precondition.command_absent("cmd_1")],
+        writes: [Write.put_idempotency("cmd_1", result)]
+      )
+
+    assert {:ok, %Commit{result: ^result}} =
+             EctoStore.commit(store, @ledger, request, transaction_opts: [test_pid: self()])
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}, {:insert_all, {"intent_ledger_commands", _schema}, [row], _opts}]}
+
+    assert row.command_id == "cmd_1"
+    assert row.operation == "submit"
+    assert row.command == %{key: "job:1"}
+    assert row.result == result
+  end
+
+  test "returns a command conflict when command_absent finds an existing command", %{store: store} do
+    request =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        preconditions: [Precondition.command_absent("cmd_1")]
+      )
+
+    existing = command_row(:submit, %{key: "job:1"}, %{intent_id: "int_1"})
+
+    assert {:error, %Conflict{type: :command_conflict, key: "cmd_1"}} =
+             EctoStore.commit(store, @ledger, request, transaction_opts: [test_pid: self(), rows: [existing]])
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}]}
+  end
+
+  test "replays an existing command without applying writes", %{store: store} do
+    result = %{intent_id: "int_1"}
+    existing = command_row(:submit, %{key: "job:1"}, result)
+
+    request =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        operation: :submit,
+        command: %{key: "job:1"},
+        preconditions: [Precondition.command_replay("cmd_1")],
+        writes: [Write.put_idempotency("cmd_1", %{intent_id: "other"})]
+      )
+
+    assert {:ok, %Commit{result: ^result, replayed: true, replay_of: "cmd_1", writes: []}} =
+             EctoStore.commit(store, @ledger, request, transaction_opts: [test_pid: self(), rows: [existing]])
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}]}
+  end
+
+  test "rejects command replay when the stored signature differs", %{store: store} do
+    existing = command_row(:submit, %{key: "job:1"}, %{intent_id: "int_1"})
+
+    request =
+      CommitRequest.new(
+        command_id: "cmd_1",
+        operation: :submit,
+        command: %{key: "other"},
+        preconditions: [Precondition.command_replay("cmd_1")]
+      )
+
+    assert {:error, %Conflict{type: :command_conflict, key: "cmd_1"}} =
+             EctoStore.commit(store, @ledger, request, transaction_opts: [test_pid: self(), rows: [existing]])
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}]}
+  end
+
+  test "rejects stale stream version preconditions without appending", %{store: store} do
+    request =
+      CommitRequest.new(
+        preconditions: [Precondition.stream_version("intent:int_1", 1)],
+        writes: [Write.append_signal("intent:int_1", %{id: "sig_3"})]
+      )
+
+    assert {:error, %Conflict{type: :stream_version, expected: 1, actual: 2}} =
+             EctoStore.commit(store, @ledger, request, transaction_opts: [test_pid: self(), rows: [%{version: 2}]])
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}]}
+  end
+
+  test "requires append writes to declare a stream version", %{store: store} do
+    request =
+      CommitRequest.new(writes: [Write.append_signal("intent:int_1", %{id: "sig_1"})])
+
+    assert {:error, %AdapterRuntimeError{} = error} =
+             EctoStore.commit(store, @ledger, request, transaction_opts: [test_pid: self()])
+
+    assert error.details.reason == :missing_stream_version
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, []}
   end
 
   test "writes claims shard leases outbox and delete operations", %{store: store} do
@@ -148,5 +270,9 @@ defmodule IntentLedger.StoreEctoCommitTest do
     assert outbox_row.signal_id == "sig_1"
     assert Keyword.fetch!(ack_fields, :consumer) == "dispatcher"
     assert Keyword.fetch!(ack_fields, :acked_at) == @now
+  end
+
+  defp command_row(operation, command, result) do
+    %{operation: to_string(operation), command: command, result: result}
   end
 end
