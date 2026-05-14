@@ -289,6 +289,9 @@ another shard worker can take over. Size `lease_ms`, `lease_renew_ms`,
 `lease_retry_ms`, `poll_interval_ms`, and `recovery_interval_ms` for the
 deployment's expected transaction latency and failover target.
 
+See [Clustering And Multi-Node Testing](clustering.md) for the production
+topology checklist, lease tuning guidance, and local peer-node test harness.
+
 ## Compatibility Notes
 
 The key schema version is embedded in the root prefix so a future migration can

@@ -260,6 +260,10 @@ See [Reliability Semantics](docs/reliability.md) for the at-least-once worker
 model, claim fencing, command replay, recovery, ambiguity handling, and outbox
 delivery semantics.
 
+See [Clustering And Multi-Node Testing](docs/clustering.md) for production
+cluster topology, lease tuning, local peer-node tests, and the Bedrock
+multi-node scenario matrix.
+
 ## Adapter Guides
 
 - [Memory Reference Adapter](docs/memory.md) covers tests, examples, and local

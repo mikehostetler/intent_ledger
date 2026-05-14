@@ -113,6 +113,7 @@ defmodule IntentLedger.MixProject do
         "README.md",
         "docs/operations.md",
         "docs/reliability.md",
+        "docs/clustering.md",
         "docs/memory.md",
         "docs/bedrock.md",
         "docs/ecto.md",
