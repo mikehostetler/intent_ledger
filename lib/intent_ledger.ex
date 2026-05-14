@@ -89,7 +89,7 @@ defmodule IntentLedger do
       @spec enqueue(String.t() | atom(), term(), keyword()) ::
               {:ok, IntentLedger.Intent.t()} | {:error, term()}
       def enqueue(topic, payload, opts \\ []),
-        do: IntentLedger.Runtime.enqueue(__MODULE__, topic, payload, opts)
+        do: __MODULE__ |> IntentLedger.Runtime.enqueue(topic, payload, opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
       Enqueues multiple Intents in one Bedrock transaction.
@@ -97,25 +97,28 @@ defmodule IntentLedger do
       @spec enqueue_many(Enumerable.t(), keyword()) ::
               {:ok, [IntentLedger.Intent.t()]} | {:error, term()}
       def enqueue_many(entries, opts \\ []),
-        do: IntentLedger.Runtime.enqueue_many(__MODULE__, entries, opts)
+        do: __MODULE__ |> IntentLedger.Runtime.enqueue_many(entries, opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
       Fetches one Intent by ID.
       """
-      @spec fetch(String.t()) :: {:ok, IntentLedger.Intent.t()} | {:error, :not_found}
-      def fetch(intent_id), do: IntentLedger.Runtime.fetch(__MODULE__, intent_id)
+      @spec fetch(String.t()) :: {:ok, IntentLedger.Intent.t()} | {:error, term()}
+      def fetch(intent_id),
+        do: __MODULE__ |> IntentLedger.Runtime.fetch(intent_id) |> IntentLedger.Error.normalize_result()
 
       @doc """
       Returns lifecycle signals for one Intent.
       """
       @spec history(String.t(), keyword()) :: {:ok, [Jido.Signal.t()]} | {:error, term()}
-      def history(intent_id, opts \\ []), do: IntentLedger.Runtime.history(__MODULE__, intent_id, opts)
+      def history(intent_id, opts \\ []),
+        do: __MODULE__ |> IntentLedger.Runtime.history(intent_id, opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
       Replays durable lifecycle signals.
       """
       @spec replay(IntentLedger.Runtime.replay_source(), keyword()) :: {:ok, [map()]} | {:error, term()}
-      def replay(source, opts \\ []), do: IntentLedger.Runtime.replay(__MODULE__, source, opts)
+      def replay(source, opts \\ []),
+        do: __MODULE__ |> IntentLedger.Runtime.replay(source, opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
       Cancels an Intent at the IntentLedger layer.
@@ -125,13 +128,14 @@ defmodule IntentLedger do
       """
       @spec cancel(String.t(), term(), keyword()) :: {:ok, IntentLedger.Intent.t()} | {:error, term()}
       def cancel(intent_id, reason, opts \\ []),
-        do: IntentLedger.Runtime.cancel(__MODULE__, intent_id, reason, opts)
+        do: __MODULE__ |> IntentLedger.Runtime.cancel(intent_id, reason, opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
       Requeues an Intent by placing another minimal queue item for the same ID.
       """
       @spec requeue(String.t(), keyword()) :: {:ok, IntentLedger.Intent.t()} | {:error, term()}
-      def requeue(intent_id, opts \\ []), do: IntentLedger.Runtime.requeue(__MODULE__, intent_id, opts)
+      def requeue(intent_id, opts \\ []),
+        do: __MODULE__ |> IntentLedger.Runtime.requeue(intent_id, opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
       Marks an Intent as ambiguous for manual reconciliation.
@@ -139,19 +143,23 @@ defmodule IntentLedger do
       @spec mark_ambiguous(String.t(), term(), keyword()) ::
               {:ok, IntentLedger.Intent.t()} | {:error, term()}
       def mark_ambiguous(intent_id, reason, opts \\ []),
-        do: IntentLedger.Runtime.mark_ambiguous(__MODULE__, intent_id, reason, opts)
+        do:
+          __MODULE__
+          |> IntentLedger.Runtime.mark_ambiguous(intent_id, reason, opts)
+          |> IntentLedger.Error.normalize_result()
 
       @doc """
       Returns operational views.
       """
       @spec inspect(atom(), keyword()) :: {:ok, term()} | {:error, term()}
-      def inspect(view, opts \\ []), do: IntentLedger.Runtime.inspect(__MODULE__, view, opts)
+      def inspect(view, opts \\ []),
+        do: __MODULE__ |> IntentLedger.Runtime.inspect(view, opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
       Returns queue statistics.
       """
       @spec stats(keyword()) :: {:ok, map()} | {:error, term()}
-      def stats(opts \\ []), do: IntentLedger.Runtime.stats(__MODULE__, opts)
+      def stats(opts \\ []), do: __MODULE__ |> IntentLedger.Runtime.stats(opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
       Returns a lightweight health view.

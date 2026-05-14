@@ -68,49 +68,70 @@ defmodule IntentLedger.Runtime do
   @doc false
   @spec cancel(module(), String.t(), term(), keyword()) :: {:ok, Intent.t()} | {:error, term()}
   def cancel(ledger, intent_id, reason, _opts \\ []) do
-    BedrockStore.update_intent(ledger, intent_id, :canceled, %{reason: reason}, fn intent, now ->
-      %{intent | status: :canceled, cancel_reason: reason, updated_at: now, completed_at: now}
-    end)
+    start = System.monotonic_time()
+
+    result =
+      BedrockStore.update_intent(ledger, intent_id, :canceled, %{reason: reason}, fn intent, now ->
+        %{intent | status: :canceled, cancel_reason: reason, updated_at: now, completed_at: now}
+      end)
+
+    Telemetry.emit(:command, result, start, ledger, command: :cancel, intent_id: intent_id)
+    result
   end
 
   @doc false
   @spec requeue(module(), String.t(), keyword()) :: {:ok, Intent.t()} | {:error, term()}
   def requeue(ledger, intent_id, opts \\ []) do
-    BedrockStore.transact(ledger, fn repo, root ->
-      with {:ok, intent} <- BedrockStore.fetch(repo, root, intent_id),
-           :ok <- ensure_configured_queue(ledger.__intent_ledger__(), intent.queue),
-           :ok <- ensure_requeueable(intent) do
-        now = Time.utc_now()
+    start = System.monotonic_time()
 
-        next = %{
-          intent
-          | status: :retry_scheduled,
-            error: nil,
-            result: nil,
-            cancel_reason: nil,
-            scheduled_at: Keyword.get(opts, :scheduled_at, now),
-            updated_at: now,
-            completed_at: nil
-        }
+    result =
+      BedrockStore.transact(ledger, fn repo, root ->
+        with {:ok, intent} <- BedrockStore.fetch(repo, root, intent_id),
+             :ok <- ensure_configured_queue(ledger.__intent_ledger__(), intent.queue),
+             :ok <- ensure_requeueable(intent) do
+          now = Time.utc_now()
 
-        BedrockStore.put_intent(repo, root, next)
-        Store.enqueue(repo, queue_root(ledger), queue_item(next, ledger, now), now: DateTime.to_unix(now, :millisecond))
+          next = %{
+            intent
+            | status: :retry_scheduled,
+              error: nil,
+              result: nil,
+              cancel_reason: nil,
+              scheduled_at: Keyword.get(opts, :scheduled_at, now),
+              updated_at: now,
+              completed_at: nil
+          }
 
-        BedrockStore.record_lifecycle(repo, root, ledger, next, :retry_scheduled, %{
-          reason: Keyword.get(opts, :reason, :manual_requeue)
-        })
+          BedrockStore.put_intent(repo, root, next)
 
-        {:ok, next}
-      end
-    end)
+          Store.enqueue(repo, queue_root(ledger), queue_item(next, ledger, now),
+            now: DateTime.to_unix(now, :millisecond)
+          )
+
+          BedrockStore.record_lifecycle(repo, root, ledger, next, :retry_scheduled, %{
+            reason: Keyword.get(opts, :reason, :manual_requeue)
+          })
+
+          {:ok, next}
+        end
+      end)
+
+    Telemetry.emit(:command, result, start, ledger, command: :requeue, intent_id: intent_id)
+    result
   end
 
   @doc false
   @spec mark_ambiguous(module(), String.t(), term(), keyword()) :: {:ok, Intent.t()} | {:error, term()}
   def mark_ambiguous(ledger, intent_id, reason, _opts \\ []) do
-    BedrockStore.update_intent(ledger, intent_id, :ambiguous, %{reason: reason}, fn intent, now ->
-      %{intent | status: :ambiguous, error: reason, updated_at: now}
-    end)
+    start = System.monotonic_time()
+
+    result =
+      BedrockStore.update_intent(ledger, intent_id, :ambiguous, %{reason: reason}, fn intent, now ->
+        %{intent | status: :ambiguous, error: reason, updated_at: now}
+      end)
+
+    Telemetry.emit(:command, result, start, ledger, command: :mark_ambiguous, intent_id: intent_id)
+    result
   end
 
   @doc false
@@ -163,17 +184,33 @@ defmodule IntentLedger.Runtime do
   @doc false
   @spec perform(module(), term(), map()) :: IntentLedger.Handler.result()
   def perform(handler, queue_payload, job_meta) do
-    with {:ok, %{ledger: ledger, intent_id: intent_id}} <- decode_queue_payload(queue_payload),
-         {:ok, intent} <- BedrockStore.fetch(ledger, intent_id) do
-      if Intent.runnable?(intent) do
-        execute_handler(ledger, handler, intent, normalize_job_meta(job_meta))
-      else
-        :ok
+    start = System.monotonic_time()
+    job_meta = normalize_job_meta(job_meta)
+
+    {ledger, intent_id, result} =
+      case decode_queue_payload(queue_payload) do
+        {:ok, %{ledger: ledger, intent_id: intent_id}} ->
+          result =
+            case BedrockStore.fetch(ledger, intent_id) do
+              {:ok, intent} ->
+                if Intent.runnable?(intent) do
+                  execute_handler(ledger, handler, intent, job_meta)
+                else
+                  :ok
+                end
+
+              {:error, :not_found} ->
+                {:discard, :intent_not_found}
+            end
+
+          {ledger, intent_id, result}
+
+        {:error, reason} ->
+          {nil, nil, {:discard, reason}}
       end
-    else
-      {:error, :not_found} -> {:discard, :intent_not_found}
-      {:error, reason} -> {:discard, reason}
-    end
+
+    Telemetry.emit(:handler, result, start, ledger, handler_metadata(handler, intent_id, job_meta))
+    result
   end
 
   defp execute_handler(ledger, handler, %Intent{} = intent, job_meta) do
@@ -439,6 +476,17 @@ defmodule IntentLedger.Runtime do
       item_id: Map.get(meta, :item_id),
       attempt: Map.get(meta, :attempt, 1)
     }
+  end
+
+  defp handler_metadata(handler, intent_id, job_meta) do
+    [
+      handler: handler,
+      intent_id: intent_id,
+      topic: Map.get(job_meta, :topic),
+      queue: Map.get(job_meta, :queue_id),
+      item_id: Map.get(job_meta, :item_id),
+      attempt: Map.get(job_meta, :attempt)
+    ]
   end
 
   defp queue_root(ledger), do: Internal.root_keyspace(ledger.__intent_ledger__().job_queue)

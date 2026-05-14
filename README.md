@@ -277,10 +277,13 @@ MyApp.Intents.inspect(:queues)
 MyApp.Intents.inspect(:outbox)
 ```
 
-Telemetry will cover:
+Telemetry currently emits stop events for:
 
 - enqueue and command handling;
-- handler execution;
+- handler execution.
+
+The remaining telemetry surface will cover:
+
 - lifecycle signal append;
 - Bedrock transaction duration and conflicts;
 - queue depth and retry pressure;

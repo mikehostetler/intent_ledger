@@ -95,7 +95,7 @@ defmodule IntentLedger.RuntimeTest do
     assert {:ok, intent} = CriticalIntents.enqueue("invoice.send", %{invoice_id: 123})
     assert intent.queue == "critical"
 
-    assert {:error, {:unknown_queue, "tenant:missing"}} =
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :queue, value: "tenant:missing"}} =
              TestIntents.enqueue("invoice.send", %{invoice_id: 123}, queue: "tenant:missing")
   end
 
@@ -108,6 +108,19 @@ defmodule IntentLedger.RuntimeTest do
     assert queues["default"].pending_count == 1
     assert queues["tenant:acme"].pending_count == 0
     assert queues["tenant:beta"].pending_count == 0
+  end
+
+  test "enqueue emits stop telemetry without payload data" do
+    attach_telemetry(:enqueue)
+
+    assert {:ok, _intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123})
+
+    assert_receive {:telemetry, [:intent_ledger, :enqueue, :stop], measurements, metadata}
+    assert is_integer(measurements.duration)
+    assert measurements.count == 1
+    assert metadata.ledger == TestIntents
+    assert metadata.status == :ok
+    refute Map.has_key?(metadata, :payload)
   end
 
   test "ledger replay starts from the target stream cursor, not the global stream keyspace" do
@@ -142,6 +155,34 @@ defmodule IntentLedger.RuntimeTest do
 
     assert {:ok, signals} = TestIntents.history(intent.id)
     assert Enum.map(signals, & &1.type) == ["intent.enqueued", "intent.started", "intent.completed"]
+  end
+
+  test "handler execution emits stop telemetry" do
+    attach_telemetry(:handler)
+
+    assert {:ok, intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123, test_pid: self()})
+
+    queue_payload = %{raw: :erlang.term_to_binary(%{ledger: TestIntents, intent_id: intent.id})}
+
+    assert {:ok, %{sent: true}} =
+             SendInvoice.perform(queue_payload, %{
+               topic: "invoice.send",
+               queue_id: "default",
+               item_id: intent.id,
+               attempt: 1
+             })
+
+    assert_receive {:telemetry, [:intent_ledger, :handler, :stop], measurements, metadata}
+    assert is_integer(measurements.duration)
+    assert measurements.count == 1
+    assert metadata.ledger == TestIntents
+    assert metadata.handler == SendInvoice
+    assert metadata.intent_id == intent.id
+    assert metadata.topic == "invoice.send"
+    assert metadata.queue == "default"
+    assert metadata.attempt == 1
+    assert metadata.status == :ok
+    refute Map.has_key?(metadata, :payload)
   end
 
   test "failed handlers schedule retry until max attempts are exhausted" do
@@ -195,7 +236,8 @@ defmodule IntentLedger.RuntimeTest do
   test "manual requeue only accepts failed intents" do
     assert {:ok, intent} = TestIntents.enqueue("invoice.fail", %{}, max_attempts: 1)
 
-    assert {:error, {:not_requeueable, :enqueued}} = TestIntents.requeue(intent.id)
+    assert {:error, %IntentLedger.Error.ConflictError{reason: :not_requeueable, details: %{status: :enqueued}}} =
+             TestIntents.requeue(intent.id)
 
     queue_payload = %{raw: :erlang.term_to_binary(%{ledger: TestIntents, intent_id: intent.id})}
 
@@ -214,6 +256,23 @@ defmodule IntentLedger.RuntimeTest do
     assert requeued.status == :retry_scheduled
   end
 
+  test "lifecycle commands emit stop telemetry for failures" do
+    attach_telemetry(:command)
+
+    assert {:ok, intent} = TestIntents.enqueue("invoice.fail", %{}, max_attempts: 1)
+
+    assert {:error, %IntentLedger.Error.ConflictError{reason: :not_requeueable}} =
+             TestIntents.requeue(intent.id)
+
+    assert_receive {:telemetry, [:intent_ledger, :command, :stop], measurements, metadata}
+    assert is_integer(measurements.duration)
+    assert metadata.ledger == TestIntents
+    assert metadata.command == :requeue
+    assert metadata.intent_id == intent.id
+    assert metadata.status == :error
+    assert metadata.error_kind == :not_requeueable
+  end
+
   test "health exposes the configured runtime" do
     assert {:ok, health} = TestIntents.health()
 
@@ -222,5 +281,22 @@ defmodule IntentLedger.RuntimeTest do
     assert health.queues == ["default", "tenant:acme", "tenant:beta"]
     assert health.default_queue == "default"
     assert health.topics == ["invoice.fail", "invoice.send"]
+  end
+
+  defp attach_telemetry(event) do
+    id = {__MODULE__, event, make_ref()}
+
+    :telemetry.attach(
+      id,
+      [:intent_ledger, event, :stop],
+      &__MODULE__.handle_telemetry/4,
+      self()
+    )
+
+    on_exit(fn -> :telemetry.detach(id) end)
+  end
+
+  def handle_telemetry(event, measurements, metadata, test_pid) do
+    send(test_pid, {:telemetry, event, measurements, metadata})
   end
 end

@@ -51,10 +51,24 @@ Signal types are:
 
 ## Telemetry
 
-The current telemetry boundary emits stop events under `[:intent_ledger]` for
-high-level runtime operations. Metadata is intentionally small and excludes
-payloads.
+The telemetry boundary emits stop events under `[:intent_ledger]` for
+high-level runtime operations:
 
-The event surface will grow around handler execution, Bedrock transaction
-duration, replay, outbox delivery, and projection catch-up as those pieces
-stabilize.
+- `[:intent_ledger, :enqueue, :stop]`
+- `[:intent_ledger, :handler, :stop]`
+- `[:intent_ledger, :command, :stop]`
+
+Measurements include `:duration` in native units and `:count`. Metadata includes
+the ledger module, status, and operation-specific fields such as handler, topic,
+queue, command, and intent ID. Payloads and handler results are intentionally
+excluded.
+
+The event surface will grow around Bedrock transaction duration, replay, outbox
+delivery, and projection catch-up as those pieces stabilize.
+
+## Errors
+
+Application-facing APIs return `{:error, exception}` using `IntentLedger.Error`
+exceptions. Queue callbacks still return `:ok`, `{:ok, result}`,
+`{:error, reason}`, `{:discard, reason}`, or `{:snooze, delay_ms}` because those
+terms are the `bedrock_job_queue` execution protocol.
