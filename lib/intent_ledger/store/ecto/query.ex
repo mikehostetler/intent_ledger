@@ -70,6 +70,22 @@ if Code.ensure_loaded?(Ecto.Query) do
       end
     end
 
+    @doc """
+    Builds the SQL query for ordered outbox entries.
+    """
+    @spec outbox_entries(atom() | String.t(), [option()]) :: Ecto.Query.t()
+    def outbox_entries(ledger, opts \\ []) do
+      source = Schema.source(:outbox, opts)
+      prefix = Migration.prefix(opts)
+      ledger = ledger_key(ledger)
+
+      from(row in source,
+        prefix: ^prefix,
+        where: row.ledger == ^ledger,
+        order_by: [asc: row.sequence]
+      )
+    end
+
     defp ledger_key(ledger), do: ledger |> inspect() |> String.trim_leading("Elixir.")
   end
 else
@@ -107,6 +123,19 @@ else
     """
     @spec listing(Listing.t(), atom() | String.t(), [option()]) :: no_return()
     def listing(_listing, _ledger, _opts \\ []) do
+      raise Error.adapter_runtime(
+              "Ecto SQL and Postgrex dependencies are required to use IntentLedger.Store.Ecto.Query",
+              adapter: __MODULE__,
+              reason: :missing_dependency,
+              dependencies: [:ecto_sql, :postgrex]
+            )
+    end
+
+    @doc """
+    Raises a normalized adapter error because Ecto is not installed.
+    """
+    @spec outbox_entries(atom() | String.t(), [option()]) :: no_return()
+    def outbox_entries(_ledger, _opts \\ []) do
       raise Error.adapter_runtime(
               "Ecto SQL and Postgrex dependencies are required to use IntentLedger.Store.Ecto.Query",
               adapter: __MODULE__,

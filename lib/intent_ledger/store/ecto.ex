@@ -164,8 +164,17 @@ defmodule IntentLedger.Store.Ecto do
     {:reply, result, state}
   end
 
+  def handle_call({:outbox, ledger, request, opts}, _from, %__MODULE__{} = state) do
+    result =
+      transact(state.repo, transaction_opts(opts), fn ->
+        apply_outbox_request(state, ledger, request)
+      end)
+
+    {:reply, result, state}
+  end
+
   def handle_call({operation, _ledger, request, _opts}, _from, %__MODULE__{} = state)
-      when operation in [:read, :outbox] do
+      when operation in [:read] do
     {:reply, not_implemented(operation, request), state}
   end
 
@@ -342,6 +351,10 @@ defmodule IntentLedger.Store.Ecto do
          opts
        ) do
     shard_lease_check(state, ledger, key, expected, metadata, opts)
+  end
+
+  defp check_precondition(state, ledger, %CommitRequest{}, %{type: :outbox_unacked, key: entry_id}, opts) do
+    outbox_unacked_check(state, ledger, entry_id, opts)
   end
 
   defp check_precondition(_state, _ledger, _request, precondition, _opts) do
@@ -531,13 +544,10 @@ defmodule IntentLedger.Store.Ecto do
   end
 
   defp apply_write(state, ledger, %{type: :put_outbox, key: key, value: entry}, _request, now, _opts, versions) do
-    row =
-      entry
-      |> outbox_row(ledger, key, next_outbox_sequence(entry, versions))
-      |> put_timestamps(now)
-
-    insert_all(state, :outbox, [row], on_conflict: :nothing, conflict_target: [:ledger, :key])
-    {:ok, nil, [], Map.update(versions, :outbox_sequence, row.sequence, &max(&1, row.sequence))}
+    with {:ok, outbox_entry} <- put_outbox_entry(state, ledger, key, entry, source_opts(state), now, versions) do
+      {:ok, nil, [],
+       Map.update(versions, :outbox_sequence, field(outbox_entry, :sequence), &max(&1, field(outbox_entry, :sequence)))}
+    end
   end
 
   defp apply_write(state, ledger, %{type: :ack_outbox, key: key, metadata: metadata}, _request, now, opts, versions) do
@@ -686,6 +696,68 @@ defmodule IntentLedger.Store.Ecto do
   defp datetime_sort_key(%DateTime{} = value), do: DateTime.to_unix(value, :microsecond)
   defp datetime_sort_key(_value), do: 0
 
+  defp outbox_after_cursor?(_entry, nil), do: true
+  defp outbox_after_cursor?(entry, cursor) when is_integer(cursor), do: field(entry, :sequence, 0) > cursor
+  defp outbox_after_cursor?(_entry, _cursor), do: true
+
+  defp apply_outbox_request(%__MODULE__{} = state, ledger, request) do
+    with {:ok, outbox} <- normalize_outbox_request(request) do
+      opts = source_opts(state)
+      do_apply_outbox_request(state, ledger, outbox, opts, Time.utc_now())
+    end
+  end
+
+  defp normalize_outbox_request(%Outbox{} = outbox), do: {:ok, outbox}
+
+  defp normalize_outbox_request({type, attrs})
+       when type in [:insert, :read, :ack, :replay] and (is_map(attrs) or is_list(attrs)) do
+    {:ok, Outbox.new(type, attrs)}
+  end
+
+  defp normalize_outbox_request(request), do: {:error, {:unsupported_store_v1_request, :outbox, request}}
+
+  defp do_apply_outbox_request(state, ledger, %Outbox{type: :insert, key: key} = request, opts, now)
+       when not is_nil(key) do
+    put_outbox_entry(state, ledger, key, outbox_insert_value(request), opts, now)
+  end
+
+  defp do_apply_outbox_request(state, ledger, %Outbox{type: :read, consumer: consumer} = request, opts, _now)
+       when not is_nil(consumer) do
+    with {:ok, entries} <- outbox_entries(state, ledger, opts) do
+      entries =
+        entries
+        |> Enum.filter(&(is_nil(field(&1, :acked_at)) and outbox_after_cursor?(&1, request.cursor)))
+        |> Enum.take(request.limit)
+
+      {:ok, entries}
+    end
+  end
+
+  defp do_apply_outbox_request(
+         state,
+         ledger,
+         %Outbox{type: :ack, key: key, consumer: consumer, metadata: metadata},
+         opts,
+         now
+       )
+       when not is_nil(key) and not is_nil(consumer) do
+    ack_outbox_entry(state, ledger, key, Map.put(metadata, :consumer, consumer), opts, now)
+  end
+
+  defp do_apply_outbox_request(state, ledger, %Outbox{type: :replay} = request, opts, _now) do
+    with {:ok, entries} <- outbox_entries(state, ledger, opts) do
+      entries =
+        entries
+        |> Enum.filter(&outbox_after_cursor?(&1, request.cursor))
+        |> Enum.take(request.limit)
+
+      {:ok, entries}
+    end
+  end
+
+  defp do_apply_outbox_request(_state, _ledger, request, _opts, _now),
+    do: {:error, {:unsupported_store_v1_request, :outbox, request}}
+
   defp not_implemented(operation, request) do
     {:error,
      adapter_error("Ecto store operation is not implemented yet",
@@ -778,6 +850,134 @@ defmodule IntentLedger.Store.Ecto do
   rescue
     error ->
       {:error, adapter_error("invalid Ecto shard lease value", reason: error)}
+  end
+
+  defp outbox_unacked_check(%__MODULE__{} = state, ledger, entry_id, opts) do
+    case fetch_outbox_entry(state, ledger, entry_id, opts) do
+      {:ok, nil} ->
+        {:error, Conflict.outbox(entry_id, :unacked, :missing)}
+
+      {:ok, entry} ->
+        if is_nil(field(entry, :acked_at)) do
+          :ok
+        else
+          {:error, Conflict.outbox(entry_id, :unacked, entry)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp fetch_outbox_entry(%__MODULE__{} = state, ledger, entry_id, opts) do
+    case state.repo.one(Query.by_fields(:outbox, ledger, [key: entry_id], opts)) do
+      nil -> {:ok, nil}
+      row -> {:ok, outbox_value(row)}
+    end
+  rescue
+    error ->
+      {:error, adapter_error("invalid Ecto outbox value", reason: error)}
+  end
+
+  defp outbox_entries(%__MODULE__{} = state, ledger, opts) do
+    query = Query.outbox_entries(ledger, opts)
+
+    entries =
+      state.repo.all(query)
+      |> Enum.map(&outbox_value/1)
+      |> Enum.sort_by(&field(&1, :sequence, 0))
+
+    {:ok, entries}
+  rescue
+    error ->
+      {:error, adapter_error("invalid Ecto outbox value", reason: error)}
+  end
+
+  defp put_outbox_entry(state, ledger, key, value, opts, now, versions \\ %{})
+
+  defp put_outbox_entry(%__MODULE__{} = state, ledger, key, value, opts, now, versions) when is_map(value) do
+    with {:ok, sequence} <- resolve_outbox_sequence(state, ledger, value, opts, versions) do
+      entry =
+        value
+        |> Map.put(:key, key)
+        |> Map.put(:sequence, sequence)
+        |> Map.put_new(:acked_at, nil)
+
+      row =
+        entry
+        |> outbox_row(ledger, key, sequence)
+        |> put_timestamps(now)
+
+      insert_all(state, :outbox, [row], on_conflict: :nothing, conflict_target: [:ledger, :key])
+      {:ok, entry}
+    end
+  end
+
+  defp put_outbox_entry(_state, _ledger, key, value, _opts, _now, _versions) do
+    {:error, adapter_error("outbox value must be a map", reason: :invalid_outbox_value, key: key, value: value)}
+  end
+
+  defp ack_outbox_entry(%__MODULE__{} = state, ledger, key, metadata, opts, now) do
+    case fetch_outbox_entry(state, ledger, key, opts) do
+      {:ok, nil} ->
+        {:error, Conflict.outbox(key, :unacked, :missing)}
+
+      {:ok, entry} ->
+        if is_nil(field(entry, :acked_at)) do
+          acked =
+            entry
+            |> Map.put(:acked_at, Map.get(metadata, :acked_at, now))
+            |> Map.put(:consumer, Map.get(metadata, :consumer))
+            |> Map.put(:metadata, metadata)
+
+          fields = [
+            acked_at: field(acked, :acked_at),
+            consumer: field(acked, :consumer),
+            metadata: encode_value(metadata),
+            updated_at: now
+          ]
+
+          state.repo.update_all(Query.by_fields(:outbox, ledger, [key: key], opts), set: fields)
+          {:ok, acked}
+        else
+          {:error, Conflict.outbox(key, :unacked, entry)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp resolve_outbox_sequence(%__MODULE__{} = state, ledger, entry, opts, versions) do
+    case field(entry, :sequence) do
+      sequence when is_integer(sequence) and sequence >= 0 ->
+        {:ok, sequence}
+
+      sequence when not is_nil(sequence) ->
+        {:error,
+         adapter_error("outbox sequence must be a non-negative integer",
+           reason: :invalid_outbox_sequence,
+           sequence: sequence
+         )}
+
+      _missing ->
+        case Map.fetch(versions, :outbox_sequence) do
+          {:ok, sequence} -> {:ok, sequence + 1}
+          :error -> next_outbox_sequence(state, ledger, opts)
+        end
+    end
+  end
+
+  defp next_outbox_sequence(%__MODULE__{} = state, ledger, opts) do
+    with {:ok, entries} <- outbox_entries(state, ledger, opts) do
+      next_sequence =
+        entries
+        |> Enum.map(&field(&1, :sequence, 0))
+        |> Enum.max(fn -> 0 end)
+        |> Kernel.+(1)
+
+      {:ok, next_sequence}
+    end
   end
 
   defp claim_fence_check(%__MODULE__{} = state, ledger, claim_id, expected, metadata, opts) do
@@ -957,6 +1157,38 @@ defmodule IntentLedger.Store.Ecto do
     })
   end
 
+  defp outbox_insert_value(%Outbox{} = request) do
+    value = request.value
+
+    cond do
+      is_map(value) and (Map.has_key?(value, :signal) or Map.has_key?(value, "signal")) ->
+        value
+
+      is_map(value) ->
+        %{stream: request.stream, signal: value}
+
+      true ->
+        %{stream: request.stream, signal: value}
+    end
+  end
+
+  defp outbox_value(row) do
+    base = field(row, :entry) || %{}
+
+    Map.merge(base, %{
+      key: field(row, :key),
+      sequence: field(row, :sequence),
+      stream: field(row, :stream),
+      signal_id: field(row, :signal_id),
+      signal_type: field(row, :signal_type),
+      subject: field(row, :subject),
+      signal: field(row, :signal),
+      acked_at: field(row, :acked_at),
+      consumer: field(row, :consumer),
+      metadata: field(row, :metadata)
+    })
+  end
+
   defp status_value(status) when is_atom(status), do: status
 
   defp status_value(status) when is_binary(status) do
@@ -1026,13 +1258,6 @@ defmodule IntentLedger.Store.Ecto do
       consumer: field(entry, :consumer),
       metadata: encode_value(field(entry, :metadata))
     }
-  end
-
-  defp next_outbox_sequence(entry, versions) do
-    case field(entry, :sequence) do
-      sequence when is_integer(sequence) and sequence > 0 -> sequence
-      _missing -> Map.get(versions, :outbox_sequence, 0) + 1
-    end
   end
 
   defp put_timestamps(row, now), do: Map.merge(row, %{inserted_at: now, updated_at: now})

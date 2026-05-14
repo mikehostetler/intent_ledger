@@ -3,7 +3,7 @@ defmodule IntentLedger.StoreEctoCommitTest do
 
   alias IntentLedger.Error.AdapterRuntimeError
   alias IntentLedger.{Intent, IntentState, Signal}
-  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Precondition, Write}
+  alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Outbox, Precondition, Write}
   alias IntentLedger.Store.Ecto, as: EctoStore
 
   defmodule PostgresRepo do
@@ -436,6 +436,108 @@ defmodule IntentLedger.StoreEctoCommitTest do
     assert_receive {:ops, [{:all, %Ecto.Query{}}]}
   end
 
+  test "inserts outbox entries with allocated sequences", %{store: store} do
+    request = Outbox.insert("intent:int_3", %{id: "sig_3", type: "intent_ledger.intent.completed"}, key: "out_3")
+
+    assert {:ok, entry} =
+             EctoStore.outbox(
+               store,
+               @ledger,
+               request,
+               transaction_opts: [test_pid: self(), rows: [outbox_entry_row(key: "out_2", sequence: 2)]]
+             )
+
+    assert entry.key == "out_3"
+    assert entry.sequence == 3
+    assert entry.stream == "intent:int_3"
+    assert entry.signal.id == "sig_3"
+
+    assert_receive {:transaction, []}
+
+    assert_receive {:ops,
+                    [
+                      {:all, %Ecto.Query{}},
+                      {:insert_all, {"intent_ledger_outbox", _schema}, [row], _opts}
+                    ]}
+
+    assert row.key == "out_3"
+    assert row.sequence == 3
+  end
+
+  test "reads acks and replays outbox entries", %{store: store} do
+    unacked = outbox_entry_row(key: "out_1", sequence: 1, acked_at: nil)
+    acked = outbox_entry_row(key: "out_2", sequence: 2, acked_at: @now, consumer: "dispatcher")
+
+    assert {:ok, [entry]} =
+             EctoStore.outbox(
+               store,
+               @ledger,
+               Outbox.read("dispatcher", cursor: 0),
+               transaction_opts: [test_pid: self(), rows: [acked, unacked]]
+             )
+
+    assert entry.key == "out_1"
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:all, %Ecto.Query{}}]}
+
+    assert {:ok, acked_entry} =
+             EctoStore.outbox(
+               store,
+               @ledger,
+               Outbox.ack("out_1", "dispatcher", metadata: %{acked_at: @now}),
+               transaction_opts: [test_pid: self(), rows: [unacked]]
+             )
+
+    assert acked_entry.key == "out_1"
+    assert acked_entry.acked_at == @now
+    assert acked_entry.consumer == "dispatcher"
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}, {:update_all, %Ecto.Query{}, [set: ack_fields]}]}
+    assert Keyword.fetch!(ack_fields, :acked_at) == @now
+    assert Keyword.fetch!(ack_fields, :consumer) == "dispatcher"
+
+    assert {:ok, replayed} =
+             EctoStore.outbox(
+               store,
+               @ledger,
+               Outbox.replay(cursor: 0, limit: 10),
+               transaction_opts: [test_pid: self(), rows: [acked, unacked]]
+             )
+
+    assert Enum.map(replayed, & &1.key) == ["out_1", "out_2"]
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:all, %Ecto.Query{}}]}
+  end
+
+  test "rejects acked outbox entries", %{store: store} do
+    acked = outbox_entry_row(key: "out_1", sequence: 1, acked_at: @now, consumer: "dispatcher")
+
+    assert {:error, %Conflict{type: :outbox, key: "out_1"}} =
+             EctoStore.outbox(
+               store,
+               @ledger,
+               Outbox.ack("out_1", "dispatcher", metadata: %{acked_at: @now}),
+               transaction_opts: [test_pid: self(), rows: [acked]]
+             )
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}]}
+  end
+
+  test "checks outbox_unacked preconditions", %{store: store} do
+    acked = outbox_entry_row(key: "out_1", sequence: 1, acked_at: @now, consumer: "dispatcher")
+    request = CommitRequest.new(preconditions: [Precondition.outbox_unacked("out_1")])
+
+    assert {:error, %Conflict{type: :outbox, key: "out_1"}} =
+             EctoStore.commit(store, @ledger, request, transaction_opts: [test_pid: self(), rows: [acked]])
+
+    assert_receive {:transaction, []}
+    assert_receive {:ops, [{:one, %Ecto.Query{}}]}
+  end
+
   test "writes claims shard leases outbox and delete operations", %{store: store} do
     claim = %{intent_id: "int_1", owner_id: "worker", token_hash: "hash", lease_until: @now}
     lease = %{queue: "default", shard: 0, owner_id: "node-a", lease_until: @now}
@@ -507,6 +609,28 @@ defmodule IntentLedger.StoreEctoCommitTest do
 
     Map.merge(
       %{queue: "default", shard: 0, owner_id: "node-a", lease_until: @lease_until, lease: %{}},
+      attrs
+    )
+  end
+
+  defp outbox_entry_row(attrs) do
+    attrs = Map.new(attrs)
+    signal = Map.get(attrs, :signal, %{id: "sig_1", type: "intent_ledger.intent.completed"})
+
+    Map.merge(
+      %{
+        key: "out_1",
+        sequence: 1,
+        stream: "intent:int_1",
+        signal_id: signal.id,
+        signal_type: signal.type,
+        subject: "intent:int_1",
+        signal: signal,
+        entry: %{},
+        acked_at: nil,
+        consumer: nil,
+        metadata: %{}
+      },
       attrs
     )
   end
