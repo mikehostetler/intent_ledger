@@ -21,7 +21,7 @@ defmodule IntentLedger.BedrockJobQueueScenarioTest do
     use IntentLedger,
       otp_app: :intent_ledger,
       repo: IntentLedger.FakeRepo,
-      handlers: %{"invoice.archive" => ArchiveInvoice}
+      intents: %{"invoice.archive" => ArchiveInvoice}
   end
 
   setup do

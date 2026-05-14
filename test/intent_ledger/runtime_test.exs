@@ -26,10 +26,10 @@ defmodule IntentLedger.RuntimeTest do
     use IntentLedger,
       otp_app: :intent_ledger,
       repo: IntentLedger.FakeRepo,
-      queues: ["default", "tenant:acme", "tenant:beta"],
-      handlers: %{
-        "invoice.send" => SendInvoice,
-        "invoice.fail" => FailingIntent
+      queues: ["tenant:acme", "tenant:beta"],
+      intents: %{
+        "invoice.send" => [handler: SendInvoice, queue: "default"],
+        "invoice.fail" => [handler: FailingIntent, queue: "default"]
       }
   end
 
@@ -37,9 +37,8 @@ defmodule IntentLedger.RuntimeTest do
     use IntentLedger,
       otp_app: :intent_ledger,
       repo: IntentLedger.FakeRepo,
-      queues: [:critical],
-      handlers: %{
-        "invoice.send" => SendInvoice
+      intents: %{
+        "invoice.send" => [handler: SendInvoice, queue: :critical]
       }
   end
 

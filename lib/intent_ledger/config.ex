@@ -4,27 +4,78 @@ defmodule IntentLedger.Config do
   @type queue_id :: String.t()
   @type queue_config :: %{required(:id) => queue_id(), optional(term()) => term()}
   @type queue_configs :: %{queue_id() => queue_config()}
+  @type topic :: String.t()
+  @type intent_config :: %{
+          required(:topic) => topic(),
+          required(:handler) => module(),
+          optional(:queue) => queue_id(),
+          optional(term()) => term()
+        }
+  @type intent_configs :: %{topic() => intent_config()}
 
   @doc false
   @spec normalize_queues!(term()) :: queue_configs()
-  def normalize_queues!(nil), do: normalize_queues!(["default"])
-  def normalize_queues!([]), do: normalize_queues!(["default"])
+  def normalize_queues!(queues), do: normalize_queues!(queues, %{})
 
-  def normalize_queues!(queues) when is_map(queues) do
-    queues
-    |> Enum.map(fn {id, attrs} -> normalize_queue_definition!({id, attrs}) end)
-    |> build_queue_map()
+  @doc false
+  @spec normalize_queues!(term(), intent_configs()) :: queue_configs()
+  def normalize_queues!(queues, intents) do
+    queue_configs = normalize_explicit_queues(queues) ++ queues_from_intents(intents)
+
+    queue_configs =
+      if queue_configs == [] do
+        [%{id: "default"}]
+      else
+        queue_configs
+      end
+
+    build_queue_map(queue_configs)
   end
 
-  def normalize_queues!(queues) when is_list(queues) do
-    queues
-    |> Enum.map(&normalize_queue_definition!/1)
-    |> build_queue_map()
+  @doc false
+  @spec normalize_intents!(term()) :: intent_configs()
+  def normalize_intents!(nil), do: raise(ArgumentError, "IntentLedger requires :intents")
+  def normalize_intents!([]), do: raise(ArgumentError, "IntentLedger requires at least one intent")
+
+  def normalize_intents!(intents) when is_map(intents) do
+    intents
+    |> Enum.map(fn {topic, attrs} -> normalize_intent_definition!({topic, attrs}) end)
+    |> build_intent_map()
   end
 
-  def normalize_queues!(queues) do
-    raise ArgumentError, "invalid IntentLedger queues config: #{inspect(queues)}"
+  def normalize_intents!(intents) when is_list(intents) do
+    intents
+    |> Enum.map(&normalize_intent_definition!/1)
+    |> build_intent_map()
   end
+
+  def normalize_intents!(intents) do
+    raise ArgumentError, "invalid IntentLedger intents config: #{inspect(intents)}"
+  end
+
+  @doc false
+  @spec handlers_from_intents!(term()) :: %{topic() => module()}
+  def handlers_from_intents!(intents), do: intents |> normalize_intents!() |> handlers_from_intents()
+
+  @doc false
+  @spec handlers_from_intents(intent_configs()) :: %{topic() => module()}
+  def handlers_from_intents(intents) do
+    Map.new(intents, fn {topic, %{handler: handler}} -> {topic, handler} end)
+  end
+
+  @doc false
+  @spec normalize_topic(term()) :: {:ok, topic()} | {:error, term()}
+  def normalize_topic(topic) when is_binary(topic) or is_atom(topic) do
+    topic
+    |> to_string()
+    |> String.trim()
+    |> case do
+      "" -> {:error, {:invalid_topic, topic}}
+      normalized -> {:ok, normalized}
+    end
+  end
+
+  def normalize_topic(topic), do: {:error, {:invalid_topic, topic}}
 
   @doc false
   @spec normalize_default_queue!(term(), queue_configs()) :: queue_id()
@@ -64,6 +115,19 @@ defmodule IntentLedger.Config do
   @spec queue_ids(queue_configs()) :: [queue_id()]
   def queue_ids(queues), do: queues |> Map.keys() |> Enum.sort()
 
+  defp normalize_explicit_queues(nil), do: []
+  defp normalize_explicit_queues([]), do: []
+
+  defp normalize_explicit_queues(queues) when is_map(queues) do
+    Enum.map(queues, fn {id, attrs} -> normalize_queue_definition!({id, attrs}) end)
+  end
+
+  defp normalize_explicit_queues(queues) when is_list(queues), do: Enum.map(queues, &normalize_queue_definition!/1)
+
+  defp normalize_explicit_queues(queues) do
+    raise ArgumentError, "invalid IntentLedger queues config: #{inspect(queues)}"
+  end
+
   defp normalize_queue_definition!(%{id: id} = attrs), do: normalize_queue_map!(id, attrs)
   defp normalize_queue_definition!(%{"id" => id} = attrs), do: normalize_queue_map!(id, attrs)
 
@@ -92,14 +156,90 @@ defmodule IntentLedger.Config do
     end
   end
 
-  defp build_queue_map(configs) do
-    ids = Enum.map(configs, & &1.id)
-    unique_count = ids |> MapSet.new() |> MapSet.size()
+  defp normalize_intent_definition!(%{topic: topic} = attrs), do: normalize_intent_map!(topic, attrs)
+  defp normalize_intent_definition!(%{"topic" => topic} = attrs), do: normalize_intent_map!(topic, attrs)
 
-    if length(ids) != unique_count do
-      raise ArgumentError, "IntentLedger queues config contains duplicate queue IDs"
+  defp normalize_intent_definition!({topic, handler}) when is_atom(handler) and not is_nil(handler),
+    do: normalize_intent_map!(topic, %{handler: handler})
+
+  defp normalize_intent_definition!({topic, attrs}) when is_list(attrs) or is_map(attrs) do
+    normalize_intent_map!(topic, attrs)
+  end
+
+  defp normalize_intent_definition!({topic, handler, attrs})
+       when is_atom(handler) and not is_nil(handler) and (is_list(attrs) or is_map(attrs)) do
+    attrs
+    |> Map.new()
+    |> Map.put(:handler, handler)
+    |> then(&normalize_intent_map!(topic, &1))
+  end
+
+  defp normalize_intent_definition!(definition) do
+    raise ArgumentError, "invalid IntentLedger intent definition: #{inspect(definition)}"
+  end
+
+  defp normalize_intent_map!(topic, attrs) do
+    attrs = Map.new(attrs)
+    topic = normalize_topic!(Map.get(attrs, :topic, Map.get(attrs, "topic", topic)))
+    handler = Map.get(attrs, :handler, Map.get(attrs, "handler"))
+    queue = Map.get(attrs, :queue, Map.get(attrs, "queue"))
+
+    unless is_atom(handler) and not is_nil(handler) do
+      raise ArgumentError, "IntentLedger intent #{inspect(topic)} requires a handler module"
     end
 
-    Map.new(configs, fn %{id: id} = config -> {id, config} end)
+    attrs =
+      attrs
+      |> Map.delete(:topic)
+      |> Map.delete("topic")
+      |> Map.delete(:handler)
+      |> Map.delete("handler")
+      |> Map.delete(:queue)
+      |> Map.delete("queue")
+      |> Map.put(:topic, topic)
+      |> Map.put(:handler, handler)
+
+    case queue do
+      nil -> attrs
+      queue -> Map.put(attrs, :queue, normalize_queue_id!(queue))
+    end
+  end
+
+  defp normalize_topic!(topic) do
+    case normalize_topic(topic) do
+      {:ok, normalized} -> normalized
+      {:error, reason} -> raise ArgumentError, "invalid IntentLedger topic: #{inspect(reason)}"
+    end
+  end
+
+  defp queues_from_intents(intents) do
+    queues =
+      intents
+      |> Map.values()
+      |> Enum.flat_map(fn
+        %{queue: queue} -> [%{id: queue}]
+        _intent -> []
+      end)
+
+    if Enum.any?(intents, fn {_topic, intent} -> not Map.has_key?(intent, :queue) end) do
+      [%{id: "default"} | queues]
+    else
+      queues
+    end
+  end
+
+  defp build_intent_map(configs) do
+    topics = Enum.map(configs, & &1.topic)
+    unique_count = topics |> MapSet.new() |> MapSet.size()
+
+    if length(topics) != unique_count do
+      raise ArgumentError, "IntentLedger intents config contains duplicate topics"
+    end
+
+    Map.new(configs, fn %{topic: topic} = config -> {topic, config} end)
+  end
+
+  defp build_queue_map(configs) do
+    Enum.reduce(configs, %{}, fn %{id: id} = config, acc -> Map.put_new(acc, id, config) end)
   end
 end

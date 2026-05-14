@@ -9,9 +9,11 @@ defmodule IntentLedger do
         use IntentLedger,
           otp_app: :my_app,
           repo: MyApp.Bedrock,
-          queues: ["default", "tenant:acme"],
-          handlers: %{
-            "invoice.send" => MyApp.Intents.SendInvoice
+          intents: %{
+            "invoice.send" => [
+              handler: MyApp.Intents.SendInvoice,
+              queue: "billing"
+            ]
           }
       end
 
@@ -24,10 +26,18 @@ defmodule IntentLedger do
 
   @type queue_config :: %{required(:id) => String.t(), optional(term()) => term()}
   @type queue_configs :: %{String.t() => queue_config()}
+  @type intent_config :: %{
+          required(:topic) => String.t(),
+          required(:handler) => module(),
+          optional(:queue) => String.t(),
+          optional(term()) => term()
+        }
+  @type intent_configs :: %{String.t() => intent_config()}
 
   @type config :: %{
           required(:otp_app) => atom(),
           required(:repo) => module(),
+          required(:intents) => intent_configs(),
           required(:handlers) => %{String.t() => module()},
           required(:queues) => queue_configs(),
           required(:default_queue) => String.t(),
@@ -40,8 +50,8 @@ defmodule IntentLedger do
   defmacro __using__(opts) do
     otp_app = Keyword.fetch!(opts, :otp_app)
     repo = Keyword.fetch!(opts, :repo)
-    handlers = Keyword.get(opts, :handlers, {:%{}, [], []})
-    queues = Keyword.get(opts, :queues, ["default"])
+    intents = Keyword.fetch!(opts, :intents)
+    queues = Keyword.get(opts, :queues)
     default_queue = Keyword.get(opts, :default_queue)
 
     quote location: :keep do
@@ -49,7 +59,7 @@ defmodule IntentLedger do
 
       @otp_app unquote(otp_app)
       @repo unquote(repo)
-      @handlers unquote(handlers)
+      @intents unquote(intents)
       @queues unquote(queues)
       @default_queue unquote(default_queue)
 
@@ -57,7 +67,7 @@ defmodule IntentLedger do
         use Bedrock.JobQueue,
           otp_app: unquote(otp_app),
           repo: unquote(repo),
-          workers: unquote(handlers)
+          workers: IntentLedger.Config.handlers_from_intents!(unquote(intents))
       end
 
       @doc """
@@ -152,13 +162,16 @@ defmodule IntentLedger do
       @doc false
       @spec __intent_ledger__() :: IntentLedger.config()
       def __intent_ledger__ do
-        queues = IntentLedger.Config.normalize_queues!(@queues)
+        intents = IntentLedger.Config.normalize_intents!(@intents)
+        handlers = IntentLedger.Config.handlers_from_intents(intents)
+        queues = IntentLedger.Config.normalize_queues!(@queues, intents)
         default_queue = IntentLedger.Config.normalize_default_queue!(@default_queue, queues)
 
         %{
           otp_app: @otp_app,
           repo: @repo,
-          handlers: @handlers,
+          intents: intents,
+          handlers: handlers,
           queues: queues,
           default_queue: default_queue,
           job_queue: JobQueue

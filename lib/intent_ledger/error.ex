@@ -125,6 +125,7 @@ defmodule IntentLedger.Error do
   """
   @spec from_reason(term()) :: Exception.t()
   def from_reason({:unknown_topic, topic}), do: invalid("Unknown Intent topic", field: :topic, value: topic)
+  def from_reason({:invalid_topic, topic}), do: invalid("Invalid Intent topic", field: :topic, value: topic)
   def from_reason({:unknown_queue, queue}), do: invalid("Unknown Intent queue", field: :queue, value: queue)
   def from_reason({:invalid_queue, queue}), do: invalid("Invalid Intent queue", field: :queue, value: queue)
   def from_reason({:invalid_entry, entry}), do: invalid("Invalid Intent enqueue entry", value: entry)

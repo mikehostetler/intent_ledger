@@ -156,7 +156,7 @@ defmodule IntentLedger.Runtime do
        job_queue: config.job_queue,
        queues: Config.queue_ids(config.queues),
        default_queue: config.default_queue,
-       topics: config.handlers |> Map.keys() |> Enum.sort()
+       topics: config.intents |> Map.keys() |> Enum.sort()
      }}
   end
 
@@ -337,16 +337,14 @@ defmodule IntentLedger.Runtime do
   defp normalize_entry(ledger, {topic, payload}, opts), do: normalize_entry(ledger, {topic, payload, []}, opts)
 
   defp normalize_entry(ledger, {topic, payload, entry_opts}, opts) when is_list(entry_opts) do
-    topic = normalize_topic(topic)
-
-    attrs =
-      opts
-      |> Keyword.merge(entry_opts)
-      |> Map.new()
-      |> Map.merge(%{topic: topic, payload: payload})
-
-    with {:ok, _handler} <- handler_for(ledger, topic),
-         {:ok, attrs} <- put_configured_queue(ledger, attrs) do
+    with {:ok, topic} <- Config.normalize_topic(topic),
+         {:ok, intent_config} <- intent_for(ledger, topic),
+         attrs =
+           opts
+           |> Keyword.merge(entry_opts)
+           |> Map.new()
+           |> Map.merge(%{topic: topic, payload: payload}),
+         {:ok, attrs} <- put_configured_queue(ledger, intent_config, attrs) do
       {:ok, attrs}
     end
   end
@@ -371,19 +369,18 @@ defmodule IntentLedger.Runtime do
       |> Map.merge(Map.drop(entry, [:topic, "topic", :payload, "payload", :opts, "opts"]))
       |> Map.merge(%{topic: topic, payload: payload})
 
-    topic = normalize_topic(topic)
-
-    with {:ok, _handler} <- handler_for(ledger, topic),
-         {:ok, attrs} <- put_configured_queue(ledger, attrs) do
+    with {:ok, topic} <- Config.normalize_topic(topic),
+         {:ok, intent_config} <- intent_for(ledger, topic),
+         {:ok, attrs} <- put_configured_queue(ledger, intent_config, attrs) do
       {:ok, %{attrs | topic: topic}}
     end
   end
 
-  defp put_configured_queue(ledger, attrs) do
+  defp put_configured_queue(ledger, intent_config, attrs) do
     config = ledger.__intent_ledger__()
 
     attrs
-    |> Map.get(:queue, Map.get(attrs, "queue", config.default_queue))
+    |> Map.get(:queue, Map.get(attrs, "queue", Map.get(intent_config, :queue, config.default_queue)))
     |> Config.normalize_queue_id()
     |> case do
       {:ok, queue} ->
@@ -400,15 +397,12 @@ defmodule IntentLedger.Runtime do
     if Map.has_key?(queues, queue), do: :ok, else: {:error, {:unknown_queue, queue}}
   end
 
-  defp handler_for(ledger, topic) do
-    case Map.fetch(ledger.__intent_ledger__().handlers, topic) do
-      {:ok, handler} -> {:ok, handler}
+  defp intent_for(ledger, topic) do
+    case Map.fetch(ledger.__intent_ledger__().intents, topic) do
+      {:ok, intent_config} -> {:ok, intent_config}
       :error -> {:error, {:unknown_topic, topic}}
     end
   end
-
-  defp normalize_topic(topic) when is_atom(topic), do: Atom.to_string(topic)
-  defp normalize_topic(topic), do: to_string(topic)
 
   defp enqueue_queue_item(repo, queue_root, intent, ledger, now) do
     Store.enqueue(repo, queue_root, queue_item(intent, ledger, now), now: DateTime.to_unix(now, :millisecond))

@@ -74,19 +74,22 @@ defmodule MyApp.Intents do
   use IntentLedger,
     otp_app: :my_app,
     repo: MyApp.Bedrock,
-    queues: ["default", "tenant:acme", "bulk"],
-    default_queue: "default",
-    handlers: %{
-      "invoice.send" => MyApp.Intents.SendInvoice
-    }
+    intents: %{
+      "invoice.send" => [
+        handler: MyApp.Intents.SendInvoice,
+        queue: "billing"
+      ]
+    },
+    queues: ["tenant:acme", "bulk"]
 end
 ```
 
-`queues` is the ledger instance's queue contract. Producers may enqueue into
-those queue IDs; unknown queue IDs are rejected before Intent state is written.
-When `:queue` is omitted, Intent Ledger uses `default_queue`. If `default_queue`
-is omitted, `"default"` is used when present; otherwise the first sorted queue
-ID is used. Set `default_queue` explicitly when that choice matters.
+`intents` is the ledger instance's routing contract. Each topic declares its
+handler and may declare the queue used when producers omit `:queue`. Multiple
+topics can share a queue. `queues` is optional and adds extra allowed lanes, such
+as tenant or bulk partitions. `default_queue` is only needed for topics that do
+not declare their own queue. Unknown queue IDs are rejected before Intent state is
+written.
 
 Define a handler:
 
