@@ -384,6 +384,9 @@ Landed:
 - Opt-in `@tag :bedrock` integration scenarios cover pointer payloads, handler
   success, retry, max-attempt failure, discard, snooze, cancellation
   neutralization, and outbox replay after storage process restart.
+- Opt-in `@tag :multi_node` integration scenario covers simulated node A
+  enqueue/idempotency race, node B queue lease execution, and node C
+  inspection/replay after storage process restart.
 - Splode-backed public error normalization and telemetry stop events exist.
 - Fast unit tests cover handler result, validation, telemetry, replay, and
   projection cursor edge cases.
@@ -400,7 +403,8 @@ Missing:
 
 - Durable outbox dispatch/ack policy.
 - Projection lag inspection.
-- Multi-node opt-in scenarios.
+- Worker crash and lease-expiry recovery scenarios once `bedrock_job_queue`
+  exposes a stable expired-lease recovery path.
 - Final `mix docs`, `mix hex.build`, dependency review, and Hex release timing
   decision.
 
