@@ -280,3 +280,6 @@ mix test
 mix quality
 mix docs
 ```
+
+Compile-tested example modules live in `examples/` and are exercised by
+`test/intent_ledger/examples_test.exs`.
