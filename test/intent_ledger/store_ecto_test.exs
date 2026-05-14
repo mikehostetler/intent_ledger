@@ -2,7 +2,6 @@ defmodule IntentLedger.StoreEctoTest do
   use ExUnit.Case, async: true
 
   alias IntentLedger.Error.AdapterRuntimeError
-  alias IntentLedger.Store
   alias IntentLedger.Store.Ecto, as: EctoStore
 
   defmodule PostgresRepo do
@@ -52,12 +51,12 @@ defmodule IntentLedger.StoreEctoTest do
   test "returns normalized not-implemented errors for Store V1 operations" do
     name = Module.concat(__MODULE__, "Store#{System.unique_integer([:positive])}")
     store = start_supervised!({EctoStore, name: name, repo: PostgresRepo})
-    request = %Store.CommitRequest{operation: :submit, command_id: "cmd_1"}
+    request = {:intent, "int_1"}
 
-    assert {:error, %AdapterRuntimeError{} = error} = EctoStore.commit(store, MyLedger, request, [])
+    assert {:error, %AdapterRuntimeError{} = error} = EctoStore.read(store, MyLedger, request, [])
     assert error.adapter == EctoStore
     assert error.details.reason == :not_implemented
-    assert error.details.operation == :commit
-    assert error.details.request == %{operation: :submit, command_id: "cmd_1"}
+    assert error.details.operation == :read
+    assert error.details.request == request
   end
 end

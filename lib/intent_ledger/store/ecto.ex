@@ -15,8 +15,9 @@ defmodule IntentLedger.Store.Ecto do
 
   use GenServer
 
-  alias IntentLedger.{Error, Store}
-  alias IntentLedger.Store.{CommitRequest, Outbox}
+  alias IntentLedger.{Error, Store, Time}
+  alias IntentLedger.Store.{Commit, CommitRequest, Outbox}
+  alias IntentLedger.Store.Ecto.{Query, Schema}
 
   @dependencies [:ecto_sql, :postgrex]
   @postgres_adapter Module.concat([Ecto, Adapters, Postgres])
@@ -129,8 +130,17 @@ defmodule IntentLedger.Store.Ecto do
   def outbox(ref, ledger, request, opts), do: GenServer.call(ref, {:outbox, ledger, request, opts})
 
   @impl true
+  def handle_call({:commit, ledger, %CommitRequest{} = request, opts}, _from, %__MODULE__{} = state) do
+    result =
+      transact(state.repo, transaction_opts(opts), fn ->
+        apply_commit(state, ledger, request)
+      end)
+
+    {:reply, result, state}
+  end
+
   def handle_call({operation, _ledger, request, _opts}, _from, %__MODULE__{} = state)
-      when operation in [:commit, :read, :lease, :listing, :outbox] do
+      when operation in [:read, :lease, :listing, :outbox] do
     {:reply, not_implemented(operation, request), state}
   end
 
@@ -168,6 +178,235 @@ defmodule IntentLedger.Store.Ecto do
     end
   end
 
+  defp transact(repo, opts, fun) do
+    case repo.transaction(fun, opts) do
+      {:ok, %Commit{} = commit} ->
+        {:ok, commit}
+
+      {:ok, {:error, reason}} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error,
+         adapter_error("Ecto transaction returned an invalid result",
+           reason: :invalid_transaction_result,
+           result: other
+         )}
+    end
+  catch
+    kind, reason -> {:error, adapter_error("Ecto transaction failed", reason: {kind, reason})}
+  end
+
+  defp apply_commit(%__MODULE__{} = state, ledger, %CommitRequest{} = request) do
+    now = Time.utc_now()
+    opts = source_opts(state)
+
+    request.writes
+    |> Enum.reduce_while({nil, [], %{}}, fn write, {result, signals, stream_versions} ->
+      case apply_write(state, ledger, write, request, now, opts, stream_versions) do
+        {:ok, nil, next_signals, next_stream_versions} ->
+          {:cont, {result, signals ++ next_signals, next_stream_versions}}
+
+        {:ok, next_result, next_signals, next_stream_versions} ->
+          {:cont, {next_result, signals ++ next_signals, next_stream_versions}}
+
+        {:error, reason} ->
+          {:halt, rollback(state.repo, reason)}
+      end
+    end)
+    |> case do
+      {:error, reason} ->
+        {:error, reason}
+
+      {result, signals, _stream_versions} ->
+        Commit.new(
+          command_id: request.command_id,
+          result: result,
+          signals: signals,
+          writes: request.writes,
+          metadata: request.metadata
+        )
+    end
+  end
+
+  defp apply_write(state, ledger, %{type: :put_intent, key: intent_id, value: intent}, _request, now, _opts, versions) do
+    row =
+      %{
+        ledger: ledger_key(ledger),
+        intent_id: intent_id,
+        intent: encode_value(intent)
+      }
+      |> put_timestamps(now)
+
+    insert_all(state, :intents, [row], on_conflict: :nothing, conflict_target: [:ledger, :intent_id])
+    {:ok, nil, [], versions}
+  end
+
+  defp apply_write(
+         state,
+         ledger,
+         %{type: :put_state, key: intent_id, value: intent_state},
+         _request,
+         now,
+         _opts,
+         versions
+       ) do
+    row =
+      intent_state
+      |> state_row(ledger, intent_id)
+      |> put_timestamps(now)
+
+    insert_all(state, :states, [row],
+      on_conflict:
+        {:replace,
+         [
+           :status,
+           :queue,
+           :shard,
+           :priority,
+           :visible_at,
+           :attempt,
+           :claim_id,
+           :token_hash,
+           :lease_until,
+           :state,
+           :updated_at
+         ]},
+      conflict_target: [:ledger, :intent_id]
+    )
+
+    {:ok, nil, [], versions}
+  end
+
+  defp apply_write(
+         state,
+         ledger,
+         %{type: :append_signal, stream: stream, value: signal, metadata: metadata},
+         request,
+         now,
+         _opts,
+         versions
+       ) do
+    with {:ok, version} <- next_stream_version(stream, metadata, request, versions) do
+      signal_row =
+        %{
+          ledger: ledger_key(ledger),
+          stream: stream,
+          version: version,
+          signal: encode_value(signal)
+        }
+        |> put_timestamps(now)
+
+      stream_row =
+        %{
+          ledger: ledger_key(ledger),
+          stream: stream,
+          version: version
+        }
+        |> put_timestamps(now)
+
+      insert_all(state, :streams, [stream_row],
+        on_conflict: {:replace, [:version, :updated_at]},
+        conflict_target: [:ledger, :stream]
+      )
+
+      insert_all(state, :signals, [signal_row], on_conflict: :nothing, conflict_target: [:ledger, :stream, :version])
+
+      {:ok, nil, [signal], Map.put(versions, stream, version)}
+    end
+  end
+
+  defp apply_write(
+         state,
+         ledger,
+         %{type: :put_idempotency, key: command_id, value: result},
+         request,
+         now,
+         _opts,
+         versions
+       ) do
+    row =
+      %{
+        ledger: ledger_key(ledger),
+        command_id: command_id,
+        operation: request.operation |> to_string(),
+        command: encode_value(request.command),
+        result: encode_value(result)
+      }
+      |> put_timestamps(now)
+
+    insert_all(state, :commands, [row], on_conflict: :nothing, conflict_target: [:ledger, :command_id])
+    {:ok, result, [], versions}
+  end
+
+  defp apply_write(state, ledger, %{type: :put_claim, key: claim_id, value: claim}, _request, now, _opts, versions) do
+    row =
+      claim
+      |> claim_row(ledger, claim_id)
+      |> put_timestamps(now)
+
+    insert_all(state, :claims, [row],
+      on_conflict: {:replace, [:intent_id, :owner_id, :token_hash, :lease_until, :claim, :updated_at]},
+      conflict_target: [:ledger, :claim_id]
+    )
+
+    {:ok, nil, [], versions}
+  end
+
+  defp apply_write(state, ledger, %{type: :delete_claim, key: claim_id}, _request, _now, opts, versions) do
+    state.repo.delete_all(Query.by_fields(:claims, ledger, [claim_id: claim_id], opts), [])
+    {:ok, nil, [], versions}
+  end
+
+  defp apply_write(state, ledger, %{type: :put_shard_lease, key: key, value: lease}, _request, now, _opts, versions) do
+    row =
+      lease
+      |> shard_lease_row(ledger, key)
+      |> put_timestamps(now)
+
+    insert_all(state, :shard_leases, [row],
+      on_conflict: {:replace, [:owner_id, :lease_until, :lease, :updated_at]},
+      conflict_target: [:ledger, :queue, :shard]
+    )
+
+    {:ok, nil, [], versions}
+  end
+
+  defp apply_write(state, ledger, %{type: :delete_shard_lease, key: key}, _request, _now, opts, versions) do
+    {queue, shard} = parse_shard_key(key)
+    state.repo.delete_all(Query.by_fields(:shard_leases, ledger, [queue: queue, shard: shard], opts), [])
+    {:ok, nil, [], versions}
+  end
+
+  defp apply_write(state, ledger, %{type: :put_outbox, key: key, value: entry}, _request, now, _opts, versions) do
+    row =
+      entry
+      |> outbox_row(ledger, key, next_outbox_sequence(entry, versions))
+      |> put_timestamps(now)
+
+    insert_all(state, :outbox, [row], on_conflict: :nothing, conflict_target: [:ledger, :key])
+    {:ok, nil, [], Map.update(versions, :outbox_sequence, row.sequence, &max(&1, row.sequence))}
+  end
+
+  defp apply_write(state, ledger, %{type: :ack_outbox, key: key, metadata: metadata}, _request, now, opts, versions) do
+    fields = [
+      acked_at: Map.get(metadata, :acked_at, now),
+      consumer: Map.get(metadata, :consumer),
+      metadata: encode_value(metadata),
+      updated_at: now
+    ]
+
+    state.repo.update_all(Query.by_fields(:outbox, ledger, [key: key], opts), set: fields)
+    {:ok, nil, [], versions}
+  end
+
+  defp apply_write(_state, _ledger, write, _request, _now, _opts, _versions) do
+    {:error, adapter_error("Ecto commit write is not implemented yet", reason: :unsupported_write, write: write)}
+  end
+
   defp not_implemented(operation, request) do
     {:error,
      adapter_error("Ecto store operation is not implemented yet",
@@ -176,6 +415,147 @@ defmodule IntentLedger.Store.Ecto do
        request: compact_request(request)
      )}
   end
+
+  defp insert_all(%__MODULE__{} = state, table, rows, opts) do
+    state.repo.insert_all(Schema.source(table, source_opts(state)), rows, Keyword.put(opts, :prefix, state.prefix))
+  end
+
+  defp source_opts(%__MODULE__{} = state), do: [prefix: state.prefix, tables: state.tables]
+
+  defp transaction_opts(opts), do: Keyword.get(opts, :transaction_opts, [])
+
+  defp rollback(repo, reason) do
+    if function_exported?(repo, :rollback, 1) do
+      repo.rollback(reason)
+    else
+      {:error, reason}
+    end
+  end
+
+  defp next_stream_version(stream, metadata, request, versions) do
+    cond do
+      is_integer(Map.get(metadata, :version)) and Map.get(metadata, :version) >= 0 ->
+        {:ok, Map.fetch!(metadata, :version)}
+
+      is_integer(Map.get(versions, stream)) ->
+        {:ok, Map.fetch!(versions, stream) + 1}
+
+      expected = stream_precondition(request, stream) ->
+        {:ok, expected + 1}
+
+      true ->
+        {:ok, 1}
+    end
+  end
+
+  defp stream_precondition(%CommitRequest{} = request, stream) do
+    Enum.find_value(request.preconditions, fn
+      %{type: :stream_version, stream: ^stream, expected: expected} when is_integer(expected) -> expected
+      _precondition -> nil
+    end)
+  end
+
+  defp state_row(intent_state, ledger, intent_id) do
+    %{
+      ledger: ledger_key(ledger),
+      intent_id: intent_id,
+      status: field(intent_state, :status) |> to_string(),
+      queue: field(intent_state, :queue, "default") |> to_string(),
+      shard: field(intent_state, :shard, 0),
+      priority: field(intent_state, :priority, 0),
+      visible_at: field(intent_state, :visible_at),
+      attempt: field(intent_state, :attempt, 0),
+      claim_id: field(intent_state, :claim_id),
+      token_hash: field(intent_state, :token_hash),
+      lease_until: field(intent_state, :lease_until),
+      state: encode_value(intent_state)
+    }
+  end
+
+  defp claim_row(claim, ledger, claim_id) do
+    %{
+      ledger: ledger_key(ledger),
+      claim_id: claim_id,
+      intent_id: field(claim, :intent_id),
+      owner_id: field(claim, :owner_id),
+      token_hash: field(claim, :token_hash),
+      lease_until: field(claim, :lease_until),
+      claim: encode_value(claim)
+    }
+  end
+
+  defp shard_lease_row(lease, ledger, key) do
+    {queue, shard} = parse_shard_key(key)
+
+    %{
+      ledger: ledger_key(ledger),
+      queue: field(lease, :queue, queue) |> to_string(),
+      shard: field(lease, :shard, shard),
+      owner_id: field(lease, :owner_id),
+      lease_until: field(lease, :lease_until),
+      lease: encode_value(lease)
+    }
+  end
+
+  defp outbox_row(entry, ledger, key, sequence) do
+    signal = field(entry, :signal, %{})
+
+    %{
+      ledger: ledger_key(ledger),
+      key: key,
+      sequence: sequence,
+      stream: field(entry, :stream),
+      signal_id: field(entry, :signal_id) || field(signal, :id),
+      signal_type: field(entry, :signal_type) || field(signal, :type),
+      subject: field(entry, :subject) || field(signal, :subject),
+      signal: encode_value(signal),
+      entry: encode_value(entry),
+      acked_at: field(entry, :acked_at),
+      consumer: field(entry, :consumer),
+      metadata: encode_value(field(entry, :metadata))
+    }
+  end
+
+  defp next_outbox_sequence(entry, versions) do
+    case field(entry, :sequence) do
+      sequence when is_integer(sequence) and sequence > 0 -> sequence
+      _missing -> Map.get(versions, :outbox_sequence, 0) + 1
+    end
+  end
+
+  defp put_timestamps(row, now), do: Map.merge(row, %{inserted_at: now, updated_at: now})
+
+  defp encode_value(%DateTime{} = value), do: DateTime.to_iso8601(value)
+
+  defp encode_value(%{} = value) when not is_struct(value) do
+    Map.new(value, fn {key, nested_value} -> {key, encode_value(nested_value)} end)
+  end
+
+  defp encode_value(%_struct{} = value) do
+    value
+    |> Map.from_struct()
+    |> encode_value()
+  end
+
+  defp encode_value(values) when is_list(values), do: Enum.map(values, &encode_value/1)
+  defp encode_value(value), do: value
+
+  defp field(value, key, default \\ nil)
+  defp field(nil, _key, default), do: default
+  defp field(%{} = value, key, default), do: Map.get(value, key, Map.get(value, Atom.to_string(key), default))
+  defp field(value, key, default) when is_struct(value), do: value |> Map.from_struct() |> field(key, default)
+  defp field(_value, _key, default), do: default
+
+  defp ledger_key(ledger), do: ledger |> inspect() |> String.trim_leading("Elixir.")
+
+  defp parse_shard_key("shard:" <> rest) do
+    case String.split(rest, ":", parts: 2) do
+      [queue, shard] -> {queue, String.to_integer(shard)}
+      _invalid -> {rest, 0}
+    end
+  end
+
+  defp parse_shard_key(_key), do: {"default", 0}
 
   defp compact_request(%CommitRequest{} = request), do: %{operation: request.operation, command_id: request.command_id}
   defp compact_request(%Outbox{} = request), do: %{type: request.type, key: request.key, consumer: request.consumer}

@@ -147,6 +147,7 @@ defmodule IntentLedger.MixProject do
           IntentLedger.Store.Bedrock.Value,
           IntentLedger.Store.Ecto,
           IntentLedger.Store.Ecto.Migration,
+          IntentLedger.Store.Ecto.Query,
           IntentLedger.Store.Ecto.Schema,
           IntentLedger.Store.Conflict,
           IntentLedger.Store.Listing,
