@@ -170,7 +170,18 @@ defmodule IntentLedger.MixProject do
   defp package do
     [
       name: :intent_ledger,
-      files: ["lib", "examples", "mix.exs", "README.md", "LICENSE", "CHANGELOG.md", "usage-rules.md", "docs"],
+      files: [
+        "lib",
+        "examples",
+        "mix.exs",
+        ".formatter.exs",
+        "README.md",
+        "LICENSE",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "usage-rules.md",
+        "docs"
+      ],
       maintainers: ["Mike Hostetler"],
       licenses: ["Apache-2.0"],
       links: %{
