@@ -258,17 +258,18 @@ defmodule IntentLedger do
 
   defp command_call(ledger, signal, message, opts) do
     case Command.normalize(signal) do
-      {:ok, command} -> call(ledger, {:command, command, message}, opts)
+      {:ok, command} -> call(ledger, {:command, command, propagate_command(command, message)}, opts)
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp message_for(%{operation: :submit, data: data}) do
-    {:submit, Map.fetch!(data, :intent), command_opts(data, [:now])}
+    {:submit, put_intent_lineage(Map.fetch!(data, :intent), data), command_opts(data, [:now])}
   end
 
   defp message_for(%{operation: :submit_many, data: data}) do
-    {:submit_many, Map.fetch!(data, :intents), command_opts(data, [:now])}
+    intents = data |> Map.fetch!(:intents) |> put_intents_lineage(data)
+    {:submit_many, intents, command_opts(data, [:now])}
   end
 
   defp message_for(%{operation: :claim, data: data}) do
@@ -309,13 +310,100 @@ defmodule IntentLedger do
     {:recover, Map.fetch!(data, :queue), command_opts(data, [:limit, :now])}
   end
 
+  defp propagate_command(%{operation: :submit, data: data}, {:submit, attrs, opts}) do
+    {:submit, put_intent_lineage(attrs, data), merge_command_opts(opts, data, [:now])}
+  end
+
+  defp propagate_command(%{operation: :submit_many, data: data}, {:submit_many, attrs_list, opts}) do
+    {:submit_many, put_intents_lineage(attrs_list, data), merge_command_opts(opts, data, [:now])}
+  end
+
+  defp propagate_command(%{operation: :claim, data: data}, {:claim, queue, owner_id, opts}) do
+    {:claim, queue, owner_id, merge_command_opts(opts, data, [:limit, :lease_ms, :now])}
+  end
+
+  defp propagate_command(%{operation: :heartbeat, data: data}, {:heartbeat, claim_id, token, opts}) do
+    {:heartbeat, claim_id, token, merge_command_opts(opts, data, [:lease_ms, :now])}
+  end
+
+  defp propagate_command(%{operation: :complete, data: data}, {:complete, claim_id, token, result, opts}) do
+    {:complete, claim_id, token, result, merge_command_opts(opts, data, [:now])}
+  end
+
+  defp propagate_command(%{operation: :fail, data: data}, {:fail, claim_id, token, error, opts}) do
+    {:fail, claim_id, token, error, merge_command_opts(opts, data, [:retry_at, :retry_ms, :now])}
+  end
+
+  defp propagate_command(%{operation: :release, data: data}, {:release, claim_id, token, opts}) do
+    {:release, claim_id, token, merge_command_opts(opts, data, [:now])}
+  end
+
+  defp propagate_command(%{operation: :cancel, data: data}, {:cancel, intent_id, reason, opts}) do
+    {:cancel, intent_id, reason, merge_command_opts(opts, data, [:now])}
+  end
+
+  defp propagate_command(%{operation: :requeue, data: data}, {:requeue, intent_id, opts}) do
+    {:requeue, intent_id, merge_command_opts(opts, data, [:retry_at, :now])}
+  end
+
+  defp propagate_command(%{operation: :mark_ambiguous, data: data}, {:mark_ambiguous, intent_id, reason, opts}) do
+    {:mark_ambiguous, intent_id, reason, merge_command_opts(opts, data, [:now])}
+  end
+
+  defp propagate_command(%{operation: :recover, data: data}, {:recover, queue, opts}) do
+    {:recover, queue, merge_command_opts(opts, data, [:limit, :now])}
+  end
+
+  defp propagate_command(_command, message), do: message
+
   defp command_opts(data, fields) do
     data
-    |> Map.take(fields)
+    |> Map.take(fields ++ Command.common_metadata_fields())
     |> Enum.map(fn
       {field, value} when field in [:now, :retry_at] -> {field, normalize_command_time(value)}
       field_and_value -> field_and_value
     end)
+  end
+
+  defp merge_command_opts(opts, data, fields), do: Keyword.merge(opts, command_opts(data, fields))
+
+  defp put_intent_lineage(intent, data) when is_list(intent) do
+    intent
+    |> Map.new()
+    |> put_intent_lineage(data)
+  end
+
+  defp put_intent_lineage(%IntentLedger.Intent{} = intent, data) do
+    intent
+    |> Map.from_struct()
+    |> put_intent_lineage(data)
+  end
+
+  defp put_intent_lineage(%{} = intent, data) do
+    data
+    |> lineage_attrs()
+    |> Enum.reduce(intent, fn {field, value}, acc ->
+      if lineage_present?(acc, field) do
+        acc
+      else
+        Map.put(acc, field, value)
+      end
+    end)
+  end
+
+  defp put_intent_lineage(intent, _data), do: intent
+
+  defp put_intents_lineage(intents, data) when is_list(intents), do: Enum.map(intents, &put_intent_lineage(&1, data))
+  defp put_intents_lineage(intents, _data), do: intents
+
+  defp lineage_attrs(data) do
+    data
+    |> Map.take(Command.lineage_fields())
+    |> Map.reject(fn {_field, value} -> is_nil(value) end)
+  end
+
+  defp lineage_present?(attrs, field) do
+    Map.has_key?(attrs, field) or Map.has_key?(attrs, Atom.to_string(field))
   end
 
   defp normalize_command_time(value) when is_binary(value) do

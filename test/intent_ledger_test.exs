@@ -263,12 +263,23 @@ defmodule IntentLedgerTest do
 
   test "submits batches and claims multiple intents", %{ledger: ledger} do
     {:ok, records} =
-      IntentLedger.submit_many(ledger, [
-        %{key: "batch:1", kind: "job.run", priority: 1},
-        %{key: "batch:2", kind: "job.run", priority: 2}
-      ])
+      IntentLedger.submit_many(
+        ledger,
+        [
+          %{key: "batch:1", kind: "job.run", priority: 1},
+          %{key: "batch:2", kind: "job.run", priority: 2}
+        ],
+        correlation_id: "corr_batch",
+        root_intent_id: "int_root",
+        depth: 1,
+        actor: "batcher"
+      )
 
     assert length(records) == 2
+    assert Enum.all?(records, &(&1.intent.correlation_id == "corr_batch"))
+    assert Enum.all?(records, &(&1.intent.root_intent_id == "int_root"))
+    assert Enum.all?(records, &(&1.intent.depth == 1))
+    assert Enum.all?(records, &(&1.intent.actor == "batcher"))
 
     {:ok, claimed} = IntentLedger.claim(ledger, :default, "worker-1", limit: 2)
     assert Enum.map(claimed, & &1.intent.key) == ["batch:2", "batch:1"]
@@ -365,6 +376,26 @@ defmodule IntentLedgerTest do
              IntentLedger.submit(ledger, %{key: "job:bad-command", kind: "job.run"}, depth: -1)
 
     assert :empty = IntentLedger.claim(ledger, :default, "worker-1")
+
+    assert {:ok, record} =
+             IntentLedger.submit(
+               ledger,
+               %{key: "job:lineage", kind: "job.run"},
+               command_id: "cmd_lineage",
+               correlation_id: "corr_1",
+               causation_id: "cmd_parent",
+               root_intent_id: "int_root",
+               parent_intent_id: "int_parent",
+               depth: 2,
+               actor: "agent"
+             )
+
+    assert record.intent.correlation_id == "corr_1"
+    assert record.intent.causation_id == "cmd_parent"
+    assert record.intent.root_intent_id == "int_root"
+    assert record.intent.parent_intent_id == "int_parent"
+    assert record.intent.depth == 2
+    assert record.intent.actor == "agent"
   end
 
   test "replays duplicate command ids without duplicate lifecycle commits", %{ledger: ledger} do
@@ -387,9 +418,24 @@ defmodule IntentLedgerTest do
 
   test "command signal entrypoint uses the same replay path as public APIs", %{ledger: ledger} do
     signal =
-      IntentLedger.Command.submit(MyApp.IntentLedger, %{key: "job:signal", kind: "job.run"}, command_id: "cmd_signal")
+      IntentLedger.Command.submit(MyApp.IntentLedger, %{key: "job:signal", kind: "job.run"},
+        command_id: "cmd_signal",
+        correlation_id: "corr_signal",
+        causation_id: "cmd_parent",
+        root_intent_id: "int_root",
+        parent_intent_id: "int_parent",
+        depth: 2,
+        actor: "agent"
+      )
 
     {:ok, via_signal} = IntentLedger.command(ledger, signal)
+
+    assert via_signal.intent.correlation_id == "corr_signal"
+    assert via_signal.intent.causation_id == "cmd_parent"
+    assert via_signal.intent.root_intent_id == "int_root"
+    assert via_signal.intent.parent_intent_id == "int_parent"
+    assert via_signal.intent.depth == 2
+    assert via_signal.intent.actor == "agent"
 
     {:ok, replayed} =
       IntentLedger.submit(ledger, %{key: "job:signal-other", kind: "job.run"}, command_id: "cmd_signal")
