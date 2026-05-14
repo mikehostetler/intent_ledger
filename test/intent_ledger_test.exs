@@ -64,6 +64,23 @@ defmodule IntentLedgerTest do
     end
   end
 
+  defmodule ClassifyingExpiredClaimLifecycle do
+    @behaviour IntentLedger.Lifecycle
+
+    @impl true
+    def classify_expired_claim(record, context) do
+      if pid = Process.whereis(:intent_ledger_expired_classifier_test) do
+        send(pid, {:classified_expired_claim, record.intent.id, context.ledger})
+      end
+
+      case record.intent.key do
+        "expired:retry" -> :retry
+        "expired:ambiguous" -> :ambiguous
+        "expired:reject" -> {:error, :expired_classification_rejected}
+      end
+    end
+  end
+
   setup do
     name = Module.concat(__MODULE__, "Ledger#{System.unique_integer([:positive])}")
 
@@ -336,6 +353,62 @@ defmodule IntentLedgerTest do
 
     assert claimed_again.intent.id == claimed.intent.id
     assert claimed_again.claim.attempt == 2
+  end
+
+  test "classifies expired claims through lifecycle callbacks", %{ledger: _ledger} do
+    Process.register(self(), :intent_ledger_expired_classifier_test)
+
+    name = Module.concat(__MODULE__, "ExpiredClassifierLedger#{System.unique_integer([:positive])}")
+    now = ~U[2026-01-01 00:00:00Z]
+    expired_at = Time.add_ms(now, 2)
+
+    start_supervised!(
+      {IntentLedger, name: name, lifecycle: ClassifyingExpiredClaimLifecycle, store: IntentLedger.Store.Memory}
+    )
+
+    {:ok, retry_source} =
+      IntentLedger.submit(
+        name,
+        %{key: "expired:retry", kind: "job.run", max_attempts: 3, ambiguity_policy: :manual},
+        now: now
+      )
+
+    {:ok, retry_claim} = IntentLedger.claim(name, :default, "worker-1", now: now, lease_ms: 1)
+    assert retry_claim.intent.id == retry_source.intent.id
+    {:ok, [retried]} = IntentLedger.recover(name, :default, now: expired_at)
+
+    assert retried.intent.id == retry_source.intent.id
+    assert retried.state.status == :available
+    retry_id = retry_source.intent.id
+    assert_receive {:classified_expired_claim, ^retry_id, ^name}
+
+    {:ok, ambiguous_source} =
+      IntentLedger.submit(
+        name,
+        %{key: "expired:ambiguous", kind: "job.run", max_attempts: 3, ambiguity_policy: :retry},
+        now: now
+      )
+
+    {:ok, ambiguous_claim} = IntentLedger.claim(name, :default, "worker-2", now: now, lease_ms: 1)
+    assert ambiguous_claim.intent.id == ambiguous_source.intent.id
+
+    {:ok, [ambiguous]} = IntentLedger.recover(name, :default, now: expired_at)
+
+    assert ambiguous.intent.id == ambiguous_source.intent.id
+    assert ambiguous.state.status == :ambiguous
+
+    {:ok, rejected_source} = IntentLedger.submit(name, %{key: "expired:reject", kind: "job.run"}, now: now)
+    {:ok, rejected_claim} = IntentLedger.claim(name, :default, "worker-3", now: now, lease_ms: 1)
+    assert rejected_claim.intent.id == rejected_source.intent.id
+
+    assert {:error, :expired_classification_rejected} = IntentLedger.recover(name, :default, now: expired_at)
+
+    {:ok, still_claimed} = IntentLedger.get(name, rejected_source.intent.id)
+    assert still_claimed.state.status == :claimed
+
+    if Process.whereis(:intent_ledger_expired_classifier_test) == self() do
+      Process.unregister(:intent_ledger_expired_classifier_test)
+    end
   end
 
   test "submits batches and claims multiple intents", %{ledger: ledger} do

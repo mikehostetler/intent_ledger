@@ -306,7 +306,10 @@ defmodule IntentLedger.Server do
   end
 
   def handle_call({:recover, queue, opts}, _from, state) do
-    opts = Keyword.put_new(opts, :now, now(opts))
+    opts =
+      opts
+      |> Keyword.put_new(:now, now(opts))
+      |> put_expired_claim_classifier(state)
 
     reply_commit(
       state,
@@ -512,7 +515,10 @@ defmodule IntentLedger.Server do
   end
 
   defp execute_public_command({:recover, queue, opts}, state) do
-    opts = Keyword.put_new(opts, :now, now(opts))
+    opts =
+      opts
+      |> Keyword.put_new(:now, now(opts))
+      |> put_expired_claim_classifier(state)
 
     unwrap_reply(
       reply_commit(
@@ -651,6 +657,14 @@ defmodule IntentLedger.Server do
 
     Keyword.put(opts, :classify_failure, fn record, error ->
       Lifecycle.classify_failure(state.lifecycle, record, error, context)
+    end)
+  end
+
+  defp put_expired_claim_classifier(opts, state) do
+    context = context(state, opts)
+
+    Keyword.put(opts, :classify_expired_claim, fn record ->
+      Lifecycle.classify_expired_claim(state.lifecycle, record, context)
     end)
   end
 

@@ -443,23 +443,30 @@ defmodule IntentLedger.Store.Memory do
     now = Keyword.fetch!(opts, :now)
     limit = Keyword.get(opts, :limit, 100)
 
-    {next_state, records, signals} =
-      state.states
-      |> Enum.filter(fn {_id, intent_state} ->
-        intent_state.queue == queue and intent_state.status == :claimed and
-          DateTime.compare(intent_state.lease_until, now) != :gt
-      end)
-      |> Enum.take(limit)
-      |> Enum.reduce({state, [], []}, fn {intent_id, intent_state}, {acc_state, acc_records, acc_signals} ->
-        intent = Map.fetch!(acc_state.intents, intent_id)
+    case state.states
+         |> Enum.filter(fn {_id, intent_state} ->
+           intent_state.queue == queue and intent_state.status == :claimed and
+             DateTime.compare(intent_state.lease_until, now) != :gt
+         end)
+         |> Enum.take(limit)
+         |> Enum.reduce_while({:ok, state, [], []}, fn {intent_id, intent_state},
+                                                       {:ok, acc_state, acc_records, acc_signals} ->
+           intent = Map.fetch!(acc_state.intents, intent_id)
 
-        {next_state, record, new_signals} =
-          commit_expired_claim(acc_state, ledger, intent, intent_state, now)
+           case commit_expired_claim(acc_state, ledger, intent, intent_state, now, opts) do
+             {:ok, next_state, record, new_signals} ->
+               {:cont, {:ok, next_state, [record | acc_records], acc_signals ++ new_signals}}
 
-        {next_state, [record | acc_records], acc_signals ++ new_signals}
-      end)
+             {:error, reason} ->
+               {:halt, {:error, reason}}
+           end
+         end) do
+      {:ok, next_state, records, signals} ->
+        {:reply, {:ok, Enum.reverse(records), signals}, next_state}
 
-    {:reply, {:ok, Enum.reverse(records), signals}, next_state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   defp commit_submit(state, ledger, %Intent{} = intent, opts) do
@@ -640,31 +647,76 @@ defmodule IntentLedger.Store.Memory do
      })}
   end
 
-  defp commit_expired_claim(state, ledger, intent, intent_state, now) do
-    lease_expired =
-      signal(ledger, :claim_lease_expired, intent, %{
-        claim_id: intent_state.claim_id,
-        lease_until: intent_state.lease_until
-      })
+  defp commit_expired_claim(state, ledger, intent, intent_state, now, opts) do
+    with {:ok, classification} <- classify_expired_claim(opts, %Record{intent: intent, state: intent_state}) do
+      lease_expired =
+        signal(ledger, :claim_lease_expired, intent, %{
+          claim_id: intent_state.claim_id,
+          lease_until: intent_state.lease_until
+        })
 
-    {next_intent_state, extra_signal} =
-      if intent.ambiguity_policy == :retry and intent_state.attempt < intent_state.max_attempts do
-        {%{clear_claim(intent_state, now) | status: :available, visible_at: now},
-         signal(ledger, :intent_available, intent, %{visible_at: now})}
-      else
-        {%{clear_claim(intent_state, now) | status: :ambiguous},
-         signal(ledger, :intent_marked_ambiguous, intent, %{reason: :lease_expired})}
-      end
+      {next_intent_state, extra_signal} =
+        expired_claim_transition(ledger, intent, intent_state, now, classification)
 
-    signals = [lease_expired, extra_signal]
+      signals = [lease_expired, extra_signal]
 
-    next_state =
-      state
-      |> maybe_drop_claim(intent_state.claim_id)
-      |> put_state(intent, next_intent_state)
-      |> append(ledger, intent, signals)
+      next_state =
+        state
+        |> maybe_drop_claim(intent_state.claim_id)
+        |> put_state(intent, next_intent_state)
+        |> append(ledger, intent, signals)
 
-    {next_state, record(next_state, intent.id), signals}
+      {:ok, next_state, record(next_state, intent.id), signals}
+    end
+  end
+
+  defp classify_expired_claim(opts, %Record{} = record) do
+    case Keyword.get(opts, :classify_expired_claim) do
+      nil ->
+        {:ok, :default}
+
+      classify when is_function(classify, 1) ->
+        case classify.(record) do
+          classification when classification in [:default, :retry, :ambiguous] ->
+            {:ok, classification}
+
+          {:error, reason} ->
+            {:error, reason}
+
+          classification ->
+            {:error, {:invalid_expired_claim_classification, classification}}
+        end
+    end
+  end
+
+  defp expired_claim_transition(ledger, intent, intent_state, now, :default) do
+    if intent.ambiguity_policy == :retry and intent_state.attempt < intent_state.max_attempts do
+      retry_expired_claim(ledger, intent, intent_state, now)
+    else
+      ambiguous_expired_claim(ledger, intent, intent_state, now)
+    end
+  end
+
+  defp expired_claim_transition(ledger, intent, intent_state, now, :retry) do
+    if intent_state.attempt < intent_state.max_attempts do
+      retry_expired_claim(ledger, intent, intent_state, now)
+    else
+      ambiguous_expired_claim(ledger, intent, intent_state, now)
+    end
+  end
+
+  defp expired_claim_transition(ledger, intent, intent_state, now, :ambiguous) do
+    ambiguous_expired_claim(ledger, intent, intent_state, now)
+  end
+
+  defp retry_expired_claim(ledger, intent, intent_state, now) do
+    {%{clear_claim(intent_state, now) | status: :available, visible_at: now},
+     signal(ledger, :intent_available, intent, %{visible_at: now})}
+  end
+
+  defp ambiguous_expired_claim(ledger, intent, intent_state, now) do
+    {%{clear_claim(intent_state, now) | status: :ambiguous},
+     signal(ledger, :intent_marked_ambiguous, intent, %{reason: :lease_expired})}
   end
 
   defp available(state, queue, now) do

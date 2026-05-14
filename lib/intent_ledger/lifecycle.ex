@@ -63,6 +63,19 @@ defmodule IntentLedger.Lifecycle do
   end
 
   @doc false
+  @spec classify_expired_claim(module() | nil, Record.t(), context()) ::
+          :default | :retry | :ambiguous | {:error, term()}
+  def classify_expired_claim(nil, %Record{}, _context), do: :default
+
+  def classify_expired_claim(module, %Record{} = record, context) do
+    if function_exported?(module, :classify_expired_claim, 2) do
+      module.classify_expired_claim(record, context)
+    else
+      :default
+    end
+  end
+
+  @doc false
   @spec after_transition(module() | nil, [Jido.Signal.t()], context()) :: :ok | {:error, term()}
   def after_transition(nil, _signals, _context), do: :ok
 
