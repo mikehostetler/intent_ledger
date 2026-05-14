@@ -33,6 +33,9 @@ single-node deployments only.
   signal delivery.
 - `IntentLedger.Projection` defines lightweight rebuild hooks for query models
   derived from replayed lifecycle signals.
+- `IntentLedger.Telemetry` and `IntentLedger.Inspection` expose stable
+  operational telemetry and read-only inspection requests for dashboards,
+  alerts, and runbooks. See [Operations And Observability](docs/operations.md).
 - `IntentLedger.Store` defines the persistence contract.
 - `IntentLedger.Store.Memory` is the executable in-memory reference adapter for
   tests and local examples. It is not durable and is not a clustered production
@@ -257,6 +260,17 @@ end
 
 When a durable projection stores its own offset, replay from that cursor and
 pass the returned signals to `IntentLedger.Projection.catch_up/4`.
+
+## Operations
+
+Intent Ledger emits stable `:telemetry` events for command handling, store
+commits, conflicts, claims, shard leases, recovery, outbox dispatch, replay,
+projection refresh, and inspection calls. Runtime inspection APIs expose
+read-only queue depth, shard ownership, claim, retry, ambiguity, outbox lag, and
+projection lag views without returning payloads or claim secrets.
+
+Use [Operations And Observability](docs/operations.md) for metric mapping,
+dashboard panels, alert guidelines, and runbook checks.
 
 ## Development
 

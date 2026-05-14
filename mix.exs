@@ -111,6 +111,7 @@ defmodule IntentLedger.MixProject do
       source_ref: "v#{@version}",
       extras: [
         "README.md",
+        "docs/operations.md",
         "docs/bedrock.md",
         "docs/ecto.md",
         "CHANGELOG.md",
