@@ -4,6 +4,18 @@ defmodule IntentLedger.MixProject do
   @version "0.1.0"
   @source_url "https://github.com/mikehostetler/intent_ledger"
   @description "OTP-native intent lifecycle ledger for deferred agent work"
+  @extra_toc [
+    {"README.md", [title: "Overview"]},
+    {"guides/bedrock.md", [title: "Bedrock Runtime"]},
+    {"guides/reliability.md", [title: "Reliability"]},
+    {"guides/operations.md", [title: "Operations"]},
+    {"guides/clustering.md", [title: "Clustering"]},
+    {"CHANGELOG.md", [title: "Changelog"]},
+    {"CONTRIBUTING.md", [title: "Contributing"]},
+    {"LICENSE", [title: "License"]}
+  ]
+  @guide_paths for {path, _opts} <- @extra_toc, String.starts_with?(path, "guides/"), do: path
+  @project_paths ["CHANGELOG.md", "CONTRIBUTING.md", "LICENSE"]
 
   def project do
     [
@@ -110,15 +122,10 @@ defmodule IntentLedger.MixProject do
     [
       main: "readme",
       source_ref: "v#{@version}",
-      extras: [
-        "README.md",
-        "docs/operations.md",
-        "docs/reliability.md",
-        "docs/clustering.md",
-        "docs/bedrock.md",
-        "CHANGELOG.md",
-        "CONTRIBUTING.md",
-        "LICENSE"
+      extras: @extra_toc,
+      groups_for_extras: [
+        Guides: @guide_paths,
+        Project: @project_paths
       ],
       groups_for_modules: [
         "Public API": [
@@ -152,7 +159,7 @@ defmodule IntentLedger.MixProject do
         "CHANGELOG.md",
         "CONTRIBUTING.md",
         "usage-rules.md",
-        "docs"
+        "guides"
       ],
       maintainers: ["Mike Hostetler"],
       licenses: ["Apache-2.0"],

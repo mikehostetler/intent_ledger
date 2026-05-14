@@ -259,7 +259,7 @@ Remove from the release path:
 - Ecto migration helpers;
 - Ecto query/schema modules;
 - Postgres tests;
-- Postgres docs;
+- Postgres guide content;
 - optional dependency load tests for Ecto/Postgres;
 - `mix test.postgres`;
 - any README references to Postgres as an adapter.
@@ -379,7 +379,7 @@ Unit gates:
 - replay window tests;
 - projection catch-up tests;
 - outbox tests;
-- public API docs examples compile.
+- public API examples compile.
 
 Integration gates:
 
@@ -415,13 +415,13 @@ Scope:
 - add `:bedrock_job_queue` from `../job_queue`;
 - remove Ecto/Postgres dependencies;
 - remove Postgres aliases and tests;
-- remove Ecto docs from docs config;
-- remove public shard/claim/heartbeat/release/recover docs;
+- remove Ecto content from ExDoc config;
+- remove public shard/claim/heartbeat/release/recover guide content;
 - keep README aligned with the new alpha story.
 
 Acceptance:
 
-- `rg "Ecto|Postgres|postgrex|ecto_sql" mix.exs README.md docs lib test`
+- `rg "Ecto|Postgres|postgrex|ecto_sql" mix.exs README.md guides lib test`
   returns only changelog or historical comments, if any;
 - `mix deps.get`;
 - `mix test` passes without Postgres exclusions being meaningful.
@@ -515,7 +515,7 @@ Scope:
 Acceptance:
 
 - README examples compile;
-- public docs only show the configured module API;
+- public API reference and guides only show the configured module API;
 - old claim/shard API is gone.
 
 ### Epic 5: Signals, Outbox, Replay, Projections

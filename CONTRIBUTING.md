@@ -17,5 +17,5 @@ Credo, Dialyzer, and Doctor all pass locally.
 
 - Keep changes scoped to one concern.
 - Add tests for behaviour changes.
-- Update docs when public APIs or lifecycle semantics change.
+- Update guides when public APIs or lifecycle semantics change.
 - Use conventional commit messages when possible.
