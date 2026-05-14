@@ -289,6 +289,8 @@ defmodule IntentLedger.TelemetryTest do
     end
   end
 
+  @tag :integration
+  @tag :bedrock
   test "bedrock store v1 commits emit commit telemetry" do
     store_name = unique_atom(:bedrock_store_telemetry)
     prefix = [unique_atom(:bedrock_store_telemetry_prefix)]

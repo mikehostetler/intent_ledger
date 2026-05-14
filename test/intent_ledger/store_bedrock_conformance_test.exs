@@ -53,6 +53,9 @@ defmodule IntentLedger.StoreBedrockConformanceTest do
     store_module: IntentLedger.Store.Bedrock,
     store_opts: [name: __MODULE__.Store, repo: IntentLedger.StoreBedrockConformanceTest.Repo]
 
+  @moduletag :integration
+  @moduletag :bedrock
+
   use IntentLedger.StoreCase.AtomicCommitTests
   use IntentLedger.StoreCase.SemanticTests
   use IntentLedger.StoreCase.InspectionTests

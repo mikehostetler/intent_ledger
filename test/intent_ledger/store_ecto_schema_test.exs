@@ -1,6 +1,9 @@
 defmodule IntentLedger.StoreEctoSchemaTest do
   use ExUnit.Case, async: true
 
+  @moduletag :integration
+  @moduletag :postgres
+
   alias IntentLedger.Store.Ecto.Schema
 
   test "maps logical tables to Ecto schema modules" do

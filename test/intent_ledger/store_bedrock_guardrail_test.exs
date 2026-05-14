@@ -1,6 +1,9 @@
 defmodule IntentLedger.StoreBedrockGuardrailTest do
   use ExUnit.Case, async: true
 
+  @moduletag :integration
+  @moduletag :bedrock
+
   alias IntentLedger.Error
   alias IntentLedger.Store.Bedrock
 

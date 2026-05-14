@@ -1,6 +1,9 @@
 defmodule IntentLedger.StoreBedrockKeyspaceTest do
   use ExUnit.Case, async: true
 
+  @moduletag :integration
+  @moduletag :bedrock
+
   alias IntentLedger.Store.Bedrock.Keyspace
 
   @ledger MyApp.IntentLedger

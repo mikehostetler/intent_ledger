@@ -1,6 +1,9 @@
 defmodule IntentLedger.StoreBedrockValueTest do
   use ExUnit.Case, async: true
 
+  @moduletag :integration
+  @moduletag :bedrock
+
   alias IntentLedger.{Claim, Intent, IntentState, Signal}
   alias IntentLedger.Store.Bedrock.Value
 

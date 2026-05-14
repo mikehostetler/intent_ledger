@@ -1,6 +1,9 @@
 defmodule IntentLedger.StoreEctoTest do
   use ExUnit.Case, async: true
 
+  @moduletag :integration
+  @moduletag :postgres
+
   alias IntentLedger.Error.AdapterRuntimeError
   alias IntentLedger.Store.Ecto, as: EctoStore
 

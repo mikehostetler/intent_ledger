@@ -1,6 +1,9 @@
 defmodule IntentLedger.StoreBedrockCommitTest do
   use ExUnit.Case, async: true
 
+  @moduletag :integration
+  @moduletag :bedrock
+
   alias IntentLedger.{Intent, IntentState, Signal}
   alias IntentLedger.Store.{Bedrock, Commit, CommitRequest, Outbox, Precondition, Write}
   alias IntentLedger.Store.Bedrock.{Keyspace, Value}

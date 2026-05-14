@@ -1,6 +1,9 @@
 defmodule IntentLedger.StoreEctoMigrationTest do
   use ExUnit.Case, async: true
 
+  @moduletag :integration
+  @moduletag :postgres
+
   alias IntentLedger.Store.Ecto.Migration
 
   test "exposes default table names for Store V1 structures" do

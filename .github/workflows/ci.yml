@@ -10,12 +10,68 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  quality:
+    name: quality
     runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+            priv/plts
+          key: ${{ runner.os }}-quality-otp28-elixir119-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-quality-otp28-elixir119-
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix compile --warnings-as-errors
+      - run: mix credo --min-priority higher
+      - run: mix dialyzer
+      - run: mix doctor --raise
+
+  test:
+    name: ${{ matrix.suite }} (OTP ${{ matrix.otp }}, Elixir ${{ matrix.elixir }})
+    runs-on: ubuntu-latest
+
     strategy:
+      fail-fast: false
       matrix:
-        otp: ["27", "28"]
-        elixir: ["1.18", "1.19"]
+        include:
+          - suite: fast
+            otp: "27"
+            elixir: "1.18"
+            command: mix test.fast --cover
+          - suite: fast
+            otp: "27"
+            elixir: "1.19"
+            command: mix test.fast --cover
+          - suite: fast
+            otp: "28"
+            elixir: "1.18"
+            command: mix test.fast --cover
+          - suite: fast
+            otp: "28"
+            elixir: "1.19"
+            command: mix test.fast --cover
+          - suite: bedrock
+            otp: "28"
+            elixir: "1.19"
+            command: mix test.bedrock
+          - suite: bedrock-multi-node
+            otp: "28"
+            elixir: "1.19"
+            command: mix test.multi_node
+          - suite: postgres-local
+            otp: "28"
+            elixir: "1.19"
+            command: mix test.postgres
 
     steps:
       - uses: actions/checkout@v4
@@ -29,11 +85,9 @@ jobs:
             deps
             _build
             priv/plts
-          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+          key: ${{ runner.os }}-${{ matrix.suite }}-otp${{ matrix.otp }}-elixir${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.suite }}-otp${{ matrix.otp }}-elixir${{ matrix.elixir }}-
       - run: mix deps.get
-      - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
-      - run: mix test --cover
-      - run: mix credo --min-priority higher
-      - run: mix dialyzer
-      - run: mix doctor --raise
+      - run: ${{ matrix.command }}

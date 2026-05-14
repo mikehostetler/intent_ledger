@@ -70,6 +70,9 @@ end
 defmodule IntentLedger.StoreBedrockPersistenceTest do
   use ExUnit.Case, async: false
 
+  @moduletag :integration
+  @moduletag :bedrock
+
   alias IntentLedger.Store.{Bedrock, Commit, CommitRequest, Listing, Outbox, Precondition, Write}
 
   @ledger MyApp.IntentLedger

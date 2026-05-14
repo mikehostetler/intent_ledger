@@ -161,6 +161,9 @@ defmodule IntentLedger.StoreEctoConformanceTest do
     store_module: IntentLedger.Store.Ecto,
     store_opts: [name: __MODULE__.Store, repo: IntentLedger.StoreEctoConformanceTest.Repo]
 
+  @moduletag :integration
+  @moduletag :postgres
+
   use IntentLedger.StoreCase.AtomicCommitTests
   use IntentLedger.StoreCase.SemanticTests
 

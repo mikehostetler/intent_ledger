@@ -1,6 +1,9 @@
 defmodule IntentLedger.StoreEctoCommitTest do
   use ExUnit.Case, async: true
 
+  @moduletag :integration
+  @moduletag :postgres
+
   alias IntentLedger.Error.AdapterRuntimeError
   alias IntentLedger.{Intent, IntentState, Signal}
   alias IntentLedger.Store.{Commit, CommitRequest, Conflict, Listing, Outbox, Precondition, Write}
