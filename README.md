@@ -258,11 +258,11 @@ dashboard panels, alert guidelines, and runbook checks.
 
 ## Adapter Guides
 
+- [Memory Reference Adapter](docs/memory.md) covers tests, examples, and local
+  development with the in-memory reference store.
 - [Bedrock Adapter](docs/bedrock.md) covers the clustered durable adapter.
 - [Ecto/Postgres Adapter](docs/ecto.md) covers local durable and single-node SQL
   usage.
-- `IntentLedger.Store.Memory` is the executable reference adapter for tests and
-  examples; it is not durable.
 
 ## Development
 
