@@ -194,6 +194,7 @@ defmodule IntentLedger.Inspection do
   defp inspect_claims(%__MODULE__{} = request, data) do
     intents = intents_by_id(data)
     claims = claims_by_id(data)
+    claims_by_intent = claims_by_intent_id(data)
 
     request
     |> scoped_states(states(data))
@@ -202,7 +203,8 @@ defmodule IntentLedger.Inspection do
     |> Enum.take(request.limit)
     |> Enum.map(fn state ->
       claim_id = field(state, :claim_id)
-      claim = Map.get(claims, claim_id, %{})
+      intent_id = field(state, :intent_id)
+      claim = Map.get(claims, claim_id) || Map.get(claims_by_intent, intent_id, %{})
 
       state
       |> intent_row(intents)
@@ -387,6 +389,13 @@ defmodule IntentLedger.Inspection do
     data
     |> Map.get(:claims, [])
     |> Map.new(fn claim -> {field(claim, :claim_id) || field(claim, :id), claim} end)
+    |> Map.delete(nil)
+  end
+
+  defp claims_by_intent_id(data) do
+    data
+    |> Map.get(:claims, [])
+    |> Map.new(fn claim -> {field(claim, :intent_id), claim} end)
     |> Map.delete(nil)
   end
 

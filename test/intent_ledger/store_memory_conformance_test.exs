@@ -6,4 +6,5 @@ defmodule IntentLedger.StoreMemoryConformanceTest do
 
   use IntentLedger.StoreCase.AtomicCommitTests
   use IntentLedger.StoreCase.SemanticTests
+  use IntentLedger.StoreCase.InspectionTests
 end

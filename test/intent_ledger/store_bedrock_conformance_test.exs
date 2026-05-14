@@ -55,6 +55,7 @@ defmodule IntentLedger.StoreBedrockConformanceTest do
 
   use IntentLedger.StoreCase.AtomicCommitTests
   use IntentLedger.StoreCase.SemanticTests
+  use IntentLedger.StoreCase.InspectionTests
 
   setup_all do
     start_supervised!(IntentLedger.StoreBedrockConformanceTest.Repo)
