@@ -60,9 +60,11 @@ the non-runnable Intent state.
 
 ## Testing
 
-Default tests use a small Bedrock-compatible fake repo. Opt-in Bedrock/job queue
-scenarios are tagged:
+Default tests use a small Bedrock-compatible fake repo. Opt-in scenarios are
+tagged and exposed through focused aliases:
 
 ```sh
-mix test --include bedrock
+mix test.integration
+mix test.bedrock
+mix test.multi_node
 ```

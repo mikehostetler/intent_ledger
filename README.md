@@ -357,11 +357,13 @@ mix quality
 mix docs
 ```
 
-Heavy integration tests are opt-in. Bedrock scenarios are tagged and should be
-run explicitly:
+Heavy integration tests are opt-in and tagged. Run the focused aliases for the
+scenario you want:
 
 ```sh
-mix test --include bedrock
+mix test.integration
+mix test.bedrock
+mix test.multi_node
 ```
 
 The package is changing quickly. For design discussion, implementation status,
