@@ -123,6 +123,30 @@ defmodule IntentLedger do
         do: __MODULE__ |> IntentLedger.Runtime.replay(source, opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
+      Reads durable outbox entries after the consumer's last acknowledged cursor.
+      """
+      @spec read_outbox(IntentLedger.Runtime.outbox_consumer_ref(), keyword()) :: {:ok, map()} | {:error, term()}
+      def read_outbox(consumer, opts \\ []),
+        do: __MODULE__ |> IntentLedger.Runtime.read_outbox(consumer, opts) |> IntentLedger.Error.normalize_result()
+
+      @doc """
+      Returns the durable outbox cursor recorded for a consumer.
+      """
+      @spec outbox_cursor(IntentLedger.Runtime.outbox_consumer_ref(), keyword()) ::
+              {:ok, non_neg_integer() | nil} | {:error, term()}
+      def outbox_cursor(consumer, opts \\ []),
+        do: __MODULE__ |> IntentLedger.Runtime.outbox_cursor(consumer, opts) |> IntentLedger.Error.normalize_result()
+
+      @doc """
+      Acknowledges durable outbox delivery for a consumer.
+      """
+      @spec ack_outbox(IntentLedger.Runtime.outbox_consumer_ref(), non_neg_integer(), keyword()) ::
+              {:ok, map()} | {:error, term()}
+      def ack_outbox(consumer, cursor, opts \\ []),
+        do:
+          __MODULE__ |> IntentLedger.Runtime.ack_outbox(consumer, cursor, opts) |> IntentLedger.Error.normalize_result()
+
+      @doc """
       Returns the durable cursor recorded for a projection.
       """
       @spec projection_cursor(IntentLedger.Runtime.projection_ref(), keyword()) ::

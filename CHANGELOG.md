@@ -23,8 +23,16 @@ Initial public release candidate for the `intent_ledger` package.
 - Idempotent enqueue keys and lifecycle commands for cancel, requeue, and
   ambiguous reconciliation.
 - Durable lifecycle replay for `:ledger`, `{:intent, intent_id}`, and `:outbox`.
-- Projection cursor read/write helpers for application-owned projections.
+- Durable outbox consumer cursors with monotonic read/ack helpers.
+- Projection cursor read/write helpers for application-owned projections, with
+  monotonic cursor writes and projection lag inspection.
 - View-based operational inspection for queues, Intents, retries, ambiguous
   Intents, outbox entries, and projection cursors.
 - Splode-backed public error normalization and telemetry stop events.
 - Opt-in Bedrock and simulated multi-node integration scenarios.
+
+### Changed
+
+- Cancel and ambiguous commands now remove pending unleased queue items in the
+  same Bedrock transaction when possible; already leased items are still
+  neutralized by the worker before handler execution.

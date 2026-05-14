@@ -143,6 +143,43 @@ defmodule IntentLedger.Error do
   def from_reason({:invalid_projection_cursor, cursor}),
     do: invalid("Invalid projection cursor", field: :cursor, value: cursor)
 
+  def from_reason({:stale_projection_cursor, projection, cursor, current}),
+    do:
+      conflict(:stale_projection_cursor,
+        projection: projection,
+        cursor: cursor,
+        current: current
+      )
+
+  def from_reason({:projection_cursor_past_head, projection, cursor, head}),
+    do:
+      invalid("Projection cursor is past the ledger head",
+        field: :cursor,
+        value: cursor,
+        projection: projection,
+        head: head
+      )
+
+  def from_reason({:invalid_outbox_consumer, consumer}),
+    do: invalid("Invalid outbox consumer reference", field: :consumer, value: consumer)
+
+  def from_reason({:stale_outbox_ack, consumer, cursor, current}),
+    do:
+      conflict(:stale_outbox_ack,
+        consumer: consumer,
+        cursor: cursor,
+        current: current
+      )
+
+  def from_reason({:outbox_ack_past_head, consumer, cursor, head}),
+    do:
+      invalid("Outbox ack cursor is past the outbox head",
+        field: :cursor,
+        value: cursor,
+        consumer: consumer,
+        head: head
+      )
+
   def from_reason({:invalid_option, field, value}), do: invalid("Invalid option", field: field, value: value)
   def from_reason({:invalid_status, status}), do: invalid("Invalid Intent status", field: :status, value: status)
   def from_reason({:invalid_intent, errors}), do: invalid("Invalid Intent", errors: errors)

@@ -5,7 +5,7 @@ defmodule IntentLedger.Telemetry do
 
   @default_prefix [:intent_ledger]
 
-  @type event :: :command | :enqueue | :handler
+  @type event :: :command | :enqueue | :handler | :health | :outbox | :projection | :replay
 
   @doc """
   Returns the default event prefix.

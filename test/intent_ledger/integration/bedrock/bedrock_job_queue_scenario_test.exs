@@ -173,7 +173,7 @@ defmodule IntentLedger.BedrockJobQueueScenarioTest do
     assert {:ok, canceled} = ScenarioIntents.enqueue("invoice.cancelable", %{test_pid: self()})
     assert {:ok, canceled} = ScenarioIntents.cancel(canceled.id, :not_needed)
     assert canceled.status == :canceled
-    assert :ok = run_visible_job("invoice.cancelable")
+    assert [] = visible_jobs()
     refute_receive {:cancelable_ran, _intent_id}, 50
     assert {:ok, still_canceled} = ScenarioIntents.fetch(canceled.id)
     assert still_canceled.status == :canceled
@@ -210,9 +210,19 @@ defmodule IntentLedger.BedrockJobQueueScenarioTest do
   end
 
   defp run_visible_job(topic) do
-    queue_root = Internal.root_keyspace(ScenarioIntents.JobQueue)
-    [item] = Store.peek(IntentLedger.FakeRepo, queue_root, "default", limit: 1)
+    [item] = visible_jobs()
     assert item.topic == topic
+
+    run_item(item)
+  end
+
+  defp visible_jobs do
+    queue_root = Internal.root_keyspace(ScenarioIntents.JobQueue)
+    Store.peek(IntentLedger.FakeRepo, queue_root, "default", limit: 1)
+  end
+
+  defp run_item(item) do
+    queue_root = Internal.root_keyspace(ScenarioIntents.JobQueue)
 
     assert {:ok, lease} =
              Store.obtain_lease(IntentLedger.FakeRepo, queue_root, item, "test-holder", 30_000)

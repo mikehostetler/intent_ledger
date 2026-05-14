@@ -14,6 +14,9 @@ Current guarantees:
 - handler payloads are validated before execution when a Zoi schema is provided;
 - successful handler results are validated when a result schema is provided;
 - lifecycle transitions are replayable from ledger and per-intent streams.
+- outbox consumers record durable monotonic ack cursors for at-least-once
+  delivery;
+- projection cursors are monotonic by default and report lag through inspection.
 
 Non-goals:
 
@@ -46,6 +49,11 @@ processing, retry-scheduled, or parked as ambiguous.
 Handler result handling uses the `bedrock_job_queue` action hook so queue state
 and Intent lifecycle state commit in one Bedrock transaction for complete,
 retry, max-attempt failure, discard, and snooze paths.
+
+Cancellation and ambiguity updates remove an unleased queue item in the same
+transaction when the item is still pending. If the item is already leased or
+executing, the worker observes the non-runnable Intent state and completes the
+queue item without invoking the handler.
 
 Application handlers should remain idempotent and should record external
 side-effect evidence in the application domain whenever side effects matter.

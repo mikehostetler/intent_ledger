@@ -12,10 +12,11 @@ IntentLedger public API
   -> Bedrock
 ```
 
-The current code now follows this release architecture at the public API and
-persistence layers. The remaining release work is concentrated around atomic
-queue/lifecycle commits, broader inspection, heavy integration tests, and
-release hardening.
+The current code now follows this release architecture at the public API,
+persistence, queue lifecycle, replay, outbox, and inspection layers. The
+remaining release work is concentrated around real crash/lease recovery
+scenarios, final dependency release timing, and deciding whether to add a
+managed outbox dispatcher above the durable consumer cursor API.
 
 ## Release Thesis
 
@@ -130,6 +131,9 @@ MyApp.Intents.enqueue_many(entries, opts)
 MyApp.Intents.fetch(intent_id)
 MyApp.Intents.history(intent_id, opts)
 MyApp.Intents.replay(source, opts)
+MyApp.Intents.read_outbox(consumer, opts)
+MyApp.Intents.outbox_cursor(consumer, opts)
+MyApp.Intents.ack_outbox(consumer, cursor, opts)
 MyApp.Intents.projection_cursor(projection, opts)
 MyApp.Intents.put_projection_cursor(projection, cursor, opts)
 
@@ -240,7 +244,7 @@ Signals are durable facts. They drive:
 
 - `history/2`;
 - `replay/2`;
-- outbox dispatch;
+- durable outbox consumers;
 - projection rebuild;
 - audit and repair workflows.
 
@@ -296,20 +300,20 @@ IntentLedger owns:
 - lifecycle signals;
 - command/idempotency records;
 - outbox;
-- projection offsets;
+- projection cursors;
 - inspection views.
 
 The key integration requirement is atomic lifecycle movement. When a handler
 returns, the queue action and the IntentLedger lifecycle commit must succeed or
 fail together.
 
-Preferred upstream change:
+Implemented upstream/fork change:
 
 ```elixir
 on_action: {IntentLedger.JobQueueHook, :apply}
 ```
 
-The hook should run inside the same Bedrock transaction that completes,
+The hook runs inside the same Bedrock transaction that completes,
 requeues, snoozes, or dead-letters the queue item.
 
 The hook needs access to:
@@ -322,10 +326,9 @@ The hook needs access to:
 - chosen queue action;
 - timestamp/options.
 
-If that hook is not accepted upstream quickly, the fallback is to build a thin
-IntentLedger executor that uses `Bedrock.JobQueue.Store` primitives directly.
-The fallback should still preserve the QuiCK queue data model instead of
-reintroducing IntentLedger shards.
+If the hook API changes before release, the fallback is still a thin
+IntentLedger executor that uses `Bedrock.JobQueue.Store` primitives directly
+while preserving the QuiCK queue data model.
 
 ## Replay And Projection API
 
@@ -335,6 +338,8 @@ Replay is source-based:
 MyApp.Intents.replay({:intent, intent_id}, cursor: 0, limit: 100)
 MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
 MyApp.Intents.replay(:outbox, cursor: 0, limit: 100)
+MyApp.Intents.read_outbox("webhook-dispatcher", limit: 100)
+MyApp.Intents.ack_outbox("webhook-dispatcher", cursor)
 MyApp.Intents.projection_cursor(MyApp.IntentStatusProjection)
 MyApp.Intents.put_projection_cursor(MyApp.IntentStatusProjection, cursor)
 ```
@@ -378,9 +383,15 @@ Landed:
 - Command/idempotency tests cover duplicate keys across drift, concurrent
   duplicate enqueue, and repeated lifecycle commands.
 - Public replay supports `:ledger`, `{:intent, intent_id}`, and `:outbox`.
+- Durable outbox consumers can read after their acknowledged cursor and ack
+  delivery progress monotonically.
+- Projection cursor writes are monotonic by default, cannot move past the ledger
+  head by default, and projection inspection reports head cursor and lag.
 - Public inspection supports `:queues`, `:intents`, `:retries`,
   `:ambiguous`, `:outbox`, and `:projections`, with unsupported views and
   invalid options normalized through `IntentLedger.Error`.
+- Cancellation and ambiguity updates remove an unleased pending queue item in the
+  same Bedrock transaction when the item is still pending.
 - Opt-in `@tag :bedrock` integration scenarios cover pointer payloads, handler
   success, retry, max-attempt failure, discard, snooze, cancellation
   neutralization, and outbox replay after storage process restart.
@@ -395,16 +406,14 @@ Landed:
 
 Partial:
 
-- Enqueue writes Intent state, lifecycle signal, outbox entry, and queue item in
-  one Bedrock transaction.
-- Cancellation marks the Intent and neutralizes handler execution when observed,
-  but explicit queue visibility removal still belongs to the atomic integration
-  work.
+- Intent Ledger exposes durable outbox consumer cursors, but does not yet ship a
+  managed dispatcher process.
+- Cancellation and ambiguity remove pending unleased queue items. Already leased
+  or executing items are still neutralized when the worker observes the
+  non-runnable Intent state.
 
 Missing:
 
-- Durable outbox dispatch/ack policy.
-- Projection lag inspection.
 - Worker crash and lease-expiry recovery scenarios once `bedrock_job_queue`
   exposes a stable expired-lease recovery path.
 - Hex publish timing decision after Bedrock dependency availability is settled.
@@ -460,7 +469,7 @@ Multi-node gates:
 - concurrent execution races resolve to one active lease;
 - worker crash recovers through queue lease expiry;
 - duplicate enqueue/command races resolve once;
-- outbox dispatch resumes after dispatcher interruption;
+- outbox consumer cursor replay resumes after interruption;
 - Bedrock restart preserves Intent and queue state.
 
 ## Implementation Epics
@@ -541,7 +550,7 @@ Scope:
 - use Intent id as queue item id;
 - store minimal queue payload;
 - map queue topic to IntentLedger handler topic;
-- implement or upstream transaction hook;
+- use the `bedrock_job_queue` action hook;
 - map handler result to queue action and Intent lifecycle commit.
 
 Acceptance:
@@ -564,6 +573,11 @@ Scope:
 - generate `fetch/1`;
 - generate `history/2`;
 - generate `replay/2`;
+- generate `read_outbox/2`;
+- generate `outbox_cursor/2`;
+- generate `ack_outbox/3`;
+- generate `projection_cursor/2`;
+- generate `put_projection_cursor/3`;
 - generate `cancel/3`;
 - generate `requeue/2`;
 - generate `mark_ambiguous/3`;
@@ -596,7 +610,8 @@ Acceptance:
 - every lifecycle transition emits one canonical signal;
 - replay supports intent, ledger, and outbox sources;
 - projection rebuild works from replayed lifecycle signals;
-- outbox delivery is at-least-once and acked durably.
+- outbox consumers read from durable cursors and ack delivery progress
+  monotonically.
 
 ### Epic 6: Integration And Multi-Node Scenarios
 
@@ -642,7 +657,7 @@ Acceptance:
 2. Add `IntentLedger.Handler` and `IntentLedger.Context`.
 3. Add Bedrock persistence functions for Intent state, signals, outbox, replay,
    and command/idempotency.
-4. Prototype the `bedrock_job_queue` transaction hook or direct Store fallback.
+4. Wire the `bedrock_job_queue` transaction hook into Intent lifecycle commits.
 5. Implement `use IntentLedger` configured module API.
 6. Port tests from old lifecycle semantics to new Intent/Handler semantics.
 7. Add first Bedrock queue integration scenario.
@@ -650,8 +665,8 @@ Acceptance:
 
 ## Open Questions
 
-- Does `bedrock_job_queue` accept a transaction lifecycle hook, or do we build a
-  direct Store-based executor first?
+- Should Intent Ledger ship a managed outbox dispatcher or keep the lower-level
+  durable consumer cursor API only?
 - Should command/idempotency be exposed publicly, or only as an internal
   duplicate-enqueue guarantee?
 - Should Memory survive as a pure unit-test support module, or should tests use

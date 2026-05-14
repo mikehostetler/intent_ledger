@@ -231,19 +231,74 @@ defmodule IntentLedger.RuntimeTest do
     assert {:ok, []} = TestIntents.replay(:outbox, cursor: 3, limit: 1)
   end
 
+  test "outbox consumers read and ack durable cursors monotonically" do
+    assert {:ok, first} = TestIntents.enqueue("invoice.send", %{invoice_id: 1})
+    assert {:ok, second} = TestIntents.enqueue("invoice.send", %{invoice_id: 2})
+    assert {:ok, third} = TestIntents.enqueue("invoice.send", %{invoice_id: 3})
+
+    assert {:ok, nil} = TestIntents.outbox_cursor("webhook-dispatcher")
+
+    attach_telemetry(:outbox)
+
+    assert {:ok, batch} = TestIntents.read_outbox("webhook-dispatcher", limit: 2)
+    assert batch.consumer == "name:webhook-dispatcher"
+    assert batch.acked_cursor == 0
+    assert batch.next_cursor == 2
+    assert batch.head_cursor == 3
+    assert batch.lag == 1
+    assert Enum.map(batch.entries, & &1.signal.subject) == [first.id, second.id]
+
+    assert_receive {:telemetry, [:intent_ledger, :outbox, :stop], measurements, metadata}
+    assert is_integer(measurements.duration)
+    assert measurements.count == 2
+    assert metadata.operation == :read
+    assert metadata.consumer == "webhook-dispatcher"
+
+    assert {:ok, ack} = TestIntents.ack_outbox("webhook-dispatcher", batch.next_cursor)
+    assert ack.cursor == 2
+    assert {:ok, 2} = TestIntents.outbox_cursor("webhook-dispatcher")
+
+    assert {:ok, next_batch} = TestIntents.read_outbox("webhook-dispatcher", limit: 10)
+    assert next_batch.acked_cursor == 2
+    assert next_batch.next_cursor == 3
+    assert next_batch.lag == 0
+    assert Enum.map(next_batch.entries, & &1.signal.subject) == [third.id]
+
+    assert {:error, %IntentLedger.Error.ConflictError{reason: :stale_outbox_ack}} =
+             TestIntents.ack_outbox("webhook-dispatcher", 1)
+
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :cursor, value: 4}} =
+             TestIntents.ack_outbox("webhook-dispatcher", 4)
+
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :consumer, value: ""}} =
+             TestIntents.read_outbox("")
+  end
+
   test "unsupported replay sources return public invalid input errors" do
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :source, value: :unknown}} =
              TestIntents.replay(:unknown)
   end
 
   test "projection cursors are durable per configured ledger" do
+    assert {:ok, _first} = TestIntents.enqueue("invoice.send", %{invoice_id: 1})
+    assert {:ok, _second} = TestIntents.enqueue("invoice.send", %{invoice_id: 2})
+
     assert {:ok, nil} = TestIntents.projection_cursor(StatusProjection)
 
-    assert :ok = TestIntents.put_projection_cursor(StatusProjection, 42)
-    assert {:ok, 42} = TestIntents.projection_cursor(StatusProjection)
+    assert :ok = TestIntents.put_projection_cursor(StatusProjection, 1)
+    assert {:ok, 1} = TestIntents.projection_cursor(StatusProjection)
 
-    assert :ok = TestIntents.put_projection_cursor("external-status", 7)
-    assert {:ok, 7} = TestIntents.projection_cursor("external-status")
+    assert {:error, %IntentLedger.Error.ConflictError{reason: :stale_projection_cursor}} =
+             TestIntents.put_projection_cursor(StatusProjection, 0)
+
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :cursor, value: 3}} =
+             TestIntents.put_projection_cursor(StatusProjection, 3)
+
+    assert :ok = TestIntents.put_projection_cursor(StatusProjection, 0, force: true)
+    assert {:ok, 0} = TestIntents.projection_cursor(StatusProjection)
+
+    assert :ok = TestIntents.put_projection_cursor("external-status", 2)
+    assert {:ok, 2} = TestIntents.projection_cursor("external-status")
 
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :cursor, value: -1}} =
              TestIntents.put_projection_cursor(StatusProjection, -1)
@@ -275,7 +330,7 @@ defmodule IntentLedger.RuntimeTest do
 
     assert {:ok, ambiguous} = TestIntents.enqueue("invoice.send", %{invoice_id: 3})
     assert {:ok, _ambiguous} = TestIntents.mark_ambiguous(ambiguous.id, :manual_review)
-    assert :ok = TestIntents.put_projection_cursor("ops-status", 7)
+    assert :ok = TestIntents.put_projection_cursor("ops-status", 5)
 
     assert {:ok, intents} = TestIntents.inspect(:intents, limit: 10)
     intent_ids = intents |> Enum.map(& &1.id) |> MapSet.new()
@@ -304,7 +359,7 @@ defmodule IntentLedger.RuntimeTest do
 
     assert {:ok, projections} = TestIntents.inspect(:projections)
 
-    assert %{projection: "name:ops-status", cursor: 7, updated_at: %DateTime{}} =
+    assert %{projection: "name:ops-status", cursor: 5, head_cursor: 6, lag: 1, updated_at: %DateTime{}} =
              Enum.find(projections, &(&1.projection == "name:ops-status"))
   end
 
@@ -592,6 +647,7 @@ defmodule IntentLedger.RuntimeTest do
     assert {:ok, intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123, test_pid: self()})
     assert {:ok, ambiguous} = TestIntents.mark_ambiguous(intent.id, :manual_review)
     assert ambiguous.status == :ambiguous
+    assert {:ok, %{"default" => %{pending_count: 0, processing_count: 0}}} = TestIntents.stats(queue: "default")
 
     queue_payload = %{raw: :erlang.term_to_binary(%{ledger: TestIntents, intent_id: intent.id})}
 
@@ -612,6 +668,7 @@ defmodule IntentLedger.RuntimeTest do
     assert {:ok, canceled} = TestIntents.enqueue("invoice.send", %{invoice_id: 123})
     assert {:ok, canceled_once} = TestIntents.cancel(canceled.id, :not_needed)
     assert canceled_once.status == :canceled
+    assert {:ok, %{"default" => %{pending_count: 0, processing_count: 0}}} = TestIntents.stats(queue: "default")
 
     assert {:ok, canceled_twice} = TestIntents.cancel(canceled.id, :still_not_needed)
     assert canceled_twice.status == :canceled
@@ -717,6 +774,9 @@ defmodule IntentLedger.RuntimeTest do
   end
 
   test "health exposes the configured runtime" do
+    attach_telemetry(:health)
+
+    assert {:ok, _intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123})
     assert {:ok, health} = TestIntents.health()
 
     assert health.status == :ok
@@ -724,6 +784,14 @@ defmodule IntentLedger.RuntimeTest do
     assert health.queues == ["default", "tenant:acme", "tenant:beta"]
     assert health.default_queue == "default"
     assert health.topics == ["invoice.fail", "invoice.send"]
+    assert health.queue_stats["default"].pending_count == 1
+    assert health.cursors == %{ledger: 1, outbox: 1}
+    assert health.errors == []
+
+    assert_receive {:telemetry, [:intent_ledger, :health, :stop], measurements, metadata}
+    assert is_integer(measurements.duration)
+    assert metadata.ledger == TestIntents
+    assert metadata.status == :ok
   end
 
   defp attach_telemetry(event) do

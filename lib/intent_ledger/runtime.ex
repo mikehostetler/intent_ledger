@@ -1,11 +1,15 @@
 defmodule IntentLedger.Runtime do
   @moduledoc false
 
+  alias Bedrock.Keyspace
   alias Bedrock.JobQueue.{Internal, Item, Lease, Store}
   alias IntentLedger.{BedrockStore, Config, Context, Intent, Telemetry, Time}
 
   @type replay_source :: :ledger | :outbox | {:intent, String.t()}
   @type projection_ref :: module() | String.t()
+  @type outbox_consumer_ref :: module() | String.t()
+
+  @queue_neutralization_scan_limit 10_000
 
   @doc false
   @spec enqueue(module(), String.t() | atom(), term(), keyword()) :: {:ok, Intent.t()} | {:error, term()}
@@ -64,22 +68,75 @@ defmodule IntentLedger.Runtime do
 
   @doc false
   @spec replay(module(), replay_source(), keyword()) :: {:ok, [Jido.Signal.t()]} | {:error, term()}
-  def replay(ledger, source, opts \\ []), do: BedrockStore.replay(ledger, source, opts)
+  def replay(ledger, source, opts \\ []) do
+    start = System.monotonic_time()
+    result = BedrockStore.replay(ledger, source, opts)
+    Telemetry.emit(:replay, result, start, ledger, source: replay_source_metadata(source), count: result_count(result))
+    result
+  end
+
+  @doc false
+  @spec read_outbox(module(), outbox_consumer_ref(), keyword()) :: {:ok, map()} | {:error, term()}
+  def read_outbox(ledger, consumer, opts \\ []) do
+    start = System.monotonic_time()
+    result = BedrockStore.read_outbox(ledger, consumer, opts)
+
+    Telemetry.emit(:outbox, result, start, ledger,
+      operation: :read,
+      consumer: consumer,
+      count: outbox_entry_count(result)
+    )
+
+    result
+  end
+
+  @doc false
+  @spec outbox_cursor(module(), outbox_consumer_ref(), keyword()) ::
+          {:ok, non_neg_integer() | nil} | {:error, term()}
+  def outbox_cursor(ledger, consumer, opts \\ []) do
+    start = System.monotonic_time()
+    result = BedrockStore.outbox_cursor(ledger, consumer, opts)
+    Telemetry.emit(:outbox, result, start, ledger, operation: :cursor, consumer: consumer)
+    result
+  end
+
+  @doc false
+  @spec ack_outbox(module(), outbox_consumer_ref(), non_neg_integer(), keyword()) :: {:ok, map()} | {:error, term()}
+  def ack_outbox(ledger, consumer, cursor, opts \\ []) do
+    start = System.monotonic_time()
+    result = BedrockStore.ack_outbox(ledger, consumer, cursor, opts)
+    Telemetry.emit(:outbox, result, start, ledger, operation: :ack, consumer: consumer, cursor: cursor)
+    result
+  end
 
   @doc false
   @spec projection_cursor(module(), projection_ref(), keyword()) ::
           {:ok, non_neg_integer() | nil} | {:error, term()}
-  def projection_cursor(ledger, projection, opts \\ []), do: BedrockStore.projection_cursor(ledger, projection, opts)
+  def projection_cursor(ledger, projection, opts \\ []) do
+    start = System.monotonic_time()
+    result = BedrockStore.projection_cursor(ledger, projection, opts)
+    Telemetry.emit(:projection, result, start, ledger, operation: :cursor, projection: projection)
+    result
+  end
 
   @doc false
   @spec put_projection_cursor(module(), projection_ref(), non_neg_integer(), keyword()) :: :ok | {:error, term()}
   def put_projection_cursor(ledger, projection, cursor, opts \\ []) do
-    BedrockStore.put_projection_cursor(ledger, projection, cursor, opts)
+    start = System.monotonic_time()
+    result = BedrockStore.put_projection_cursor(ledger, projection, cursor, opts)
+
+    Telemetry.emit(:projection, result, start, ledger,
+      operation: :put_cursor,
+      projection: projection,
+      cursor: cursor
+    )
+
+    result
   end
 
   @doc false
   @spec cancel(module(), String.t(), term(), keyword()) :: {:ok, Intent.t()} | {:error, term()}
-  def cancel(ledger, intent_id, reason, _opts \\ []) do
+  def cancel(ledger, intent_id, reason, opts \\ []) do
     start = System.monotonic_time()
 
     result =
@@ -89,9 +146,29 @@ defmodule IntentLedger.Runtime do
           if intent.status == :canceled do
             {:ok, intent}
           else
-            BedrockStore.update_intent(repo, root, ledger, intent_id, :canceled, %{reason: reason}, fn intent, now ->
-              %{intent | status: :canceled, cancel_reason: reason, updated_at: now, completed_at: now}
-            end)
+            now = Time.utc_now()
+
+            next = %{
+              intent
+              | status: :canceled,
+                cancel_reason: reason,
+                updated_at: now,
+                completed_at: now
+            }
+
+            BedrockStore.put_intent(repo, root, next)
+
+            neutralization =
+              repo
+              |> neutralize_pending_queue_item(queue_root(ledger), intent, opts)
+              |> neutralization_status()
+
+            BedrockStore.record_lifecycle(repo, root, ledger, next, :canceled, %{
+              reason: reason,
+              queue_neutralization: neutralization
+            })
+
+            {:ok, next}
           end
         end
       end)
@@ -143,7 +220,7 @@ defmodule IntentLedger.Runtime do
 
   @doc false
   @spec mark_ambiguous(module(), String.t(), term(), keyword()) :: {:ok, Intent.t()} | {:error, term()}
-  def mark_ambiguous(ledger, intent_id, reason, _opts \\ []) do
+  def mark_ambiguous(ledger, intent_id, reason, opts \\ []) do
     start = System.monotonic_time()
 
     result =
@@ -153,9 +230,22 @@ defmodule IntentLedger.Runtime do
           if intent.status == :ambiguous do
             {:ok, intent}
           else
-            BedrockStore.update_intent(repo, root, ledger, intent_id, :ambiguous, %{reason: reason}, fn intent, now ->
-              %{intent | status: :ambiguous, error: reason, updated_at: now}
-            end)
+            now = Time.utc_now()
+            next = %{intent | status: :ambiguous, error: reason, updated_at: now}
+
+            BedrockStore.put_intent(repo, root, next)
+
+            neutralization =
+              repo
+              |> neutralize_pending_queue_item(queue_root(ledger), intent, opts)
+              |> neutralization_status()
+
+            BedrockStore.record_lifecycle(repo, root, ledger, next, :ambiguous, %{
+              reason: reason,
+              queue_neutralization: neutralization
+            })
+
+            {:ok, next}
           end
         end
       end)
@@ -202,17 +292,28 @@ defmodule IntentLedger.Runtime do
   @doc false
   @spec health(module(), keyword()) :: {:ok, map()}
   def health(ledger, _opts \\ []) do
+    start = System.monotonic_time()
     config = ledger.__intent_ledger__()
 
-    {:ok,
-     %{
-       status: :ok,
-       repo: config.repo,
-       job_queue: config.job_queue,
-       queues: Config.queue_ids(config.queues),
-       default_queue: config.default_queue,
-       topics: config.intents |> Map.keys() |> Enum.sort()
-     }}
+    queue_stats = stats(ledger)
+    heads = BedrockStore.heads(ledger)
+
+    result =
+      {:ok,
+       %{
+         status: health_status(queue_stats, heads),
+         repo: config.repo,
+         job_queue: config.job_queue,
+         queues: Config.queue_ids(config.queues),
+         default_queue: config.default_queue,
+         topics: config.intents |> Map.keys() |> Enum.sort(),
+         queue_stats: unwrap_health_value(queue_stats),
+         cursors: unwrap_health_value(heads),
+         errors: health_errors(queue_stats, heads)
+       }}
+
+    Telemetry.emit(:health, result, start, ledger)
+    result
   end
 
   defp inspect_intents(ledger, opts) do
@@ -625,11 +726,67 @@ defmodule IntentLedger.Runtime do
     end
   end
 
+  defp neutralize_pending_queue_item(repo, queue_root, %Intent{} = intent, opts) do
+    keyspaces = Store.queue_keyspaces(queue_root, intent.queue)
+    limit = Keyword.get(opts, :queue_neutralization_scan_limit, @queue_neutralization_scan_limit)
+
+    keyspaces.items
+    |> repo.get_range(limit: limit)
+    |> Enum.find_value(:missing, fn {item_key, value} ->
+      case decode_queue_item(value) do
+        %Item{id: id, lease_id: nil} when id == intent.id ->
+          repo.clear(keyspaces.items, item_key)
+          decrement_pending_stat(repo, keyspaces)
+          :removed
+
+        %Item{id: id} when id == intent.id ->
+          :leased
+
+        _other ->
+          false
+      end
+    end)
+  end
+
+  defp decrement_pending_stat(repo, keyspaces) do
+    keyspaces.stats
+    |> Keyspace.pack("pending")
+    |> repo.add(<<-1::64-signed-little>>)
+  end
+
+  defp neutralization_status(:removed), do: :removed
+  defp neutralization_status(:leased), do: :leased
+  defp neutralization_status(:missing), do: :missing
+
+  defp health_status({:ok, _queue_stats}, {:ok, _heads}), do: :ok
+  defp health_status(_queue_stats, _heads), do: :degraded
+
+  defp unwrap_health_value({:ok, value}), do: value
+  defp unwrap_health_value({:error, reason}), do: %{error: reason}
+
+  defp health_errors(queue_stats, heads) do
+    []
+    |> maybe_health_error(:queue_stats, queue_stats)
+    |> maybe_health_error(:cursors, heads)
+    |> Enum.reverse()
+  end
+
+  defp maybe_health_error(errors, _field, {:ok, _value}), do: errors
+  defp maybe_health_error(errors, field, {:error, reason}), do: [%{field: field, reason: reason} | errors]
+
+  defp replay_source_metadata({:intent, _intent_id}), do: :intent
+  defp replay_source_metadata(source), do: source
+
+  defp outbox_entry_count({:ok, %{entries: entries}}), do: length(entries)
+  defp outbox_entry_count(_result), do: 0
+
   defp decode_raw_queue_payload(binary) do
     {:ok, :erlang.binary_to_term(binary, [:safe])}
   rescue
     ArgumentError -> {:error, :invalid_queue_payload}
   end
+
+  defp decode_queue_item(binary), do: :erlang.binary_to_term(binary)
 
   defp ensure_requeueable(%Intent{status: status}) when status in [:failed, :discarded], do: :ok
   defp ensure_requeueable(%Intent{status: status}), do: {:error, {:not_requeueable, status}}

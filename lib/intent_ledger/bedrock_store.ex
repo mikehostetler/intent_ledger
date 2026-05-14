@@ -7,6 +7,7 @@ defmodule IntentLedger.BedrockStore do
 
   @type stream_source :: :ledger | :outbox | {:intent, String.t()}
   @type projection_ref :: module() | String.t()
+  @type outbox_consumer_ref :: module() | String.t()
   @type intent_status ::
           :enqueued
           | :started
@@ -196,6 +197,79 @@ defmodule IntentLedger.BedrockStore do
   end
 
   @doc false
+  @spec read_outbox(module(), outbox_consumer_ref(), keyword()) ::
+          {:ok,
+           %{
+             consumer: String.t(),
+             acked_cursor: non_neg_integer(),
+             next_cursor: non_neg_integer(),
+             head_cursor: non_neg_integer(),
+             lag: non_neg_integer(),
+             entries: [map()]
+           }}
+          | {:error, term()}
+  def read_outbox(ledger, consumer, opts \\ []) do
+    with {:ok, key} <- outbox_consumer_key(consumer),
+         {:ok, limit} <- positive_integer_option(opts, :limit, 100) do
+      transact(ledger, fn repo, root ->
+        acked_cursor = read_outbox_cursor(repo, root, key) || 0
+        entries = read_outbox_entries(repo, root, acked_cursor, limit)
+        head_cursor = outbox_head(repo, root)
+        next_cursor = entries |> List.last() |> then(&if &1, do: &1.cursor, else: acked_cursor)
+
+        {:ok,
+         %{
+           consumer: key,
+           acked_cursor: acked_cursor,
+           next_cursor: next_cursor,
+           head_cursor: head_cursor,
+           lag: max(head_cursor - next_cursor, 0),
+           entries: entries
+         }}
+      end)
+    end
+  end
+
+  @doc false
+  @spec outbox_cursor(module(), outbox_consumer_ref(), keyword()) ::
+          {:ok, non_neg_integer() | nil} | {:error, term()}
+  def outbox_cursor(ledger, consumer, _opts \\ []) do
+    transact(ledger, fn repo, root ->
+      with {:ok, key} <- outbox_consumer_key(consumer) do
+        {:ok, read_outbox_cursor(repo, root, key)}
+      end
+    end)
+  end
+
+  @doc false
+  @spec ack_outbox(module(), outbox_consumer_ref(), non_neg_integer(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def ack_outbox(ledger, consumer, cursor, opts \\ []) do
+    with {:ok, key} <- outbox_consumer_key(consumer),
+         :ok <- validate_projection_cursor(cursor) do
+      transact(ledger, fn repo, root ->
+        current = read_outbox_cursor(repo, root, key) || 0
+        head = outbox_head(repo, root)
+        force? = Keyword.get(opts, :force, false)
+        allow_ahead? = Keyword.get(opts, :allow_ahead, false)
+
+        cond do
+          cursor < current and not force? ->
+            {:error, {:stale_outbox_ack, key, cursor, current}}
+
+          cursor > head and not allow_ahead? ->
+            {:error, {:outbox_ack_past_head, key, cursor, head}}
+
+          true ->
+            record = %{consumer: key, cursor: cursor, updated_at: Time.utc_now()}
+            repo.put(outbox_consumer_keyspace(root), key, encode(record))
+            {:ok, record}
+        end
+      end)
+    end
+  end
+
+  @doc false
   @spec intents(module(), keyword()) :: {:ok, [Intent.t()]} | {:error, term()}
   def intents(ledger, opts \\ []) do
     with {:ok, limit} <- positive_integer_option(opts, :limit, 100),
@@ -222,11 +296,14 @@ defmodule IntentLedger.BedrockStore do
   def projections(ledger, opts \\ []) do
     with {:ok, limit} <- positive_integer_option(opts, :limit, 100) do
       transact(ledger, fn repo, root ->
+        head = stream_head(repo, root, "ledger")
+
         entries =
           root
           |> projection_offset_keyspace()
           |> repo.get_range(limit: limit)
           |> Stream.map(fn {_key, value} -> decode(value) end)
+          |> Stream.map(&Map.merge(&1, %{head_cursor: head, lag: max(head - &1.cursor, 0)}))
           |> Enum.to_list()
 
         {:ok, entries}
@@ -250,19 +327,41 @@ defmodule IntentLedger.BedrockStore do
 
   @doc false
   @spec put_projection_cursor(module(), projection_ref(), non_neg_integer(), keyword()) :: :ok | {:error, term()}
-  def put_projection_cursor(ledger, projection, cursor, _opts \\ []) do
+  def put_projection_cursor(ledger, projection, cursor, opts \\ []) do
     with {:ok, key} <- projection_key(projection),
          :ok <- validate_projection_cursor(cursor) do
       transact(ledger, fn repo, root ->
-        repo.put(
-          projection_offset_keyspace(root),
-          key,
-          encode(%{projection: key, cursor: cursor, updated_at: Time.utc_now()})
-        )
+        current = read_projection_cursor(repo, root, key) || 0
+        head = stream_head(repo, root, "ledger")
+        force? = Keyword.get(opts, :force, false)
+        allow_ahead? = Keyword.get(opts, :allow_ahead, false)
 
-        :ok
+        cond do
+          cursor < current and not force? ->
+            {:error, {:stale_projection_cursor, key, cursor, current}}
+
+          cursor > head and not allow_ahead? ->
+            {:error, {:projection_cursor_past_head, key, cursor, head}}
+
+          true ->
+            repo.put(
+              projection_offset_keyspace(root),
+              key,
+              encode(%{projection: key, cursor: cursor, updated_at: Time.utc_now()})
+            )
+
+            :ok
+        end
       end)
     end
+  end
+
+  @doc false
+  @spec heads(module()) :: {:ok, %{ledger: non_neg_integer(), outbox: non_neg_integer()}} | {:error, term()}
+  def heads(ledger) do
+    transact(ledger, fn repo, root ->
+      {:ok, %{ledger: stream_head(repo, root, "ledger"), outbox: outbox_head(repo, root)}}
+    end)
   end
 
   @doc false
@@ -397,6 +496,43 @@ defmodule IntentLedger.BedrockStore do
     next
   end
 
+  defp read_outbox_entries(repo, root, cursor, limit) do
+    root
+    |> outbox_keyspace()
+    |> range_from_cursor(cursor)
+    |> repo.get_range(limit: limit)
+    |> Stream.map(fn {_key, value} -> decode(value) end)
+    |> Enum.to_list()
+  end
+
+  defp read_outbox_cursor(repo, root, key) do
+    case repo.get(outbox_consumer_keyspace(root), key) do
+      nil -> nil
+      value -> decode(value).cursor
+    end
+  end
+
+  defp read_projection_cursor(repo, root, key) do
+    case repo.get(projection_offset_keyspace(root), key) do
+      nil -> nil
+      value -> decode(value).cursor
+    end
+  end
+
+  defp stream_head(repo, root, stream) do
+    case repo.get(stream_version_keyspace(root), stream) do
+      nil -> 0
+      value -> decode(value)
+    end
+  end
+
+  defp outbox_head(repo, root) do
+    case repo.get(outbox_version_keyspace(root), "global") do
+      nil -> 0
+      value -> decode(value)
+    end
+  end
+
   defp existing_by_key(_repo, _keys, _intents, nil), do: :error
 
   defp existing_by_key(repo, keys, intents, key) do
@@ -424,6 +560,16 @@ defmodule IntentLedger.BedrockStore do
 
   defp projection_key(projection), do: {:error, {:invalid_projection, projection}}
 
+  defp outbox_consumer_key(consumer) when consumer in [nil, true, false],
+    do: {:error, {:invalid_outbox_consumer, consumer}}
+
+  defp outbox_consumer_key(consumer) when is_atom(consumer), do: {:ok, "module:#{module_key(consumer)}"}
+
+  defp outbox_consumer_key(consumer) when is_binary(consumer) and byte_size(consumer) > 0,
+    do: {:ok, "name:#{consumer}"}
+
+  defp outbox_consumer_key(consumer), do: {:error, {:invalid_outbox_consumer, consumer}}
+
   defp validate_projection_cursor(cursor) when is_integer(cursor) and cursor >= 0, do: :ok
   defp validate_projection_cursor(cursor), do: {:error, {:invalid_projection_cursor, cursor}}
 
@@ -441,6 +587,7 @@ defmodule IntentLedger.BedrockStore do
   defp stream_version_keyspace(root), do: Keyspace.partition(root, "stream_versions/")
   defp outbox_version_keyspace(root), do: Keyspace.partition(root, "outbox_versions/")
   defp outbox_keyspace(root), do: Keyspace.partition(root, "outbox/", key_encoding: TupleEncoding)
+  defp outbox_consumer_keyspace(root), do: Keyspace.partition(root, "outbox_consumers/", key_encoding: TupleEncoding)
   defp status_index_keyspace(root, status), do: Keyspace.partition(root, "intent_status/#{status}/")
 
   defp projection_offset_keyspace(root),

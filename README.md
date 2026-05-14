@@ -152,6 +152,11 @@ MyApp.Intents.enqueue_many(entries, opts)
 MyApp.Intents.fetch(intent_id)
 MyApp.Intents.history(intent_id, opts)
 MyApp.Intents.replay(source, opts)
+
+MyApp.Intents.read_outbox(consumer, opts)
+MyApp.Intents.outbox_cursor(consumer, opts)
+MyApp.Intents.ack_outbox(consumer, cursor, opts)
+
 MyApp.Intents.projection_cursor(projection, opts)
 MyApp.Intents.put_projection_cursor(projection, cursor, opts)
 
@@ -235,6 +240,25 @@ MyApp.Intents.replay(:outbox, cursor: 0, limit: 100)
 Signals are the audit log and the source for rebuildable read models. They are
 also the boundary for integrations that need durable outbox delivery.
 
+## Durable Outbox
+
+`replay(:outbox, ...)` gives raw signal replay. Integrations that need durable
+delivery should use named outbox consumers:
+
+```elixir
+{:ok, batch} = MyApp.Intents.read_outbox("webhook-dispatcher", limit: 100)
+
+Enum.each(batch.entries, fn entry ->
+  deliver_webhook!(entry.signal)
+end)
+
+{:ok, _ack} = MyApp.Intents.ack_outbox("webhook-dispatcher", batch.next_cursor)
+```
+
+Consumer acks are monotonic by default. Re-acking the same cursor is idempotent;
+acking behind the stored cursor returns a conflict. This is an at-least-once
+consumer cursor API, not a managed dispatcher process.
+
 ## Projections
 
 Projections are disposable read models built from Intent lifecycle signals.
@@ -262,6 +286,11 @@ cursor = cursor || 0
 {:ok, projection} = IntentLedger.Projection.catch_up(MyApp.IntentStatusProjection, projection, signals)
 :ok = MyApp.Intents.put_projection_cursor(MyApp.IntentStatusProjection, cursor + length(signals))
 ```
+
+Projection cursor writes are monotonic by default and cannot advance beyond the
+current ledger head. Use `force: true` only for explicit repair or rebuild
+workflows. `inspect(:projections)` includes each projection cursor, ledger head,
+and lag.
 
 ## Persistence
 
@@ -295,25 +324,29 @@ the raw `bedrock_job_queue` return protocol.
 Telemetry currently emits stop events for:
 
 - enqueue and command handling;
-- handler execution.
+- handler execution;
+- replay;
+- outbox read/cursor/ack;
+- projection cursor reads/writes;
+- health checks.
 
 The remaining telemetry surface will cover:
 
 - lifecycle signal append;
 - Bedrock transaction duration and conflicts;
 - queue depth and retry pressure;
-- outbox dispatch;
-- replay and projection catch-up.
+- managed outbox dispatch if that becomes part of the package;
+- projection catch-up.
 
 ## Next Refactor Work
 
 The remaining implementation work is:
 
-1. Add a `bedrock_job_queue` transaction hook or direct executor so queue state
-   and Intent lifecycle state commit atomically after handler results.
-2. Expand opt-in Bedrock tests into restart and multi-node scenarios.
-3. Tighten projection offsets and durable outbox consumer APIs.
-4. Publish once `bedrock_job_queue` has a Hex release path.
+1. Decide whether Intent Ledger should ship a managed outbox dispatcher process
+   or keep the lower-level durable consumer cursor API only.
+2. Add real worker crash and lease-expiry scenarios once `bedrock_job_queue`
+   exposes a stable recovery path for those cases.
+3. Publish once `bedrock_job_queue` has a Hex release path.
 
 ## Development
 

@@ -32,7 +32,9 @@ Intent Ledger stores:
 - full `IntentLedger.Intent` records;
 - key-to-intent idempotency index entries;
 - lifecycle signal streams for `:ledger` and `{:intent, intent_id}`;
-- a durable outbox stream mirroring lifecycle signals.
+- a durable outbox stream mirroring lifecycle signals;
+- outbox consumer cursors;
+- projection cursors.
 
 The queue item payload is intentionally minimal:
 
@@ -50,11 +52,11 @@ checksums in the Intent payload.
 Enqueue is atomic: Intent state, lifecycle signal append, outbox append, and
 queue item insert happen in one Bedrock transaction.
 
-Handler completion currently records Intent lifecycle state before
-`bedrock_job_queue` commits its queue completion/requeue transaction. The next
-implementation step is an upstream job queue transaction hook or a thin direct
-executor so handler result handling can update queue state and Intent state in
-the same Bedrock transaction.
+Handler completion uses the `bedrock_job_queue` action hook so queue
+completion/requeue and Intent lifecycle state commit in the same Bedrock
+transaction. Cancellation and ambiguity updates remove pending unleased queue
+items directly; already leased items are neutralized when the worker observes
+the non-runnable Intent state.
 
 ## Testing
 

@@ -8,6 +8,9 @@ MyApp.Intents.history(intent_id)
 MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
 MyApp.Intents.replay({:intent, intent_id}, cursor: 0, limit: 100)
 MyApp.Intents.replay(:outbox, cursor: 0, limit: 100)
+MyApp.Intents.read_outbox("webhook-dispatcher", limit: 100)
+MyApp.Intents.outbox_cursor("webhook-dispatcher")
+MyApp.Intents.ack_outbox("webhook-dispatcher", cursor)
 MyApp.Intents.projection_cursor(MyApp.IntentStatusProjection)
 MyApp.Intents.put_projection_cursor(MyApp.IntentStatusProjection, cursor)
 MyApp.Intents.inspect(:queues)
@@ -52,7 +55,7 @@ diagnostics, and repair tooling:
 `:intents` accepts optional `:queue`, `:topic`, `:status`, and `:limit`
 filters. `:retries` is the `:retry_scheduled` Intent view. `:ambiguous` is the
 manual reconciliation view. `:projections` returns durable projection cursor
-records written by `put_projection_cursor/3`.
+records written by `put_projection_cursor/3`, including ledger head and lag.
 
 ## Lifecycle Replay
 
@@ -63,6 +66,25 @@ projection rebuilds:
 {:ok, signals} = MyApp.Intents.replay(:ledger, cursor: 0, limit: 500)
 {:ok, outbox_signals} = MyApp.Intents.replay(:outbox, cursor: 0, limit: 500)
 ```
+
+## Durable Outbox
+
+Use `read_outbox/2` and `ack_outbox/3` for integrations that need durable
+delivery progress:
+
+```elixir
+{:ok, batch} = MyApp.Intents.read_outbox("webhook-dispatcher", limit: 100)
+
+Enum.each(batch.entries, fn entry ->
+  dispatch!(entry.signal)
+end)
+
+{:ok, _ack} = MyApp.Intents.ack_outbox("webhook-dispatcher", batch.next_cursor)
+```
+
+Outbox acknowledgements are monotonic. A consumer can reread after its last
+acknowledged cursor after a crash, which gives at-least-once delivery. Intent
+Ledger does not currently ship a managed dispatcher process.
 
 Signal types are:
 
@@ -83,14 +105,19 @@ high-level runtime operations:
 - `[:intent_ledger, :enqueue, :stop]`
 - `[:intent_ledger, :handler, :stop]`
 - `[:intent_ledger, :command, :stop]`
+- `[:intent_ledger, :replay, :stop]`
+- `[:intent_ledger, :outbox, :stop]`
+- `[:intent_ledger, :projection, :stop]`
+- `[:intent_ledger, :health, :stop]`
 
 Measurements include `:duration` in native units and `:count`. Metadata includes
 the ledger module, status, and operation-specific fields such as handler, topic,
 queue, command, and intent ID. Payloads and handler results are intentionally
 excluded.
 
-The event surface will grow around Bedrock transaction duration, replay, outbox
-delivery, and projection catch-up as those pieces stabilize.
+The event surface will grow around Bedrock transaction duration, queue pressure,
+managed outbox dispatch if added, and projection catch-up as those pieces
+stabilize.
 
 ## Errors
 
