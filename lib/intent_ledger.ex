@@ -121,6 +121,28 @@ defmodule IntentLedger do
         do: __MODULE__ |> IntentLedger.Runtime.replay(source, opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
+      Returns the durable cursor recorded for a projection.
+      """
+      @spec projection_cursor(IntentLedger.Runtime.projection_ref(), keyword()) ::
+              {:ok, non_neg_integer() | nil} | {:error, term()}
+      def projection_cursor(projection, opts \\ []),
+        do:
+          __MODULE__
+          |> IntentLedger.Runtime.projection_cursor(projection, opts)
+          |> IntentLedger.Error.normalize_result()
+
+      @doc """
+      Records the durable cursor for a projection.
+      """
+      @spec put_projection_cursor(IntentLedger.Runtime.projection_ref(), non_neg_integer(), keyword()) ::
+              :ok | {:error, term()}
+      def put_projection_cursor(projection, cursor, opts \\ []),
+        do:
+          __MODULE__
+          |> IntentLedger.Runtime.put_projection_cursor(projection, cursor, opts)
+          |> IntentLedger.Error.normalize_result()
+
+      @doc """
       Cancels an Intent at the IntentLedger layer.
 
       If the queue item is already pending, the bridge worker observes the

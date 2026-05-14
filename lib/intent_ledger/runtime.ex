@@ -4,7 +4,8 @@ defmodule IntentLedger.Runtime do
   alias Bedrock.JobQueue.{Internal, Item, Store}
   alias IntentLedger.{BedrockStore, Config, Context, Intent, Telemetry, Time}
 
-  @type replay_source :: :ledger | {:intent, String.t()}
+  @type replay_source :: :ledger | :outbox | {:intent, String.t()}
+  @type projection_ref :: module() | String.t()
 
   @doc false
   @spec enqueue(module(), String.t() | atom(), term(), keyword()) :: {:ok, Intent.t()} | {:error, term()}
@@ -64,6 +65,17 @@ defmodule IntentLedger.Runtime do
   @doc false
   @spec replay(module(), replay_source(), keyword()) :: {:ok, [Jido.Signal.t()]} | {:error, term()}
   def replay(ledger, source, opts \\ []), do: BedrockStore.replay(ledger, source, opts)
+
+  @doc false
+  @spec projection_cursor(module(), projection_ref(), keyword()) ::
+          {:ok, non_neg_integer() | nil} | {:error, term()}
+  def projection_cursor(ledger, projection, opts \\ []), do: BedrockStore.projection_cursor(ledger, projection, opts)
+
+  @doc false
+  @spec put_projection_cursor(module(), projection_ref(), non_neg_integer(), keyword()) :: :ok | {:error, term()}
+  def put_projection_cursor(ledger, projection, cursor, opts \\ []) do
+    BedrockStore.put_projection_cursor(ledger, projection, cursor, opts)
+  end
 
   @doc false
   @spec cancel(module(), String.t(), term(), keyword()) :: {:ok, Intent.t()} | {:error, term()}

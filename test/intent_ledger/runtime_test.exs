@@ -55,6 +55,9 @@ defmodule IntentLedger.RuntimeTest do
       }
   end
 
+  defmodule StatusProjection do
+  end
+
   defmodule TestIntents do
     use IntentLedger,
       otp_app: :intent_ledger,
@@ -164,6 +167,43 @@ defmodule IntentLedger.RuntimeTest do
     assert {:ok, [first, second]} = TestIntents.replay(:ledger, cursor: 10, limit: 2)
     assert first.type == "intent.enqueued"
     assert second.type == "intent.enqueued"
+  end
+
+  test "outbox replay uses the outbox cursor window" do
+    assert {:ok, first} = TestIntents.enqueue("invoice.send", %{invoice_id: 1})
+    assert {:ok, second} = TestIntents.enqueue("invoice.send", %{invoice_id: 2})
+    assert {:ok, third} = TestIntents.enqueue("invoice.send", %{invoice_id: 3})
+
+    assert {:ok, entries} = TestIntents.inspect(:outbox, cursor: 0, limit: 3)
+    assert Enum.map(entries, & &1.cursor) == [1, 2, 3]
+    assert Enum.map(entries, & &1.signal.subject) == [first.id, second.id, third.id]
+
+    assert {:ok, [signal]} = TestIntents.replay(:outbox, cursor: 1, limit: 1)
+    assert signal.subject == second.id
+    assert signal.type == "intent.enqueued"
+
+    assert {:ok, []} = TestIntents.replay(:outbox, cursor: 3, limit: 1)
+  end
+
+  test "unsupported replay sources return public invalid input errors" do
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :source, value: :unknown}} =
+             TestIntents.replay(:unknown)
+  end
+
+  test "projection cursors are durable per configured ledger" do
+    assert {:ok, nil} = TestIntents.projection_cursor(StatusProjection)
+
+    assert :ok = TestIntents.put_projection_cursor(StatusProjection, 42)
+    assert {:ok, 42} = TestIntents.projection_cursor(StatusProjection)
+
+    assert :ok = TestIntents.put_projection_cursor("external-status", 7)
+    assert {:ok, 7} = TestIntents.projection_cursor("external-status")
+
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :cursor, value: -1}} =
+             TestIntents.put_projection_cursor(StatusProjection, -1)
+
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :projection, value: ""}} =
+             TestIntents.projection_cursor("")
   end
 
   test "handler execution updates Intent lifecycle state" do

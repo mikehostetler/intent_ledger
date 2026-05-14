@@ -134,6 +134,15 @@ defmodule IntentLedger.Error do
   def from_reason({:unsupported_inspection_view, view}),
     do: invalid("Unsupported inspection view", field: :view, value: view)
 
+  def from_reason({:unsupported_replay_source, source}),
+    do: invalid("Unsupported replay source", field: :source, value: source)
+
+  def from_reason({:invalid_projection, projection}),
+    do: invalid("Invalid projection reference", field: :projection, value: projection)
+
+  def from_reason({:invalid_projection_cursor, cursor}),
+    do: invalid("Invalid projection cursor", field: :cursor, value: cursor)
+
   def from_reason({:invalid_intent, errors}), do: invalid("Invalid Intent", errors: errors)
   def from_reason({:required, field}), do: invalid("Required Intent field is missing", field: field)
 

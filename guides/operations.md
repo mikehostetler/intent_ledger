@@ -7,6 +7,9 @@ MyApp.Intents.fetch(intent_id)
 MyApp.Intents.history(intent_id)
 MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
 MyApp.Intents.replay({:intent, intent_id}, cursor: 0, limit: 100)
+MyApp.Intents.replay(:outbox, cursor: 0, limit: 100)
+MyApp.Intents.projection_cursor(MyApp.IntentStatusProjection)
+MyApp.Intents.put_projection_cursor(MyApp.IntentStatusProjection, cursor)
 MyApp.Intents.inspect(:queues)
 MyApp.Intents.inspect(:queues, queue: "default")
 MyApp.Intents.inspect(:outbox, cursor: 0, limit: 100)
@@ -36,6 +39,7 @@ projection rebuilds:
 
 ```elixir
 {:ok, signals} = MyApp.Intents.replay(:ledger, cursor: 0, limit: 500)
+{:ok, outbox_signals} = MyApp.Intents.replay(:outbox, cursor: 0, limit: 500)
 ```
 
 Signal types are:

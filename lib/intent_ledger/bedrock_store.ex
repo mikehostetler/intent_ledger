@@ -5,7 +5,8 @@ defmodule IntentLedger.BedrockStore do
   alias Bedrock.Keyspace
   alias IntentLedger.{Intent, Signal, Time}
 
-  @type stream_source :: :ledger | {:intent, String.t()}
+  @type stream_source :: :ledger | :outbox | {:intent, String.t()}
+  @type projection_ref :: module() | String.t()
 
   @doc false
   @spec transact(module(), (module(), Keyspace.t() -> term()), keyword()) :: term()
@@ -101,22 +102,31 @@ defmodule IntentLedger.BedrockStore do
 
   @doc false
   @spec replay(module(), stream_source(), keyword()) :: {:ok, [Jido.Signal.t()]} | {:error, term()}
-  def replay(ledger, source, opts \\ []) do
-    transact(ledger, fn repo, root ->
-      stream = stream_name(source)
-      cursor = Keyword.get(opts, :cursor, 0)
-      limit = Keyword.get(opts, :limit, 100)
-      keyspace = stream_keyspace(root, stream)
+  def replay(ledger, source, opts \\ [])
 
-      entries =
-        keyspace
-        |> range_from_cursor(cursor)
-        |> repo.get_range(limit: limit)
-        |> Stream.map(fn {_key, value} -> decode(value) end)
-        |> Enum.to_list()
-
+  def replay(ledger, :outbox, opts) do
+    with {:ok, entries} <- outbox(ledger, opts) do
       {:ok, Enum.map(entries, & &1.signal)}
-    end)
+    end
+  end
+
+  def replay(ledger, source, opts) do
+    with {:ok, stream} <- stream_name(source) do
+      transact(ledger, fn repo, root ->
+        cursor = Keyword.get(opts, :cursor, 0)
+        limit = Keyword.get(opts, :limit, 100)
+        keyspace = stream_keyspace(root, stream)
+
+        entries =
+          keyspace
+          |> range_from_cursor(cursor)
+          |> repo.get_range(limit: limit)
+          |> Stream.map(fn {_key, value} -> decode(value) end)
+          |> Enum.to_list()
+
+        {:ok, Enum.map(entries, & &1.signal)}
+      end)
+    end
   end
 
   @doc false
@@ -136,6 +146,37 @@ defmodule IntentLedger.BedrockStore do
 
       {:ok, entries}
     end)
+  end
+
+  @doc false
+  @spec projection_cursor(module(), projection_ref(), keyword()) ::
+          {:ok, non_neg_integer() | nil} | {:error, term()}
+  def projection_cursor(ledger, projection, _opts \\ []) do
+    transact(ledger, fn repo, root ->
+      with {:ok, key} <- projection_key(projection) do
+        case repo.get(projection_offset_keyspace(root), key) do
+          nil -> {:ok, nil}
+          value -> {:ok, decode(value).cursor}
+        end
+      end
+    end)
+  end
+
+  @doc false
+  @spec put_projection_cursor(module(), projection_ref(), non_neg_integer(), keyword()) :: :ok | {:error, term()}
+  def put_projection_cursor(ledger, projection, cursor, _opts \\ []) do
+    with {:ok, key} <- projection_key(projection),
+         :ok <- validate_projection_cursor(cursor) do
+      transact(ledger, fn repo, root ->
+        repo.put(
+          projection_offset_keyspace(root),
+          key,
+          encode(%{projection: key, cursor: cursor, updated_at: Time.utc_now()})
+        )
+
+        :ok
+      end)
+    end
   end
 
   @doc false
@@ -192,8 +233,20 @@ defmodule IntentLedger.BedrockStore do
     end
   end
 
-  defp stream_name(:ledger), do: "ledger"
-  defp stream_name({:intent, intent_id}) when is_binary(intent_id), do: "intent:#{intent_id}"
+  defp stream_name(:ledger), do: {:ok, "ledger"}
+  defp stream_name({:intent, intent_id}) when is_binary(intent_id), do: {:ok, "intent:#{intent_id}"}
+  defp stream_name(source), do: {:error, {:unsupported_replay_source, source}}
+
+  defp projection_key(projection) when projection in [nil, true, false], do: {:error, {:invalid_projection, projection}}
+  defp projection_key(projection) when is_atom(projection), do: {:ok, "module:#{module_key(projection)}"}
+
+  defp projection_key(projection) when is_binary(projection) and byte_size(projection) > 0,
+    do: {:ok, "name:#{projection}"}
+
+  defp projection_key(projection), do: {:error, {:invalid_projection, projection}}
+
+  defp validate_projection_cursor(cursor) when is_integer(cursor) and cursor >= 0, do: :ok
+  defp validate_projection_cursor(cursor), do: {:error, {:invalid_projection_cursor, cursor}}
 
   defp repo!(ledger), do: ledger.__intent_ledger__().repo
 
@@ -209,6 +262,10 @@ defmodule IntentLedger.BedrockStore do
   defp stream_version_keyspace(root), do: Keyspace.partition(root, "stream_versions/")
   defp outbox_version_keyspace(root), do: Keyspace.partition(root, "outbox_versions/")
   defp outbox_keyspace(root), do: Keyspace.partition(root, "outbox/", key_encoding: TupleEncoding)
+
+  defp projection_offset_keyspace(root),
+    do: Keyspace.partition(root, "projection_offsets/", key_encoding: TupleEncoding)
+
   defp stream_keyspace(root, stream), do: Keyspace.partition(root, "streams/#{stream}/", key_encoding: TupleEncoding)
 
   defp range_from_cursor(keyspace, cursor) when is_integer(cursor) and cursor >= 0 do

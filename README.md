@@ -135,6 +135,7 @@ Inspect and replay:
 {:ok, signals} = MyApp.Intents.history(intent.id)
 
 {:ok, window} = MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
+{:ok, outbox_signals} = MyApp.Intents.replay(:outbox, cursor: 0, limit: 100)
 {:ok, queues} = MyApp.Intents.inspect(:queues)
 {:ok, tenant_queue} = MyApp.Intents.stats(queue: "tenant:acme")
 {:ok, outbox} = MyApp.Intents.inspect(:outbox)
@@ -151,6 +152,8 @@ MyApp.Intents.enqueue_many(entries, opts)
 MyApp.Intents.fetch(intent_id)
 MyApp.Intents.history(intent_id, opts)
 MyApp.Intents.replay(source, opts)
+MyApp.Intents.projection_cursor(projection, opts)
+MyApp.Intents.put_projection_cursor(projection, cursor, opts)
 
 MyApp.Intents.cancel(intent_id, reason, opts)
 MyApp.Intents.requeue(intent_id, opts)
@@ -226,6 +229,7 @@ Replay is source-based:
 ```elixir
 MyApp.Intents.replay({:intent, intent_id}, cursor: 0, limit: 100)
 MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
+MyApp.Intents.replay(:outbox, cursor: 0, limit: 100)
 ```
 
 Signals are the audit log and the source for rebuildable read models. They are
@@ -252,8 +256,11 @@ end
 The intended projection workflow is:
 
 ```elixir
-{:ok, signals} = MyApp.Intents.replay(:ledger, cursor: projection.cursor)
+{:ok, cursor} = MyApp.Intents.projection_cursor(MyApp.IntentStatusProjection)
+cursor = cursor || 0
+{:ok, signals} = MyApp.Intents.replay(:ledger, cursor: cursor)
 {:ok, projection} = IntentLedger.Projection.catch_up(MyApp.IntentStatusProjection, projection, signals)
+:ok = MyApp.Intents.put_projection_cursor(MyApp.IntentStatusProjection, cursor + length(signals))
 ```
 
 ## Persistence
