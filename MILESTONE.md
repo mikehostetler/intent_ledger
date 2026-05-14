@@ -12,8 +12,10 @@ IntentLedger public API
   -> Bedrock
 ```
 
-The current code remains useful as a state-machine and test reference, but it
-is not the release architecture.
+The current code now follows this release architecture at the public API and
+persistence layers. The remaining release work is concentrated around atomic
+queue/lifecycle commits, broader inspection, heavy integration tests, and
+release hardening.
 
 ## Release Thesis
 
@@ -70,9 +72,13 @@ defmodule MyApp.Intents do
   use IntentLedger,
     otp_app: :my_app,
     repo: MyApp.Bedrock,
-    handlers: %{
-      "invoice.send" => MyApp.Intents.SendInvoice
-    }
+    intents: %{
+      "invoice.send" => [
+        handler: MyApp.Intents.SendInvoice,
+        queue: "billing"
+      ]
+    },
+    queues: ["tenant:acme", "bulk"]
 end
 ```
 
@@ -124,6 +130,8 @@ MyApp.Intents.enqueue_many(entries, opts)
 MyApp.Intents.fetch(intent_id)
 MyApp.Intents.history(intent_id, opts)
 MyApp.Intents.replay(source, opts)
+MyApp.Intents.projection_cursor(projection, opts)
+MyApp.Intents.put_projection_cursor(projection, cursor, opts)
 
 MyApp.Intents.cancel(intent_id, reason, opts)
 MyApp.Intents.requeue(intent_id, opts)
@@ -327,6 +335,8 @@ Replay is source-based:
 MyApp.Intents.replay({:intent, intent_id}, cursor: 0, limit: 100)
 MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
 MyApp.Intents.replay(:outbox, cursor: 0, limit: 100)
+MyApp.Intents.projection_cursor(MyApp.IntentStatusProjection)
+MyApp.Intents.put_projection_cursor(MyApp.IntentStatusProjection, cursor)
 ```
 
 No public shard replay API.
@@ -334,7 +344,8 @@ No public shard replay API.
 Projection responsibilities:
 
 - consume lifecycle signals;
-- store their own durable cursor if they are durable;
+- record their durable cursor through the configured Intents module when they
+  are durable;
 - be rebuildable from replay;
 - not participate in lifecycle correctness.
 
@@ -348,6 +359,48 @@ MyApp.Intents.inspect(:ambiguous)
 MyApp.Intents.inspect(:outbox)
 MyApp.Intents.inspect(:projections)
 ```
+
+## Current Implementation Status
+
+Landed:
+
+- Bedrock and `bedrock_job_queue` path dependencies are the runtime path.
+- Postgres/Ecto adapters, guides, aliases, and release-facing API surface are
+  removed.
+- Configured `use IntentLedger` modules use `intents:` and queue definitions.
+- `IntentLedger.Handler`, `IntentLedger.Context`, Zoi payload/result validation,
+  and lifecycle result mapping exist.
+- Intent state, lifecycle signals, outbox entries, replay streams, idempotent
+  enqueue keys, and projection cursors are stored in Bedrock keyspaces.
+- Public replay supports `:ledger`, `{:intent, intent_id}`, and `:outbox`.
+- Splode-backed public error normalization and telemetry stop events exist.
+- Fast unit tests cover handler result, validation, telemetry, replay, and
+  projection cursor edge cases.
+
+Partial:
+
+- Enqueue writes Intent state, lifecycle signal, outbox entry, and queue item in
+  one Bedrock transaction.
+- Handler completion/retry/discard lifecycle updates are recorded, but they are
+  not yet committed in the same transaction as the `bedrock_job_queue` queue
+  action.
+- `inspect/2` currently covers `:queues` and `:outbox`; `:intents`,
+  `:retries`, `:ambiguous`, and `:projections` still need implementation.
+- Command/idempotency behavior covers duplicate enqueue keys, but command race
+  tests and richer command records remain open.
+- Cancellation marks the Intent and neutralizes handler execution when observed,
+  but explicit queue visibility removal still belongs to the atomic integration
+  work.
+
+Missing:
+
+- `bedrock_job_queue` transaction hook or direct executor fallback for atomic
+  queue/lifecycle movement.
+- Durable outbox dispatch/ack policy.
+- Projection lag inspection.
+- Bedrock restart and multi-node opt-in scenarios.
+- Final `mix docs`, `mix hex.build`, dependency review, and Hex release timing
+  decision.
 
 ## Release Gates
 
