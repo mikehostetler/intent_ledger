@@ -50,6 +50,19 @@ defmodule IntentLedger.Lifecycle do
   end
 
   @doc false
+  @spec classify_failure(module() | nil, Record.t(), term(), context()) ::
+          :default | :retry | :fail | :ambiguous | {:retry, DateTime.t()} | {:error, term()}
+  def classify_failure(nil, %Record{}, _error, _context), do: :default
+
+  def classify_failure(module, %Record{} = record, error, context) do
+    if function_exported?(module, :classify_failure, 3) do
+      module.classify_failure(record, error, context)
+    else
+      :default
+    end
+  end
+
+  @doc false
   @spec after_transition(module() | nil, [Jido.Signal.t()], context()) :: :ok | {:error, term()}
   def after_transition(nil, _signals, _context), do: :ok
 

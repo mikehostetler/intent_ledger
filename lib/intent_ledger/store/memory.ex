@@ -346,10 +346,9 @@ defmodule IntentLedger.Store.Memory do
   def handle_call({:fail, ledger, claim_id, token, error, opts}, _from, state) do
     now = Keyword.fetch!(opts, :now)
 
-    with {:ok, intent, intent_state, _claim_info} <- validate_claim(state, claim_id, token, now) do
-      {next_state, record, signals} =
-        commit_failure(state, ledger, intent, intent_state, claim_id, error, opts)
-
+    with {:ok, intent, intent_state, _claim_info} <- validate_claim(state, claim_id, token, now),
+         {:ok, next_state, record, signals} <-
+           commit_failure(state, ledger, intent, intent_state, claim_id, error, opts) do
       {:reply, {:ok, record, signals}, next_state}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -532,51 +531,113 @@ defmodule IntentLedger.Store.Memory do
   defp commit_failure(state, ledger, intent, intent_state, claim_id, error, opts) do
     now = Keyword.fetch!(opts, :now)
 
-    failed =
-      signal(ledger, :intent_failed, intent, %{
-        claim_id: claim_id,
-        error: error,
-        attempt: intent_state.attempt
-      })
+    with {:ok, classification} <- classify_failure(opts, %Record{intent: intent, state: intent_state}, error) do
+      failed =
+        signal(ledger, :intent_failed, intent, %{
+          claim_id: claim_id,
+          error: error,
+          attempt: intent_state.attempt
+        })
 
-    {next_intent_state, extra_signal} =
-      if intent_state.attempt < intent_state.max_attempts do
-        retry_at = Keyword.get(opts, :retry_at, Time.add_ms(now, Keyword.get(opts, :retry_ms, 0)))
+      {next_intent_state, extra_signal} =
+        failure_transition(ledger, intent, intent_state, error, now, opts, classification)
 
-        {%{
-           intent_state
-           | status: :retry_scheduled,
-             visible_at: retry_at,
-             error: error
-         }
-         |> clear_claim(now),
-         signal(ledger, :intent_retry_scheduled, intent, %{
-           retry_at: retry_at,
-           attempt: intent_state.attempt
-         })}
-      else
-        exhausted_state = %{intent_state | error: error} |> clear_claim(now)
+      signals = List.wrap(failed) ++ List.wrap(extra_signal)
 
-        if intent.ambiguity_policy in [:manual, :reconcile] do
-          {%{exhausted_state | status: :ambiguous},
-           signal(ledger, :intent_marked_ambiguous, intent, %{
-             reason: :attempts_exhausted,
-             error: error
-           })}
-        else
-          {%{exhausted_state | status: :failed}, []}
+      next_state =
+        state
+        |> drop_claim(claim_id)
+        |> put_state(intent, next_intent_state)
+        |> append(ledger, intent, signals)
+
+      {:ok, next_state, record(next_state, intent.id), signals}
+    end
+  end
+
+  defp classify_failure(opts, %Record{} = record, error) do
+    case Keyword.get(opts, :classify_failure) do
+      nil ->
+        {:ok, :default}
+
+      classify when is_function(classify, 2) ->
+        case classify.(record, error) do
+          classification when classification in [:default, :retry, :fail, :ambiguous] ->
+            {:ok, classification}
+
+          {:retry, %DateTime{}} = classification ->
+            {:ok, classification}
+
+          {:error, reason} ->
+            {:error, reason}
+
+          classification ->
+            {:error, {:invalid_failure_classification, classification}}
         end
-      end
+    end
+  end
 
-    signals = List.wrap(failed) ++ List.wrap(extra_signal)
+  defp failure_transition(ledger, intent, intent_state, error, now, opts, :default) do
+    if intent_state.attempt < intent_state.max_attempts do
+      retry_at = Keyword.get(opts, :retry_at, Time.add_ms(now, Keyword.get(opts, :retry_ms, 0)))
+      retry_failure(ledger, intent, intent_state, error, now, retry_at)
+    else
+      exhausted_failure(ledger, intent, intent_state, error, now, :attempts_exhausted)
+    end
+  end
 
-    next_state =
-      state
-      |> drop_claim(claim_id)
-      |> put_state(intent, next_intent_state)
-      |> append(ledger, intent, signals)
+  defp failure_transition(ledger, intent, intent_state, error, now, opts, :retry) do
+    if intent_state.attempt < intent_state.max_attempts do
+      retry_at = Keyword.get(opts, :retry_at, Time.add_ms(now, Keyword.get(opts, :retry_ms, 0)))
+      retry_failure(ledger, intent, intent_state, error, now, retry_at)
+    else
+      exhausted_failure(ledger, intent, intent_state, error, now, :attempts_exhausted)
+    end
+  end
 
-    {next_state, record(next_state, intent.id), signals}
+  defp failure_transition(ledger, intent, intent_state, error, now, _opts, {:retry, retry_at}) do
+    if intent_state.attempt < intent_state.max_attempts do
+      retry_failure(ledger, intent, intent_state, error, now, retry_at)
+    else
+      exhausted_failure(ledger, intent, intent_state, error, now, :attempts_exhausted)
+    end
+  end
+
+  defp failure_transition(_ledger, _intent, intent_state, error, now, _opts, :fail) do
+    {%{intent_state | status: :failed, error: error} |> clear_claim(now), []}
+  end
+
+  defp failure_transition(ledger, intent, intent_state, error, now, _opts, :ambiguous) do
+    ambiguous_failure(ledger, intent, intent_state, error, now, :failure_classified)
+  end
+
+  defp retry_failure(ledger, intent, intent_state, error, now, retry_at) do
+    {%{
+       intent_state
+       | status: :retry_scheduled,
+         visible_at: retry_at,
+         error: error
+     }
+     |> clear_claim(now),
+     signal(ledger, :intent_retry_scheduled, intent, %{
+       retry_at: retry_at,
+       attempt: intent_state.attempt
+     })}
+  end
+
+  defp exhausted_failure(ledger, intent, intent_state, error, now, reason) do
+    if intent.ambiguity_policy in [:manual, :reconcile] do
+      ambiguous_failure(ledger, intent, intent_state, error, now, reason)
+    else
+      {%{intent_state | status: :failed, error: error} |> clear_claim(now), []}
+    end
+  end
+
+  defp ambiguous_failure(ledger, intent, intent_state, error, now, reason) do
+    {%{intent_state | status: :ambiguous, error: error} |> clear_claim(now),
+     signal(ledger, :intent_marked_ambiguous, intent, %{
+       reason: reason,
+       error: error
+     })}
   end
 
   defp commit_expired_claim(state, ledger, intent, intent_state, now) do

@@ -229,7 +229,10 @@ defmodule IntentLedger.Server do
   end
 
   def handle_call({:fail, claim_id, token, error, opts}, _from, state) do
-    opts = Keyword.put_new(opts, :now, now(opts))
+    opts =
+      opts
+      |> Keyword.put_new(:now, now(opts))
+      |> put_failure_classifier(state)
 
     reply_commit(
       state,
@@ -422,7 +425,10 @@ defmodule IntentLedger.Server do
   end
 
   defp execute_public_command({:fail, claim_id, token, error, opts}, state) do
-    opts = Keyword.put_new(opts, :now, now(opts))
+    opts =
+      opts
+      |> Keyword.put_new(:now, now(opts))
+      |> put_failure_classifier(state)
 
     unwrap_reply(
       reply_commit(
@@ -638,6 +644,14 @@ defmodule IntentLedger.Server do
 
   defp lineage_counts(state, attrs) do
     state.store_module.read(state.store_ref, state.name, {:lineage_counts, attrs}, [])
+  end
+
+  defp put_failure_classifier(opts, state) do
+    context = context(state, opts)
+
+    Keyword.put(opts, :classify_failure, fn record, error ->
+      Lifecycle.classify_failure(state.lifecycle, record, error, context)
+    end)
   end
 
   defp descendant_intent?(%Intent{} = intent) do

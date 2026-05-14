@@ -46,6 +46,24 @@ defmodule IntentLedgerTest do
     end
   end
 
+  defmodule ClassifyingFailureLifecycle do
+    @behaviour IntentLedger.Lifecycle
+
+    @impl true
+    def classify_failure(record, error, context) do
+      if pid = Process.whereis(:intent_ledger_failure_classifier_test) do
+        send(pid, {:classified_failure, record.intent.id, error, context.ledger})
+      end
+
+      case error do
+        :permanent -> :fail
+        :manual_review -> :ambiguous
+        {:retry_at, retry_at} -> {:retry, retry_at}
+        :reject -> {:error, :classification_rejected}
+      end
+    end
+  end
+
   setup do
     name = Module.concat(__MODULE__, "Ledger#{System.unique_integer([:positive])}")
 
@@ -231,6 +249,65 @@ defmodule IntentLedgerTest do
       )
 
     assert failed_record.state.status == :failed
+  end
+
+  test "classifies failures through lifecycle callbacks", %{ledger: _ledger} do
+    Process.register(self(), :intent_ledger_failure_classifier_test)
+
+    name = Module.concat(__MODULE__, "FailureClassifierLedger#{System.unique_integer([:positive])}")
+    now = ~U[2026-01-01 00:00:00Z]
+    retry_at = Time.add_ms(now, 5_000)
+
+    start_supervised!(
+      {IntentLedger, name: name, lifecycle: ClassifyingFailureLifecycle, store: IntentLedger.Store.Memory}
+    )
+
+    {:ok, permanent} =
+      IntentLedger.submit(name, %{key: "failure:permanent", kind: "job.run", max_attempts: 3}, now: now)
+
+    {:ok, permanent_claim} = IntentLedger.claim(name, :default, "worker-1", now: now, lease_ms: 1_000)
+    {:ok, failed} = IntentLedger.fail(name, permanent_claim.claim.id, permanent_claim.claim.token, :permanent, now: now)
+
+    assert failed.intent.id == permanent.intent.id
+    assert failed.state.status == :failed
+    permanent_id = permanent.intent.id
+    assert_receive {:classified_failure, ^permanent_id, :permanent, ^name}
+
+    {:ok, manual} =
+      IntentLedger.submit(name, %{key: "failure:manual", kind: "job.run", max_attempts: 3}, now: now)
+
+    {:ok, manual_claim} = IntentLedger.claim(name, :default, "worker-2", now: now, lease_ms: 1_000)
+
+    {:ok, ambiguous} =
+      IntentLedger.fail(name, manual_claim.claim.id, manual_claim.claim.token, :manual_review, now: now)
+
+    assert ambiguous.intent.id == manual.intent.id
+    assert ambiguous.state.status == :ambiguous
+
+    {:ok, retry} =
+      IntentLedger.submit(name, %{key: "failure:retry", kind: "job.run", max_attempts: 3}, now: now)
+
+    {:ok, retry_claim} = IntentLedger.claim(name, :default, "worker-3", now: now, lease_ms: 1_000)
+
+    {:ok, retry_record} =
+      IntentLedger.fail(name, retry_claim.claim.id, retry_claim.claim.token, {:retry_at, retry_at}, now: now)
+
+    assert retry_record.intent.id == retry.intent.id
+    assert retry_record.state.status == :retry_scheduled
+    assert retry_record.state.visible_at == retry_at
+
+    {:ok, rejected} = IntentLedger.submit(name, %{key: "failure:reject", kind: "job.run"}, now: now)
+    {:ok, rejected_claim} = IntentLedger.claim(name, :default, "worker-4", now: now, lease_ms: 1_000)
+
+    assert {:error, :classification_rejected} =
+             IntentLedger.fail(name, rejected_claim.claim.id, rejected_claim.claim.token, :reject, now: now)
+
+    {:ok, still_claimed} = IntentLedger.get(name, rejected.intent.id)
+    assert still_claimed.state.status == :claimed
+
+    if Process.whereis(:intent_ledger_failure_classifier_test) == self() do
+      Process.unregister(:intent_ledger_failure_classifier_test)
+    end
   end
 
   test "recovers expired claims back to the queue", %{ledger: ledger} do
