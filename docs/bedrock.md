@@ -25,10 +25,16 @@ defmodule MyApp.BedrockRepo do
 end
 ```
 
+Start the Bedrock cluster and repo dependencies before the ledger:
+
 ```elixir
 children = [
+  MyApp.BedrockCluster,
+  MyApp.BedrockRepo,
   {IntentLedger,
    name: MyApp.IntentLedger,
+   queues: [default: [shards: 16]],
+   lease_ms: 30_000,
    store: {IntentLedger.Store.Bedrock, repo: MyApp.BedrockRepo}}
 ]
 ```
@@ -36,6 +42,44 @@ children = [
 The adapter checks for `:bedrock`, `Bedrock`, and `Bedrock.Repo` at startup and
 returns an `IntentLedger.Error.AdapterRuntimeError` when the dependency or repo
 module is missing.
+
+### Setup Checklist
+
+1. Add the optional `:bedrock` dependency to the host application.
+2. Define the application-owned Bedrock cluster and repo modules.
+3. Configure durable Bedrock storage, logs, coordinators, and materializers
+   according to Bedrock's deployment requirements.
+4. Start Bedrock infrastructure before any `IntentLedger` child that uses the
+   Bedrock repo.
+5. Use the same ledger name, queues, shard counts, lease settings, and repo
+   module on every node that participates in claiming.
+6. Keep node clocks synchronized. Intent visibility, claim leases, shard
+   leases, and recovery decisions compare `DateTime` values written by
+   different processes.
+7. Attach telemetry handlers and add inspection-based health checks before
+   enabling workers that claim production work.
+
+### Store Options
+
+The store child accepts:
+
+- `:name` - process name for the adapter child, supplied by the ledger runtime
+  when the store is configured through `IntentLedger`.
+- `:repo` - required Bedrock repo module.
+- `:transaction_opts` - optional keyword list merged into each Bedrock
+  transaction call.
+
+Pass transaction options through the store tuple when the application needs
+repo-specific transaction behavior:
+
+```elixir
+{IntentLedger,
+ name: MyApp.IntentLedger,
+ store:
+   {IntentLedger.Store.Bedrock,
+    repo: MyApp.BedrockRepo,
+    transaction_opts: [timeout: 15_000]}}
+```
 
 ## Keyspace Layout
 
@@ -154,6 +198,65 @@ The Intent Ledger adapter is stateless apart from its repo module. Restarting
 the adapter process does not rebuild state from memory; all lifecycle history,
 queue state, command replay records, leases, and outbox entries must already be
 durably committed in Bedrock.
+
+## Bedrock Operations
+
+Use the general [Operations And Observability](operations.md) guide for event
+names, metric units, dashboard recommendations, and runbooks. Bedrock
+deployments should add the following adapter-specific views.
+
+### Ledger Runtime Health
+
+- Queue depth and retry depth from `IntentLedger.inspect_queues/2`.
+- Shard ownership from `IntentLedger.inspect_shards/2`.
+- Expired claims from `IntentLedger.inspect_claims/2`.
+- Outbox lag from `IntentLedger.inspect_outbox_lag/2`.
+- Projection lag from `IntentLedger.inspect_projection_lag/3`.
+- Store conflict rate from `[:store, :conflict]`, especially
+  `:stream_version`, `:claim_fence`, `:shard_lease`, and `:outbox` conflicts.
+
+### Bedrock Infrastructure Health
+
+Monitor the Bedrock cluster independently from Intent Ledger:
+
+- coordinator availability and leadership changes;
+- transaction latency and timeout rate;
+- log and materializer health;
+- object-storage availability and latency;
+- disk usage and fsync latency for durable paths;
+- process restarts for the repo, cluster, logs, and materializers.
+
+Intent Ledger can report queue and lease symptoms, but Bedrock infrastructure
+telemetry explains whether the durable substrate is healthy.
+
+### Failure Modes
+
+| Symptom | Likely Causes | First Checks |
+| --- | --- | --- |
+| Queue depth grows but claims are empty | shard lease not owned, clock skew, future `visible_at`, transaction errors | `inspect_shards/2`, `inspect_queues/2`, `[:shard_lease, :stop]`, node clocks |
+| Shard ownership flaps | lease interval too short for transaction latency, node restarts, Bedrock timeouts | lease telemetry, Bedrock transaction latency, supervisor restarts |
+| Expired claims accumulate | recovery not running, lifecycle classifier rejects recovery, Bedrock errors | recovery telemetry, `inspect_claims/2`, lifecycle logs |
+| Outbox lag grows | dispatcher stopped, handler failures, ack conflicts, Bedrock write failures | `inspect_outbox_lag/2`, dispatcher telemetry, ack telemetry |
+| Command replay conflicts spike | unstable command IDs or changed command semantics for the same ID | `[:store, :conflict]` by operation and command logs |
+
+### Capacity Notes
+
+Shard count controls local claim concurrency. More shards allow more shard
+workers to claim in parallel, but also create more lease rows and more periodic
+lease traffic. Start with enough shards for expected worker parallelism and
+increase only when queue depth grows while each owned shard is claiming
+successfully.
+
+Tune these values together:
+
+- `:lease_ms` - claim lease duration and base shard lease duration.
+- `:lease_renew_ms` - how often shard workers renew ownership.
+- `:lease_retry_ms` - retry delay after failed shard acquisition.
+- `:poll_interval_ms` - periodic due-work scan interval.
+- `:recovery_interval_ms` - expired-claim and stale-shard recovery interval.
+
+Short intervals reduce failover time but increase transaction pressure. Long
+intervals reduce pressure but increase recovery time after node or worker death.
 
 ## Cluster Formation Expectations
 
