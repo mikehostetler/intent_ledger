@@ -79,13 +79,14 @@ defmodule IntentLedger.InstanceSupervisor do
         :lease_renew_ms,
         :lease_retry_ms,
         :poll_interval_ms,
-        :claim_batch_size
+        :claim_batch_size,
+        :telemetry_prefix
       ])
       |> Keyword.put(:store, {store_module, store_name})
 
     recovery_opts =
       opts
-      |> Keyword.take([:name, :queues, :recovery_interval_ms, :recovery_limit])
+      |> Keyword.take([:name, :queues, :recovery_interval_ms, :recovery_limit, :telemetry_prefix])
       |> Keyword.put(:store, {store_module, store_name})
 
     dispatcher_opts =

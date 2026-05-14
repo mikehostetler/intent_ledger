@@ -9,7 +9,7 @@ defmodule IntentLedger.QueueShardServer do
 
   use GenServer
 
-  alias IntentLedger.{Claim, ID, Names, OutboxEntry, Time}
+  alias IntentLedger.{Claim, ID, Names, OutboxEntry, Telemetry, Time}
   alias IntentLedger.Store.{CommitRequest, Listing, Precondition, Write}
 
   @type option ::
@@ -23,6 +23,7 @@ defmodule IntentLedger.QueueShardServer do
           | {:poll_interval_ms, pos_integer() | nil}
           | {:claim_batch_size, pos_integer() | nil}
           | {:owner_id, String.t()}
+          | {:telemetry_prefix, [atom()]}
 
   @type t :: %__MODULE__{
           name: atom(),
@@ -39,6 +40,7 @@ defmodule IntentLedger.QueueShardServer do
           lease_until: DateTime.t() | nil,
           lease_timer_ref: reference() | nil,
           poll_timer_ref: reference() | nil,
+          telemetry: keyword(),
           claimed_count: non_neg_integer(),
           last_claimed: [map()]
         }
@@ -58,6 +60,7 @@ defmodule IntentLedger.QueueShardServer do
     :lease_until,
     :lease_timer_ref,
     :poll_timer_ref,
+    :telemetry,
     claimed_count: 0,
     last_claimed: []
   ]
@@ -121,6 +124,7 @@ defmodule IntentLedger.QueueShardServer do
       lease_retry_ms: Keyword.get(opts, :lease_retry_ms) || renew_interval(lease_ms),
       poll_interval_ms: Keyword.get(opts, :poll_interval_ms) || @default_poll_interval_ms,
       claim_batch_size: Keyword.get(opts, :claim_batch_size) || @default_claim_batch_size,
+      telemetry: Keyword.take(opts, [:telemetry_prefix]),
       lease_until: nil,
       lease_timer_ref: nil,
       poll_timer_ref: nil
@@ -233,14 +237,28 @@ defmodule IntentLedger.QueueShardServer do
   end
 
   defp claim_due_intent(%__MODULE__{} = state, intent_state, now) do
+    start = System.monotonic_time()
     stream = "intent:#{intent_state.intent_id}"
 
-    with {:ok, %{version: stream_version}} <-
-           state.store_module.read(state.store_ref, state.name, {:stream, stream, []}, []),
-         {:ok, commit} <- commit_claim(state, intent_state, stream, stream_version, now) do
-      [commit.result]
-    else
-      _conflict_or_error -> []
+    result =
+      with {:ok, %{version: stream_version}} <-
+             state.store_module.read(state.store_ref, state.name, {:stream, stream, []}, []),
+           {:ok, commit} <- commit_claim(state, intent_state, stream, stream_version, now) do
+        {:ok, commit}
+      end
+
+    case result do
+      {:ok, commit} ->
+        emit_claim_stop(state, start, 1, :ok, intent_state.intent_id, commit.result.claim_id, nil)
+        [commit.result]
+
+      {:error, reason} ->
+        emit_claim_stop(state, start, 0, :error, intent_state.intent_id, nil, reason)
+        []
+
+      reason ->
+        emit_claim_stop(state, start, 0, :error, intent_state.intent_id, nil, reason)
+        []
     end
   end
 
@@ -297,7 +315,7 @@ defmodule IntentLedger.QueueShardServer do
           Write.put_idempotency(command_id, result)
         ]
       ),
-      []
+      state.telemetry
     )
   end
 
@@ -324,8 +342,38 @@ defmodule IntentLedger.QueueShardServer do
          lease_until: DateTime.add(now, state.lease_ms, :millisecond),
          now: now
        }},
-      []
+      state.telemetry
     )
+  end
+
+  defp emit_claim_stop(%__MODULE__{} = state, start, count, status, intent_id, claim_id, reason) do
+    metadata =
+      %{
+        ledger: state.name,
+        queue: state.queue,
+        shard: state.shard,
+        owner_id: state.owner_id,
+        status: status,
+        intent_id: intent_id,
+        claim_id: claim_id
+      }
+      |> maybe_put_error(reason)
+      |> reject_nil_metadata()
+
+    Telemetry.execute(
+      state.telemetry,
+      :claim_stop,
+      %{duration: System.monotonic_time() - start, count: count},
+      metadata
+    )
+  end
+
+  defp maybe_put_error(metadata, nil), do: metadata
+  defp maybe_put_error(metadata, %{type: type}), do: Map.put(metadata, :conflict, type)
+  defp maybe_put_error(metadata, reason), do: Map.put(metadata, :error_class, Telemetry.error_class(reason))
+
+  defp reject_nil_metadata(metadata) do
+    Map.reject(metadata, fn {_key, value} -> is_nil(value) end)
   end
 
   defp put_lease(%__MODULE__{} = state, lease) do

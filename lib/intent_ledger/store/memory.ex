@@ -87,7 +87,9 @@ defmodule IntentLedger.Store.Memory do
 
   @impl true
   def lease(ref, ledger, request, opts) do
-    GenServer.call(ref, {:store_v1_lease, ledger, request, opts})
+    Telemetry.instrument_store_lease(opts, ledger, __MODULE__, request, fn ->
+      GenServer.call(ref, {:store_v1_lease, ledger, request, opts})
+    end)
   end
 
   @impl true

@@ -17,6 +17,7 @@ defmodule IntentLedger.RecoveryServer do
           | {:queues, keyword() | map()}
           | {:recovery_interval_ms, pos_integer()}
           | {:recovery_limit, pos_integer()}
+          | {:telemetry_prefix, [atom()]}
 
   @type t :: %__MODULE__{
           name: atom(),
@@ -25,6 +26,7 @@ defmodule IntentLedger.RecoveryServer do
           queues: map(),
           interval_ms: pos_integer(),
           limit: pos_integer(),
+          telemetry: keyword(),
           timer_ref: reference() | nil,
           recovered_count: non_neg_integer(),
           expired_leases_count: non_neg_integer(),
@@ -38,6 +40,7 @@ defmodule IntentLedger.RecoveryServer do
     :queues,
     :interval_ms,
     :limit,
+    :telemetry,
     :timer_ref,
     recovered_count: 0,
     expired_leases_count: 0,
@@ -80,6 +83,7 @@ defmodule IntentLedger.RecoveryServer do
       queues: opts |> Keyword.get(:queues, default: @default_queue_opts) |> normalize_queues(),
       interval_ms: Keyword.get(opts, :recovery_interval_ms, @default_interval_ms),
       limit: Keyword.get(opts, :recovery_limit, @default_limit),
+      telemetry: Keyword.take(opts, [:telemetry_prefix]),
       timer_ref: nil
     }
 
@@ -142,7 +146,7 @@ defmodule IntentLedger.RecoveryServer do
              state.store_ref,
              state.name,
              {:shard, :expire, %{queue: queue, shard: shard, now: now}},
-             []
+             state.telemetry
            ) do
         {:ok, _lease} -> :expired
         {:error, _reason} -> :unchanged

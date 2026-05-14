@@ -19,6 +19,7 @@ defmodule IntentLedger.QueueSupervisor do
           | {:lease_retry_ms, pos_integer()}
           | {:poll_interval_ms, pos_integer()}
           | {:claim_batch_size, pos_integer()}
+          | {:telemetry_prefix, [atom()]}
 
   @doc false
   @spec child_spec([option()]) :: Supervisor.child_spec()
@@ -52,10 +53,11 @@ defmodule IntentLedger.QueueSupervisor do
     lease_retry_ms = Keyword.get(opts, :lease_retry_ms)
     poll_interval_ms = Keyword.get(opts, :poll_interval_ms)
     claim_batch_size = Keyword.get(opts, :claim_batch_size)
+    telemetry = Keyword.take(opts, [:telemetry_prefix])
 
     for {queue, %{shards: shards}} <- normalize_queues(queues),
         shard <- 0..(shards - 1) do
-      QueueShardServer.child_spec(
+      [
         name: name,
         store: store,
         queue: queue,
@@ -65,7 +67,9 @@ defmodule IntentLedger.QueueSupervisor do
         lease_retry_ms: lease_retry_ms,
         poll_interval_ms: poll_interval_ms,
         claim_batch_size: claim_batch_size
-      )
+      ]
+      |> Keyword.merge(telemetry)
+      |> QueueShardServer.child_spec()
     end
   end
 

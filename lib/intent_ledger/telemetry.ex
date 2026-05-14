@@ -150,28 +150,28 @@ defmodule IntentLedger.Telemetry do
       name: [:store, :conflict],
       measurements: [:count],
       required_metadata: [:ledger, :store, :operation, :conflict],
-      optional_metadata: [:command_id, :stream, :intent_id, :claim_id, :queue, :shard]
+      optional_metadata: [:command_id, :stream, :intent_id, :claim_id, :queue, :shard, :owner_id]
     },
     %{
       event: :claim_stop,
       name: [:claim, :stop],
       measurements: [:duration, :count],
       required_metadata: [:ledger, :queue, :owner_id, :status],
-      optional_metadata: [:shard, :limit, :intent_id, :claim_id]
+      optional_metadata: [:shard, :limit, :intent_id, :claim_id, :conflict, :error_class]
     },
     %{
       event: :shard_lease_stop,
       name: [:shard_lease, :stop],
       measurements: [:duration],
       required_metadata: [:ledger, :queue, :shard, :operation, :status],
-      optional_metadata: [:owner_id, :lease_until, :conflict]
+      optional_metadata: [:store, :owner_id, :lease_until, :conflict, :error_class]
     },
     %{
       event: :recovery_stop,
       name: [:recovery, :stop],
       measurements: [:duration, :count],
       required_metadata: [:ledger, :queue, :status],
-      optional_metadata: [:shard, :limit, :classification]
+      optional_metadata: [:shard, :limit, :classification, :error_class]
     },
     %{
       event: :outbox_read_stop,
@@ -334,6 +334,8 @@ defmodule IntentLedger.Telemetry do
         metadata |> Map.merge(store_commit_result_metadata(result)) |> reject_nil_metadata()
       )
 
+      emit_store_conflict(opts, metadata, result)
+
       result
     catch
       kind, reason ->
@@ -348,6 +350,25 @@ defmodule IntentLedger.Telemetry do
 
         :erlang.raise(kind, reason, __STACKTRACE__)
     end
+  end
+
+  @doc false
+  @spec instrument_store_lease(keyword(), atom(), module(), term(), (-> term())) :: term()
+  def instrument_store_lease(opts, ledger, store_module, request, fun) when is_function(fun, 0) do
+    start = System.monotonic_time()
+    metadata = shard_lease_metadata(ledger, store_module, request)
+    result = fun.()
+
+    execute(
+      opts,
+      :shard_lease_stop,
+      %{duration: System.monotonic_time() - start},
+      metadata |> Map.merge(shard_lease_result_metadata(result)) |> reject_nil_metadata()
+    )
+
+    emit_store_conflict(opts, metadata, result)
+
+    result
   end
 
   @doc false
@@ -426,6 +447,60 @@ defmodule IntentLedger.Telemetry do
 
   defp store_commit_result_metadata(_result), do: %{status: :unknown}
 
+  defp shard_lease_metadata(ledger, store_module, {:shard, operation, attrs}) when is_map(attrs) or is_list(attrs) do
+    attrs = normalize_attrs(attrs)
+
+    %{
+      ledger: ledger,
+      store: store_module,
+      operation: operation,
+      queue: Map.get(attrs, :queue),
+      shard: Map.get(attrs, :shard),
+      owner_id: Map.get(attrs, :owner_id),
+      lease_until: Map.get(attrs, :lease_until)
+    }
+    |> reject_nil_metadata()
+  end
+
+  defp shard_lease_metadata(ledger, store_module, _request) do
+    %{
+      ledger: ledger,
+      store: store_module,
+      operation: :unknown
+    }
+  end
+
+  defp shard_lease_result_metadata({:ok, _lease}), do: %{status: :ok}
+
+  defp shard_lease_result_metadata({:error, %Conflict{} = conflict}) do
+    %{
+      status: :error,
+      conflict: conflict.type
+    }
+  end
+
+  defp shard_lease_result_metadata({:error, reason}) do
+    %{
+      status: :error,
+      error_class: error_class(reason)
+    }
+  end
+
+  defp shard_lease_result_metadata(_result), do: %{status: :unknown}
+
+  defp emit_store_conflict(opts, metadata, {:error, %Conflict{} = conflict}) do
+    execute(
+      opts,
+      :store_conflict,
+      %{count: 1},
+      metadata
+      |> Map.merge(%{conflict: conflict.type})
+      |> reject_nil_metadata()
+    )
+  end
+
+  defp emit_store_conflict(_opts, _metadata, _result), do: :ok
+
   defp count_outbox_entries(writes) do
     Enum.count(writes, fn
       %{type: :put_outbox} -> true
@@ -436,4 +511,7 @@ defmodule IntentLedger.Telemetry do
   defp reject_nil_metadata(metadata) do
     Map.reject(metadata, fn {_key, value} -> is_nil(value) end)
   end
+
+  defp normalize_attrs(attrs) when is_list(attrs), do: Map.new(attrs)
+  defp normalize_attrs(attrs) when is_map(attrs), do: attrs
 end

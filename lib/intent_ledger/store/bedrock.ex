@@ -86,7 +86,11 @@ defmodule IntentLedger.Store.Bedrock do
   @doc false
   @impl true
   @spec lease(Store.ref(), atom(), Store.lease_request(), keyword()) :: Store.result()
-  def lease(ref, ledger, request, opts), do: GenServer.call(ref, {:lease, ledger, request, opts})
+  def lease(ref, ledger, request, opts) do
+    Telemetry.instrument_store_lease(opts, ledger, __MODULE__, request, fn ->
+      GenServer.call(ref, {:lease, ledger, request, opts})
+    end)
+  end
 
   @doc false
   @impl true

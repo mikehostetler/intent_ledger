@@ -188,6 +188,130 @@ defmodule IntentLedger.TelemetryTest do
     end
   end
 
+  test "claims emit claim telemetry" do
+    ledger = unique_atom(:claim_telemetry_ledger)
+    prefix = [unique_atom(:claim_telemetry_prefix)]
+    claim_event = Telemetry.event_name(:claim_stop, telemetry_prefix: prefix)
+    handler_id = attach_events([claim_event])
+
+    start_supervised!({IntentLedger, name: ledger, store: IntentLedger.Store.Memory, telemetry_prefix: prefix})
+
+    assert {:ok, _record} =
+             IntentLedger.submit(ledger, %{key: "job:claim-telemetry", kind: "job.run"},
+               command_id: "cmd_claim_telemetry_submit"
+             )
+
+    try do
+      assert {:ok, claimed} = IntentLedger.claim(ledger, :default, "worker-1", command_id: "cmd_claim_telemetry")
+
+      assert_receive {:telemetry, ^claim_event, %{duration: duration, count: 1}, metadata}
+      assert is_integer(duration)
+      assert duration >= 0
+      assert metadata.ledger == ledger
+      assert metadata.queue == "default"
+      assert metadata.owner_id == "worker-1"
+      assert metadata.status == :ok
+      assert metadata.limit == 1
+      assert metadata.intent_id == claimed.intent.id
+      assert metadata.claim_id == claimed.claim.id
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  test "recover emits recovery telemetry" do
+    ledger = unique_atom(:recovery_telemetry_ledger)
+    prefix = [unique_atom(:recovery_telemetry_prefix)]
+    recovery_event = Telemetry.event_name(:recovery_stop, telemetry_prefix: prefix)
+    handler_id = attach_events([recovery_event])
+
+    start_supervised!({IntentLedger, name: ledger, store: IntentLedger.Store.Memory, telemetry_prefix: prefix})
+
+    try do
+      assert {:ok, []} = IntentLedger.recover(ledger, :default, command_id: "cmd_recovery_telemetry", limit: 1)
+
+      assert_receive {:telemetry, ^recovery_event, %{duration: duration, count: 0}, metadata}
+      assert is_integer(duration)
+      assert duration >= 0
+      assert metadata.ledger == ledger
+      assert metadata.queue == "default"
+      assert metadata.status == :ok
+      assert metadata.limit == 1
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  test "shard leases emit lease and conflict telemetry" do
+    store_name = unique_atom(:lease_telemetry_store)
+    prefix = [unique_atom(:lease_telemetry_prefix)]
+    lease_event = Telemetry.event_name(:shard_lease_stop, telemetry_prefix: prefix)
+    conflict_event = Telemetry.event_name(:store_conflict, telemetry_prefix: prefix)
+    handler_id = attach_events([lease_event, conflict_event])
+
+    start_supervised!({IntentLedger.Store.Memory, name: store_name})
+
+    now = DateTime.utc_now()
+
+    acquire =
+      {:shard, :acquire,
+       %{
+         queue: "default",
+         shard: 0,
+         owner_id: "owner-1",
+         lease_until: DateTime.add(now, 30_000, :millisecond),
+         now: now
+       }}
+
+    conflicting_acquire =
+      {:shard, :acquire,
+       %{
+         queue: "default",
+         shard: 0,
+         owner_id: "owner-2",
+         lease_until: DateTime.add(now, 30_000, :millisecond),
+         now: now
+       }}
+
+    try do
+      assert {:ok, _lease} =
+               IntentLedger.Store.Memory.lease(store_name, MyApp.IntentLedger, acquire, telemetry_prefix: prefix)
+
+      assert_receive {:telemetry, ^lease_event, %{duration: ok_duration}, ok_metadata}
+      assert is_integer(ok_duration)
+      assert ok_duration >= 0
+      assert ok_metadata.ledger == MyApp.IntentLedger
+      assert ok_metadata.store == IntentLedger.Store.Memory
+      assert ok_metadata.operation == :acquire
+      assert ok_metadata.queue == "default"
+      assert ok_metadata.shard == 0
+      assert ok_metadata.owner_id == "owner-1"
+      assert ok_metadata.status == :ok
+
+      assert {:error, _conflict} =
+               IntentLedger.Store.Memory.lease(store_name, MyApp.IntentLedger, conflicting_acquire,
+                 telemetry_prefix: prefix
+               )
+
+      assert_receive {:telemetry, ^lease_event, %{duration: conflict_duration}, conflict_metadata}
+      assert is_integer(conflict_duration)
+      assert conflict_duration >= 0
+      assert conflict_metadata.status == :error
+      assert conflict_metadata.conflict == :shard_lease
+      assert conflict_metadata.owner_id == "owner-2"
+
+      assert_receive {:telemetry, ^conflict_event, %{count: 1}, store_conflict_metadata}
+      assert store_conflict_metadata.ledger == MyApp.IntentLedger
+      assert store_conflict_metadata.store == IntentLedger.Store.Memory
+      assert store_conflict_metadata.operation == :acquire
+      assert store_conflict_metadata.conflict == :shard_lease
+      assert store_conflict_metadata.queue == "default"
+      assert store_conflict_metadata.shard == 0
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
   defp attach_events(events) do
     handler_id = {__MODULE__, self(), make_ref()}
 

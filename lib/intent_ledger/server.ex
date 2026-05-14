@@ -203,6 +203,7 @@ defmodule IntentLedger.Server do
   end
 
   def handle_call({:claim, queue, owner_id, opts}, _from, state) do
+    start = System.monotonic_time()
     limit = Keyword.get(opts, :limit, 1)
     opts = opts |> Keyword.put_new(:now, now(opts)) |> Keyword.put_new(:lease_ms, state.lease_ms)
 
@@ -214,18 +215,40 @@ defmodule IntentLedger.Server do
            opts
          ) do
       {:ok, [], signals} ->
-        notify(state, signals, :claim, %{count: 0}, %{queue: to_string(queue)})
+        notify(
+          state,
+          signals,
+          :claim,
+          claim_measurements(start, 0),
+          claim_metadata(queue, owner_id, :empty, limit)
+        )
+
         {:reply, :empty, state}
 
       {:ok, [claimed], signals} when limit == 1 ->
-        notify(state, signals, :claim, %{count: 1}, %{queue: to_string(queue)})
+        notify(
+          state,
+          signals,
+          :claim,
+          claim_measurements(start, 1),
+          claim_metadata(queue, owner_id, :ok, limit, claimed)
+        )
+
         {:reply, {:ok, claimed}, state}
 
       {:ok, claimed, signals} ->
-        notify(state, signals, :claim, %{count: length(claimed)}, %{queue: to_string(queue)})
+        notify(
+          state,
+          signals,
+          :claim,
+          claim_measurements(start, length(claimed)),
+          claim_metadata(queue, owner_id, :ok, limit)
+        )
+
         {:reply, {:ok, claimed}, state}
 
       {:error, reason} ->
+        emit_claim_stop(state, start, queue, owner_id, limit, 0, :error, nil, reason)
         {:reply, {:error, reason}, state}
     end
   end
@@ -343,15 +366,20 @@ defmodule IntentLedger.Server do
   end
 
   def handle_call({:recover, queue, opts}, _from, state) do
+    start = System.monotonic_time()
+
     opts =
       opts
       |> Keyword.put_new(:now, now(opts))
       |> put_expired_claim_classifier(state)
 
+    result = state.store_module.recover(state.store_ref, state.name, to_string(queue), opts)
+    emit_recovery_stop(state, start, queue, opts, result)
+
     reply_commit(
       state,
       :recover,
-      state.store_module.recover(state.store_ref, state.name, to_string(queue), opts),
+      result,
       %{queue: to_string(queue)}
     )
   end
@@ -398,6 +426,7 @@ defmodule IntentLedger.Server do
   end
 
   defp execute_public_command({:claim, queue, owner_id, opts}, state) do
+    start = System.monotonic_time()
     limit = Keyword.get(opts, :limit, 1)
     opts = opts |> Keyword.put_new(:now, now(opts)) |> Keyword.put_new(:lease_ms, state.lease_ms)
 
@@ -409,18 +438,40 @@ defmodule IntentLedger.Server do
            opts
          ) do
       {:ok, [], signals} ->
-        notify(state, signals, :claim, %{count: 0}, %{queue: to_string(queue)})
+        notify(
+          state,
+          signals,
+          :claim,
+          claim_measurements(start, 0),
+          claim_metadata(queue, owner_id, :empty, limit)
+        )
+
         {:empty, state}
 
       {:ok, [claimed], signals} when limit == 1 ->
-        notify(state, signals, :claim, %{count: 1}, %{queue: to_string(queue)})
+        notify(
+          state,
+          signals,
+          :claim,
+          claim_measurements(start, 1),
+          claim_metadata(queue, owner_id, :ok, limit, claimed)
+        )
+
         {{:ok, claimed}, state}
 
       {:ok, claimed, signals} ->
-        notify(state, signals, :claim, %{count: length(claimed)}, %{queue: to_string(queue)})
+        notify(
+          state,
+          signals,
+          :claim,
+          claim_measurements(start, length(claimed)),
+          claim_metadata(queue, owner_id, :ok, limit)
+        )
+
         {{:ok, claimed}, state}
 
       {:error, reason} ->
+        emit_claim_stop(state, start, queue, owner_id, limit, 0, :error, nil, reason)
         {{:error, reason}, state}
     end
   end
@@ -552,16 +603,21 @@ defmodule IntentLedger.Server do
   end
 
   defp execute_public_command({:recover, queue, opts}, state) do
+    start = System.monotonic_time()
+
     opts =
       opts
       |> Keyword.put_new(:now, now(opts))
       |> put_expired_claim_classifier(state)
 
+    result = state.store_module.recover(state.store_ref, state.name, to_string(queue), opts)
+    emit_recovery_stop(state, start, queue, opts, result)
+
     unwrap_reply(
       reply_commit(
         state,
         :recover,
-        state.store_module.recover(state.store_ref, state.name, to_string(queue), opts),
+        result,
         %{queue: to_string(queue)}
       )
     )
@@ -770,6 +826,77 @@ defmodule IntentLedger.Server do
   defp reject_nil_metadata(metadata) do
     Map.reject(metadata, fn {_key, value} -> is_nil(value) end)
   end
+
+  defp claim_measurements(start, count) do
+    %{duration: System.monotonic_time() - start, count: count}
+  end
+
+  defp claim_metadata(queue, owner_id, status, limit, claimed \\ nil) do
+    %{
+      queue: to_string(queue),
+      owner_id: to_string(owner_id),
+      status: status,
+      limit: limit
+    }
+    |> put_claimed_metadata(claimed)
+    |> reject_nil_metadata()
+  end
+
+  defp put_claimed_metadata(metadata, %{intent: %{id: intent_id}, claim: %{id: claim_id}}) do
+    metadata
+    |> Map.put(:intent_id, intent_id)
+    |> Map.put(:claim_id, claim_id)
+  end
+
+  defp put_claimed_metadata(metadata, _claimed), do: metadata
+
+  defp emit_claim_stop(state, start, queue, owner_id, limit, count, status, claimed, reason) do
+    metadata =
+      queue
+      |> claim_metadata(owner_id, status, limit, claimed)
+      |> maybe_put_error(reason)
+      |> reject_nil_metadata()
+
+    Telemetry.execute(
+      state.telemetry,
+      :claim_stop,
+      claim_measurements(start, count),
+      Map.put(metadata, :ledger, state.name)
+    )
+  end
+
+  defp emit_recovery_stop(state, start, queue, opts, result) do
+    metadata =
+      %{
+        ledger: state.name,
+        queue: to_string(queue),
+        status: recovery_status(result),
+        limit: Keyword.get(opts, :limit)
+      }
+      |> maybe_put_error(recovery_error(result))
+      |> reject_nil_metadata()
+
+    Telemetry.execute(
+      state.telemetry,
+      :recovery_stop,
+      %{duration: System.monotonic_time() - start, count: recovery_count(result)},
+      metadata
+    )
+  end
+
+  defp recovery_status({:ok, _records, _signals}), do: :ok
+  defp recovery_status({:error, _reason}), do: :error
+  defp recovery_status(_result), do: :unknown
+
+  defp recovery_count({:ok, records, _signals}) when is_list(records), do: length(records)
+  defp recovery_count(_result), do: 0
+
+  defp recovery_error({:error, reason}), do: reason
+  defp recovery_error(_result), do: nil
+
+  defp maybe_put_error(metadata, nil), do: metadata
+  defp maybe_put_error(metadata, %{type: type}), do: Map.put(metadata, :conflict, type)
+  defp maybe_put_error(metadata, reason), do: Map.put(metadata, :error_class, Telemetry.error_class(reason))
 
   defp notify(state, signals, operation, measurements, metadata) do
     lifecycle_result =
