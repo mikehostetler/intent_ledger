@@ -42,7 +42,7 @@ Keep these values consistent across nodes:
 - the configured Intents module;
 - the Bedrock repo/cluster;
 - handler topic mappings;
-- queue IDs used by producers;
+- queue IDs declared on the Intents module and used by producers;
 - `bedrock_job_queue` consumer options that affect throughput.
 
 The next clustering milestone is a set of opt-in tests that start multiple

@@ -7,8 +7,10 @@ MyApp.Intents.fetch(intent_id)
 MyApp.Intents.history(intent_id)
 MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
 MyApp.Intents.replay({:intent, intent_id}, cursor: 0, limit: 100)
+MyApp.Intents.inspect(:queues)
 MyApp.Intents.inspect(:queues, queue: "default")
 MyApp.Intents.inspect(:outbox, cursor: 0, limit: 100)
+MyApp.Intents.stats()
 MyApp.Intents.stats(queue: "default")
 MyApp.Intents.health()
 ```
@@ -16,9 +18,13 @@ MyApp.Intents.health()
 ## Queue Stats
 
 `stats/1` delegates to `bedrock_job_queue` and returns pending and processing
-counts for a queue:
+counts for configured queues. Without `:queue`, it returns every queue declared
+by the ledger instance. With `:queue`, it returns one configured queue.
 
 ```elixir
+{:ok, %{"default" => %{pending_count: 10, processing_count: 2}, "bulk" => _}} =
+  MyApp.Intents.stats()
+
 {:ok, %{"default" => %{pending_count: 10, processing_count: 2}}} =
   MyApp.Intents.stats(queue: "default")
 ```

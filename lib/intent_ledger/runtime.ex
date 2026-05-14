@@ -2,7 +2,7 @@ defmodule IntentLedger.Runtime do
   @moduledoc false
 
   alias Bedrock.JobQueue.{Internal, Item, Store}
-  alias IntentLedger.{BedrockStore, Context, Intent, Telemetry, Time}
+  alias IntentLedger.{BedrockStore, Config, Context, Intent, Telemetry, Time}
 
   @type replay_source :: :ledger | {:intent, String.t()}
 
@@ -78,6 +78,7 @@ defmodule IntentLedger.Runtime do
   def requeue(ledger, intent_id, opts \\ []) do
     BedrockStore.transact(ledger, fn repo, root ->
       with {:ok, intent} <- BedrockStore.fetch(repo, root, intent_id),
+           :ok <- ensure_configured_queue(ledger.__intent_ledger__(), intent.queue),
            :ok <- ensure_requeueable(intent) do
         now = Time.utc_now()
 
@@ -121,12 +122,25 @@ defmodule IntentLedger.Runtime do
   @doc false
   @spec stats(module(), keyword()) :: {:ok, map()} | {:error, term()}
   def stats(ledger, opts \\ []) do
-    queue = opts |> Keyword.get(:queue, "default") |> to_string()
+    config = ledger.__intent_ledger__()
 
-    case ledger.__intent_ledger__().job_queue.stats(queue, opts) do
-      %{pending_count: _pending, processing_count: _processing} = stats -> {:ok, %{queue => stats}}
-      {:error, reason} -> {:error, reason}
-      other -> {:ok, %{queue => other}}
+    case Keyword.fetch(opts, :queue) do
+      {:ok, queue} ->
+        with {:ok, queue} <- Config.normalize_queue_id(queue),
+             :ok <- ensure_configured_queue(config, queue),
+             {:ok, stats} <- queue_stats(ledger, queue, opts) do
+          {:ok, %{queue => stats}}
+        end
+
+      :error ->
+        config.queues
+        |> Config.queue_ids()
+        |> Enum.reduce_while({:ok, %{}}, fn queue, {:ok, acc} ->
+          case queue_stats(ledger, queue, opts) do
+            {:ok, stats} -> {:cont, {:ok, Map.put(acc, queue, stats)}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
     end
   end
 
@@ -140,6 +154,8 @@ defmodule IntentLedger.Runtime do
        status: :ok,
        repo: config.repo,
        job_queue: config.job_queue,
+       queues: Config.queue_ids(config.queues),
+       default_queue: config.default_queue,
        topics: config.handlers |> Map.keys() |> Enum.sort()
      }}
   end
@@ -323,13 +339,14 @@ defmodule IntentLedger.Runtime do
   defp normalize_entry(ledger, {topic, payload, entry_opts}, opts) when is_list(entry_opts) do
     topic = normalize_topic(topic)
 
-    with {:ok, _handler} <- handler_for(ledger, topic) do
-      attrs =
-        opts
-        |> Keyword.merge(entry_opts)
-        |> Map.new()
-        |> Map.merge(%{topic: topic, payload: payload})
+    attrs =
+      opts
+      |> Keyword.merge(entry_opts)
+      |> Map.new()
+      |> Map.merge(%{topic: topic, payload: payload})
 
+    with {:ok, _handler} <- handler_for(ledger, topic),
+         {:ok, attrs} <- put_configured_queue(ledger, attrs) do
       {:ok, attrs}
     end
   end
@@ -356,9 +373,31 @@ defmodule IntentLedger.Runtime do
 
     topic = normalize_topic(topic)
 
-    with {:ok, _handler} <- handler_for(ledger, topic) do
+    with {:ok, _handler} <- handler_for(ledger, topic),
+         {:ok, attrs} <- put_configured_queue(ledger, attrs) do
       {:ok, %{attrs | topic: topic}}
     end
+  end
+
+  defp put_configured_queue(ledger, attrs) do
+    config = ledger.__intent_ledger__()
+
+    attrs
+    |> Map.get(:queue, Map.get(attrs, "queue", config.default_queue))
+    |> Config.normalize_queue_id()
+    |> case do
+      {:ok, queue} ->
+        with :ok <- ensure_configured_queue(config, queue) do
+          {:ok, attrs |> Map.delete("queue") |> Map.put(:queue, queue)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp ensure_configured_queue(%{queues: queues}, queue) do
+    if Map.has_key?(queues, queue), do: :ok, else: {:error, {:unknown_queue, queue}}
   end
 
   defp handler_for(ledger, topic) do
@@ -409,6 +448,14 @@ defmodule IntentLedger.Runtime do
   end
 
   defp queue_root(ledger), do: Internal.root_keyspace(ledger.__intent_ledger__().job_queue)
+
+  defp queue_stats(ledger, queue, opts) do
+    case ledger.__intent_ledger__().job_queue.stats(queue, opts) do
+      %{pending_count: _pending, processing_count: _processing} = stats -> {:ok, stats}
+      {:error, reason} -> {:error, reason}
+      other -> {:ok, other}
+    end
+  end
 
   defp decode_raw_queue_payload(binary) do
     {:ok, :erlang.binary_to_term(binary, [:safe])}

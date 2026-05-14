@@ -74,11 +74,19 @@ defmodule MyApp.Intents do
   use IntentLedger,
     otp_app: :my_app,
     repo: MyApp.Bedrock,
+    queues: ["default", "tenant:acme", "bulk"],
+    default_queue: "default",
     handlers: %{
       "invoice.send" => MyApp.Intents.SendInvoice
     }
 end
 ```
+
+`queues` is the ledger instance's queue contract. Producers may enqueue into
+those queue IDs; unknown queue IDs are rejected before Intent state is written.
+When `:queue` is omitted, Intent Ledger uses `default_queue`. If `default_queue`
+is omitted, `"default"` is used when present; otherwise the first sorted queue
+ID is used. Set `default_queue` explicitly when that choice matters.
 
 Define a handler:
 
@@ -125,6 +133,7 @@ Inspect and replay:
 
 {:ok, window} = MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
 {:ok, queues} = MyApp.Intents.inspect(:queues)
+{:ok, tenant_queue} = MyApp.Intents.stats(queue: "tenant:acme")
 {:ok, outbox} = MyApp.Intents.inspect(:outbox)
 ```
 

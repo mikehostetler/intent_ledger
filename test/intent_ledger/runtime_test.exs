@@ -26,9 +26,20 @@ defmodule IntentLedger.RuntimeTest do
     use IntentLedger,
       otp_app: :intent_ledger,
       repo: IntentLedger.FakeRepo,
+      queues: ["default", "tenant:acme", "tenant:beta"],
       handlers: %{
         "invoice.send" => SendInvoice,
         "invoice.fail" => FailingIntent
+      }
+  end
+
+  defmodule CriticalIntents do
+    use IntentLedger,
+      otp_app: :intent_ledger,
+      repo: IntentLedger.FakeRepo,
+      queues: [:critical],
+      handlers: %{
+        "invoice.send" => SendInvoice
       }
   end
 
@@ -79,6 +90,25 @@ defmodule IntentLedger.RuntimeTest do
 
     assert intent.key == "invoice:123:send"
     assert intent.queue == "tenant:beta"
+  end
+
+  test "configured queues define the default queue and reject unknown queues" do
+    assert {:ok, intent} = CriticalIntents.enqueue("invoice.send", %{invoice_id: 123})
+    assert intent.queue == "critical"
+
+    assert {:error, {:unknown_queue, "tenant:missing"}} =
+             TestIntents.enqueue("invoice.send", %{invoice_id: 123}, queue: "tenant:missing")
+  end
+
+  test "queue stats default to all configured queues" do
+    assert {:ok, _intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123})
+
+    assert {:ok, queues} = TestIntents.stats()
+
+    assert queues |> Map.keys() |> Enum.sort() == ["default", "tenant:acme", "tenant:beta"]
+    assert queues["default"].pending_count == 1
+    assert queues["tenant:acme"].pending_count == 0
+    assert queues["tenant:beta"].pending_count == 0
   end
 
   test "ledger replay starts from the target stream cursor, not the global stream keyspace" do
@@ -190,6 +220,8 @@ defmodule IntentLedger.RuntimeTest do
 
     assert health.status == :ok
     assert health.repo == IntentLedger.FakeRepo
+    assert health.queues == ["default", "tenant:acme", "tenant:beta"]
+    assert health.default_queue == "default"
     assert health.topics == ["invoice.fail", "invoice.send"]
   end
 end

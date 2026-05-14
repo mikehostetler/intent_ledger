@@ -9,6 +9,7 @@ defmodule IntentLedger do
         use IntentLedger,
           otp_app: :my_app,
           repo: MyApp.Bedrock,
+          queues: ["default", "tenant:acme"],
           handlers: %{
             "invoice.send" => MyApp.Intents.SendInvoice
           }
@@ -21,10 +22,15 @@ defmodule IntentLedger do
   concurrent execution.
   """
 
+  @type queue_config :: %{required(:id) => String.t(), optional(term()) => term()}
+  @type queue_configs :: %{String.t() => queue_config()}
+
   @type config :: %{
           required(:otp_app) => atom(),
           required(:repo) => module(),
           required(:handlers) => %{String.t() => module()},
+          required(:queues) => queue_configs(),
+          required(:default_queue) => String.t(),
           required(:job_queue) => module()
         }
 
@@ -35,6 +41,8 @@ defmodule IntentLedger do
     otp_app = Keyword.fetch!(opts, :otp_app)
     repo = Keyword.fetch!(opts, :repo)
     handlers = Keyword.get(opts, :handlers, {:%{}, [], []})
+    queues = Keyword.get(opts, :queues, ["default"])
+    default_queue = Keyword.get(opts, :default_queue)
 
     quote location: :keep do
       import Kernel, except: [inspect: 1, inspect: 2]
@@ -42,6 +50,8 @@ defmodule IntentLedger do
       @otp_app unquote(otp_app)
       @repo unquote(repo)
       @handlers unquote(handlers)
+      @queues unquote(queues)
+      @default_queue unquote(default_queue)
 
       defmodule JobQueue do
         use Bedrock.JobQueue,
@@ -142,10 +152,15 @@ defmodule IntentLedger do
       @doc false
       @spec __intent_ledger__() :: IntentLedger.config()
       def __intent_ledger__ do
+        queues = IntentLedger.Config.normalize_queues!(@queues)
+        default_queue = IntentLedger.Config.normalize_default_queue!(@default_queue, queues)
+
         %{
           otp_app: @otp_app,
           repo: @repo,
           handlers: @handlers,
+          queues: queues,
+          default_queue: default_queue,
           job_queue: JobQueue
         }
       end
