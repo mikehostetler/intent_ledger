@@ -3,7 +3,109 @@ defmodule IntentLedger.SerializationTest do
 
   import ExUnit.CaptureLog
 
-  alias IntentLedger.{Command, Signal}
+  alias IntentLedger.{Claim, Claimed, Command, Inspection, Intent, IntentState, Record, ShardState, Signal}
+
+  alias IntentLedger.Store.{
+    Commit,
+    CommitRequest,
+    Conflict,
+    Listing,
+    Outbox,
+    Precondition,
+    Write
+  }
+
+  test "public schema-backed structs expose schemas and JSON encoders" do
+    now = ~U[2026-01-01 00:00:00Z]
+    lease_until = DateTime.add(now, 30, :second)
+
+    {:ok, intent} =
+      Intent.new(
+        %{
+          id: "int_json",
+          key: "json:key",
+          kind: "json.kind",
+          shard: 0,
+          visible_at: now,
+          payload: %{invoice_id: 123}
+        },
+        now: now
+      )
+
+    state = IntentState.new(intent, now)
+
+    claim = %Claim{
+      id: "clm_json",
+      intent_id: intent.id,
+      owner_id: "worker",
+      token: "tok_json",
+      attempt: 1,
+      lease_until: lease_until
+    }
+
+    claimed_state = %{
+      state
+      | status: :claimed,
+        claim_id: claim.id,
+        claim_token_hash: Claim.token_hash(claim.token),
+        lease_until: lease_until
+    }
+
+    precondition = Precondition.stream_version("intent:int_json", 1)
+    write = Write.put_idempotency("cmd_json", %{status: "ok"})
+
+    structs = [
+      {Intent, intent, "id"},
+      {IntentState, state, "intent_id"},
+      {Claim, claim, "token"},
+      {Claimed, %Claimed{intent: intent, state: claimed_state, claim: claim}, "claim"},
+      {Record, %Record{intent: intent, state: state}, "state"},
+      {ShardState,
+       %ShardState{
+         queue: "default",
+         shard: 0,
+         cursor: 10,
+         lease_owner: "node-a",
+         lease_until: lease_until,
+         updated_at: now
+       }, "lease_owner"},
+      {Inspection, Inspection.queues(queue: :default, at: now), "queue"},
+      {Commit,
+       Commit.new(
+         command_id: "cmd_json",
+         result: %{status: "ok"},
+         writes: [write]
+       ), "writes"},
+      {CommitRequest,
+       CommitRequest.new(
+         command_id: "cmd_json",
+         operation: :submit,
+         command: %{kind: "json.kind"},
+         preconditions: [precondition],
+         writes: [write]
+       ), "preconditions"},
+      {Conflict, Conflict.stream_version("intent:int_json", 1, 2), "message"},
+      {Listing, Listing.due_intents(:default, 0, now), "order"},
+      {Outbox, Outbox.read("dispatcher", cursor: 0, limit: 10), "consumer"},
+      {Precondition, precondition, "type"},
+      {Write, write, "type"}
+    ]
+
+    for {module, value, expected_field} <- structs do
+      assert function_exported?(module, :schema, 0)
+      assert {:ok, types} = Code.Typespec.fetch_types(module)
+      assert Enum.any?(types, &public_t_type?/1)
+      assert {:ok, %{__struct__: ^module}} = Zoi.parse(module.schema(), value)
+      assert {:ok, json} = Jason.encode(value)
+
+      assert json
+             |> Jason.decode!()
+             |> Map.has_key?(expected_field)
+    end
+  end
+
+  defp public_t_type?({:type, {:t, _type, []}}), do: true
+  defp public_t_type?(_type), do: false
 
   test "command signals retain their compatibility contract through JSON serialization" do
     signal =

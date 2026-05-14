@@ -50,6 +50,7 @@ defmodule IntentLedger.Inspection do
 
   @type t :: unquote(Zoi.type_spec(@schema))
   @enforce_keys Zoi.Struct.enforce_keys(@schema)
+  @derive Jason.Encoder
   defstruct Zoi.Struct.struct_fields(@schema)
 
   @doc """
