@@ -7,6 +7,27 @@ defmodule IntentLedger.BedrockStore do
 
   @type stream_source :: :ledger | :outbox | {:intent, String.t()}
   @type projection_ref :: module() | String.t()
+  @type intent_status ::
+          :enqueued
+          | :started
+          | :completed
+          | :failed
+          | :retry_scheduled
+          | :discarded
+          | :canceled
+          | :ambiguous
+
+  @intent_statuses [
+    :enqueued,
+    :started,
+    :completed,
+    :failed,
+    :retry_scheduled,
+    :discarded,
+    :canceled,
+    :ambiguous
+  ]
+  @intent_status_by_name Map.new(@intent_statuses, fn status -> {Atom.to_string(status), status} end)
 
   @doc false
   @spec transact(module(), (module(), Keyspace.t() -> term()), keyword()) :: term()
@@ -33,6 +54,7 @@ defmodule IntentLedger.BedrockStore do
         intent = %{intent | created_at: intent.created_at || now, updated_at: now}
 
         repo.put(intents, intent.id, encode(intent))
+        put_status_index(repo, root, intent)
 
         if intent.key do
           repo.put(keys, intent.key, intent.id)
@@ -69,7 +91,14 @@ defmodule IntentLedger.BedrockStore do
   @doc false
   @spec put_intent(module(), Keyspace.t(), Intent.t()) :: :ok
   def put_intent(repo, root, %Intent{} = intent) do
+    previous =
+      case fetch(repo, root, intent.id) do
+        {:ok, %Intent{} = existing} -> existing
+        {:error, :not_found} -> nil
+      end
+
     repo.put(intent_keyspace(root), intent.id, encode(intent))
+    update_status_index(repo, root, previous, intent)
   end
 
   @doc false
@@ -105,6 +134,7 @@ defmodule IntentLedger.BedrockStore do
       now = Time.utc_now()
       next = update_fun.(intent, now)
       repo.put(intent_keyspace(root), next.id, encode(next))
+      update_status_index(repo, root, intent, next)
       append_lifecycle(repo, root, ledger, next, event, data)
       {:ok, next}
     end
@@ -127,10 +157,10 @@ defmodule IntentLedger.BedrockStore do
   end
 
   def replay(ledger, source, opts) do
-    with {:ok, stream} <- stream_name(source) do
+    with {:ok, stream} <- stream_name(source),
+         {:ok, cursor} <- non_negative_integer_option(opts, :cursor, 0),
+         {:ok, limit} <- positive_integer_option(opts, :limit, 100) do
       transact(ledger, fn repo, root ->
-        cursor = Keyword.get(opts, :cursor, 0)
-        limit = Keyword.get(opts, :limit, 100)
         keyspace = stream_keyspace(root, stream)
 
         entries =
@@ -148,20 +178,60 @@ defmodule IntentLedger.BedrockStore do
   @doc false
   @spec outbox(module(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def outbox(ledger, opts \\ []) do
-    transact(ledger, fn repo, root ->
-      cursor = Keyword.get(opts, :cursor, 0)
-      limit = Keyword.get(opts, :limit, 100)
-      keyspace = outbox_keyspace(root)
+    with {:ok, cursor} <- non_negative_integer_option(opts, :cursor, 0),
+         {:ok, limit} <- positive_integer_option(opts, :limit, 100) do
+      transact(ledger, fn repo, root ->
+        keyspace = outbox_keyspace(root)
 
-      entries =
-        keyspace
-        |> range_from_cursor(cursor)
-        |> repo.get_range(limit: limit)
-        |> Stream.map(fn {_key, value} -> decode(value) end)
-        |> Enum.to_list()
+        entries =
+          keyspace
+          |> range_from_cursor(cursor)
+          |> repo.get_range(limit: limit)
+          |> Stream.map(fn {_key, value} -> decode(value) end)
+          |> Enum.to_list()
 
-      {:ok, entries}
-    end)
+        {:ok, entries}
+      end)
+    end
+  end
+
+  @doc false
+  @spec intents(module(), keyword()) :: {:ok, [Intent.t()]} | {:error, term()}
+  def intents(ledger, opts \\ []) do
+    with {:ok, limit} <- positive_integer_option(opts, :limit, 100),
+         {:ok, statuses} <- status_filter(Keyword.get(opts, :status)) do
+      queue = Keyword.get(opts, :queue)
+      topic = Keyword.get(opts, :topic)
+
+      transact(ledger, fn repo, root ->
+        intents =
+          statuses
+          |> intent_sources(repo, root, limit)
+          |> Stream.map(&decode/1)
+          |> Stream.filter(&matches_filter?(&1, :queue, queue))
+          |> Stream.filter(&matches_filter?(&1, :topic, topic))
+          |> Enum.take(limit)
+
+        {:ok, intents}
+      end)
+    end
+  end
+
+  @doc false
+  @spec projections(module(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def projections(ledger, opts \\ []) do
+    with {:ok, limit} <- positive_integer_option(opts, :limit, 100) do
+      transact(ledger, fn repo, root ->
+        entries =
+          root
+          |> projection_offset_keyspace()
+          |> repo.get_range(limit: limit)
+          |> Stream.map(fn {_key, value} -> decode(value) end)
+          |> Enum.to_list()
+
+        {:ok, entries}
+      end)
+    end
   end
 
   @doc false
@@ -223,6 +293,99 @@ defmodule IntentLedger.BedrockStore do
     cursor
   end
 
+  defp update_status_index(repo, root, nil, %Intent{} = next), do: put_status_index(repo, root, next)
+
+  defp update_status_index(repo, root, %Intent{} = previous, %Intent{} = next) do
+    if previous.status != next.status do
+      clear_status_index(repo, root, previous)
+    end
+
+    put_status_index(repo, root, next)
+  end
+
+  defp put_status_index(repo, root, %Intent{} = intent) do
+    root
+    |> status_index_keyspace(intent.status)
+    |> repo.put(intent.id, encode(intent))
+  end
+
+  defp clear_status_index(repo, root, %Intent{} = intent) do
+    root
+    |> status_index_keyspace(intent.status)
+    |> repo.clear(intent.id)
+  end
+
+  defp intent_sources(nil, repo, root, limit) do
+    root
+    |> intent_keyspace()
+    |> repo.get_range(limit: limit)
+    |> Stream.map(fn {_key, value} -> value end)
+  end
+
+  defp intent_sources(statuses, repo, root, limit) do
+    statuses
+    |> Stream.flat_map(fn status ->
+      root
+      |> status_index_keyspace(status)
+      |> repo.get_range(limit: limit)
+      |> Stream.map(fn {_key, value} -> value end)
+    end)
+  end
+
+  defp matches_filter?(_intent, _field, nil), do: true
+  defp matches_filter?(%Intent{} = intent, field, value), do: Map.fetch!(intent, field) == value
+
+  defp status_filter(nil), do: {:ok, nil}
+
+  defp status_filter(statuses) when is_list(statuses) do
+    statuses
+    |> Enum.reduce_while({:ok, []}, fn status, {:ok, acc} ->
+      case normalize_status(status) do
+        {:ok, status} -> {:cont, {:ok, [status | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, statuses} -> {:ok, statuses |> Enum.reverse() |> Enum.uniq()}
+      error -> error
+    end
+  end
+
+  defp status_filter(status) do
+    with {:ok, status} <- normalize_status(status), do: {:ok, [status]}
+  end
+
+  defp normalize_status(status) when status in @intent_statuses, do: {:ok, status}
+
+  defp normalize_status(status) when is_binary(status) do
+    case Map.fetch(@intent_status_by_name, status) do
+      {:ok, status} -> {:ok, status}
+      :error -> {:error, {:invalid_status, status}}
+    end
+  end
+
+  defp normalize_status(status), do: {:error, {:invalid_status, status}}
+
+  defp non_negative_integer_option(opts, key, default) do
+    value = Keyword.get(opts, key, default)
+
+    if is_integer(value) and value >= 0 do
+      {:ok, value}
+    else
+      {:error, {:invalid_option, key, value}}
+    end
+  end
+
+  defp positive_integer_option(opts, key, default) do
+    value = Keyword.get(opts, key, default)
+
+    if is_integer(value) and value > 0 do
+      {:ok, value}
+    else
+      {:error, {:invalid_option, key, value}}
+    end
+  end
+
   defp next_counter(repo, keyspace, key) do
     next =
       case repo.get(keyspace, key) do
@@ -278,6 +441,7 @@ defmodule IntentLedger.BedrockStore do
   defp stream_version_keyspace(root), do: Keyspace.partition(root, "stream_versions/")
   defp outbox_version_keyspace(root), do: Keyspace.partition(root, "outbox_versions/")
   defp outbox_keyspace(root), do: Keyspace.partition(root, "outbox/", key_encoding: TupleEncoding)
+  defp status_index_keyspace(root, status), do: Keyspace.partition(root, "intent_status/#{status}/")
 
   defp projection_offset_keyspace(root),
     do: Keyspace.partition(root, "projection_offsets/", key_encoding: TupleEncoding)

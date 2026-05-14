@@ -167,7 +167,11 @@ defmodule IntentLedger.Runtime do
   @doc false
   @spec inspect(module(), atom(), keyword()) :: {:ok, term()} | {:error, term()}
   def inspect(ledger, :queues, opts), do: stats(ledger, opts)
+  def inspect(ledger, :intents, opts), do: inspect_intents(ledger, opts)
+  def inspect(ledger, :retries, opts), do: inspect_intents(ledger, Keyword.put(opts, :status, :retry_scheduled))
+  def inspect(ledger, :ambiguous, opts), do: inspect_intents(ledger, Keyword.put(opts, :status, :ambiguous))
   def inspect(ledger, :outbox, opts), do: BedrockStore.outbox(ledger, opts)
+  def inspect(ledger, :projections, opts), do: BedrockStore.projections(ledger, opts)
   def inspect(_ledger, view, _opts), do: {:error, {:unsupported_inspection_view, view}}
 
   @doc false
@@ -209,6 +213,44 @@ defmodule IntentLedger.Runtime do
        default_queue: config.default_queue,
        topics: config.intents |> Map.keys() |> Enum.sort()
      }}
+  end
+
+  defp inspect_intents(ledger, opts) do
+    with {:ok, opts} <- normalize_intent_inspection_opts(ledger.__intent_ledger__(), opts) do
+      BedrockStore.intents(ledger, opts)
+    end
+  end
+
+  defp normalize_intent_inspection_opts(config, opts) do
+    with {:ok, opts} <- normalize_inspection_queue(config, opts),
+         {:ok, opts} <- normalize_inspection_topic(opts) do
+      {:ok, opts}
+    end
+  end
+
+  defp normalize_inspection_queue(config, opts) do
+    case Keyword.fetch(opts, :queue) do
+      {:ok, queue} ->
+        with {:ok, queue} <- Config.normalize_queue_id(queue),
+             :ok <- ensure_configured_queue(config, queue) do
+          {:ok, Keyword.put(opts, :queue, queue)}
+        end
+
+      :error ->
+        {:ok, opts}
+    end
+  end
+
+  defp normalize_inspection_topic(opts) do
+    case Keyword.fetch(opts, :topic) do
+      {:ok, topic} ->
+        with {:ok, topic} <- Config.normalize_topic(topic) do
+          {:ok, Keyword.put(opts, :topic, topic)}
+        end
+
+      :error ->
+        {:ok, opts}
+    end
   end
 
   @doc false

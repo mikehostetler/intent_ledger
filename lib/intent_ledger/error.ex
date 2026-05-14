@@ -143,6 +143,8 @@ defmodule IntentLedger.Error do
   def from_reason({:invalid_projection_cursor, cursor}),
     do: invalid("Invalid projection cursor", field: :cursor, value: cursor)
 
+  def from_reason({:invalid_option, field, value}), do: invalid("Invalid option", field: field, value: value)
+  def from_reason({:invalid_status, status}), do: invalid("Invalid Intent status", field: :status, value: status)
   def from_reason({:invalid_intent, errors}), do: invalid("Invalid Intent", errors: errors)
   def from_reason({:required, field}), do: invalid("Required Intent field is missing", field: field)
 

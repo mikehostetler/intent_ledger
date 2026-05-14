@@ -372,7 +372,15 @@ Landed:
   and lifecycle result mapping exist.
 - Intent state, lifecycle signals, outbox entries, replay streams, idempotent
   enqueue keys, and projection cursors are stored in Bedrock keyspaces.
+- Handler completion/retry/discard lifecycle updates run through the
+  `bedrock_job_queue` action hook so queue actions and Intent lifecycle signals
+  commit in the same Bedrock transaction.
+- Command/idempotency tests cover duplicate keys across drift, concurrent
+  duplicate enqueue, and repeated lifecycle commands.
 - Public replay supports `:ledger`, `{:intent, intent_id}`, and `:outbox`.
+- Public inspection supports `:queues`, `:intents`, `:retries`,
+  `:ambiguous`, `:outbox`, and `:projections`, with unsupported views and
+  invalid options normalized through `IntentLedger.Error`.
 - Splode-backed public error normalization and telemetry stop events exist.
 - Fast unit tests cover handler result, validation, telemetry, replay, and
   projection cursor edge cases.
@@ -381,21 +389,12 @@ Partial:
 
 - Enqueue writes Intent state, lifecycle signal, outbox entry, and queue item in
   one Bedrock transaction.
-- Handler completion/retry/discard lifecycle updates are recorded, but they are
-  not yet committed in the same transaction as the `bedrock_job_queue` queue
-  action.
-- `inspect/2` currently covers `:queues` and `:outbox`; `:intents`,
-  `:retries`, `:ambiguous`, and `:projections` still need implementation.
-- Command/idempotency behavior covers duplicate enqueue keys, but command race
-  tests and richer command records remain open.
 - Cancellation marks the Intent and neutralizes handler execution when observed,
   but explicit queue visibility removal still belongs to the atomic integration
   work.
 
 Missing:
 
-- `bedrock_job_queue` transaction hook or direct executor fallback for atomic
-  queue/lifecycle movement.
 - Durable outbox dispatch/ack policy.
 - Projection lag inspection.
 - Bedrock restart and multi-node opt-in scenarios.

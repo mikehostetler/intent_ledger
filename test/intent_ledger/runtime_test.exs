@@ -252,6 +252,79 @@ defmodule IntentLedger.RuntimeTest do
              TestIntents.projection_cursor("")
   end
 
+  test "inspection views expose intents retries ambiguous outbox and projections" do
+    assert {:ok, enqueued} =
+             TestIntents.enqueue("invoice.send", %{invoice_id: 1},
+               key: "inspect:enqueued",
+               queue: "tenant:acme"
+             )
+
+    assert {:ok, retrying} = TestIntents.enqueue("invoice.fail", %{invoice_id: 2}, max_attempts: 3)
+    retry_payload = queue_payload(TestIntents, retrying.id)
+
+    assert {:error, :boom} =
+             retry_result =
+             FailingIntent.perform(retry_payload, %{
+               topic: "invoice.fail",
+               queue_id: "default",
+               item_id: retrying.id,
+               attempt: 1
+             })
+
+    finalize_perform(TestIntents, retrying, retry_result, action: :requeue, queue_result: {:ok, :requeued})
+
+    assert {:ok, ambiguous} = TestIntents.enqueue("invoice.send", %{invoice_id: 3})
+    assert {:ok, _ambiguous} = TestIntents.mark_ambiguous(ambiguous.id, :manual_review)
+    assert :ok = TestIntents.put_projection_cursor("ops-status", 7)
+
+    assert {:ok, intents} = TestIntents.inspect(:intents, limit: 10)
+    intent_ids = intents |> Enum.map(& &1.id) |> MapSet.new()
+    assert MapSet.subset?(MapSet.new([enqueued.id, retrying.id, ambiguous.id]), intent_ids)
+
+    assert {:ok, [filtered]} =
+             TestIntents.inspect(:intents,
+               queue: "tenant:acme",
+               topic: "invoice.send",
+               status: "enqueued"
+             )
+
+    assert filtered.id == enqueued.id
+
+    assert {:ok, [retry_view]} = TestIntents.inspect(:retries)
+    assert retry_view.id == retrying.id
+    assert retry_view.status == :retry_scheduled
+
+    assert {:ok, [ambiguous_view]} = TestIntents.inspect(:ambiguous)
+    assert ambiguous_view.id == ambiguous.id
+    assert ambiguous_view.status == :ambiguous
+
+    assert {:ok, outbox} = TestIntents.inspect(:outbox, limit: 10)
+    assert Enum.any?(outbox, &(&1.signal.type == "intent.retry_scheduled"))
+    assert Enum.any?(outbox, &(&1.signal.type == "intent.ambiguous"))
+
+    assert {:ok, projections} = TestIntents.inspect(:projections)
+
+    assert %{projection: "name:ops-status", cursor: 7, updated_at: %DateTime{}} =
+             Enum.find(projections, &(&1.projection == "name:ops-status"))
+  end
+
+  test "inspection views normalize invalid options through public errors" do
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :view, value: :missing}} =
+             TestIntents.inspect(:missing)
+
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :cursor, value: -1}} =
+             TestIntents.inspect(:outbox, cursor: -1)
+
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :limit, value: 0}} =
+             TestIntents.inspect(:intents, limit: 0)
+
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :status, value: :unknown}} =
+             TestIntents.inspect(:intents, status: :unknown)
+
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :queue, value: ""}} =
+             TestIntents.inspect(:intents, queue: "")
+  end
+
   test "handler execution updates Intent lifecycle state" do
     assert {:ok, intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123, test_pid: self()})
 
@@ -277,6 +350,23 @@ defmodule IntentLedger.RuntimeTest do
 
     assert {:ok, signals} = TestIntents.history(intent.id)
     assert Enum.map(signals, & &1.type) == ["intent.enqueued", "intent.started", "intent.completed"]
+  end
+
+  test "queue action hooks keep raw bedrock_job_queue return values" do
+    assert {:ok, intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123})
+
+    assert {:error, :queue_failed} =
+             IntentLedger.Runtime.apply_queue_action(
+               TestIntents,
+               IntentLedger.FakeRepo,
+               lease_for(intent),
+               :complete,
+               :ok,
+               {:error, :queue_failed}
+             )
+
+    assert {:ok, fresh} = TestIntents.fetch(intent.id)
+    assert fresh.status == :enqueued
   end
 
   test "handler execution emits stop telemetry" do
@@ -679,7 +769,19 @@ defmodule IntentLedger.RuntimeTest do
     action = Keyword.get(opts, :action, action_for_result(handler_result))
     queue_result = Keyword.get(opts, :queue_result, queue_result_for_action(action))
 
-    lease = %Bedrock.JobQueue.Lease{
+    assert :ok =
+             IntentLedger.Runtime.apply_queue_action(
+               ledger,
+               IntentLedger.FakeRepo,
+               lease_for(intent),
+               action,
+               handler_result,
+               queue_result
+             )
+  end
+
+  defp lease_for(intent) do
+    %Bedrock.JobQueue.Lease{
       id: "test-lease",
       item_id: intent.id,
       queue_id: intent.queue,
@@ -688,16 +790,6 @@ defmodule IntentLedger.RuntimeTest do
       expires_at: 1,
       item_key: nil
     }
-
-    assert :ok =
-             IntentLedger.Runtime.apply_queue_action(
-               ledger,
-               IntentLedger.FakeRepo,
-               lease,
-               action,
-               handler_result,
-               queue_result
-             )
   end
 
   defp action_for_result(:ok), do: :complete

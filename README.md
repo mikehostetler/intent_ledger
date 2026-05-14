@@ -281,8 +281,16 @@ The current inspection surface is view-based:
 
 ```elixir
 MyApp.Intents.inspect(:queues)
+MyApp.Intents.inspect(:intents, queue: "billing", status: :retry_scheduled)
+MyApp.Intents.inspect(:retries)
+MyApp.Intents.inspect(:ambiguous)
 MyApp.Intents.inspect(:outbox)
+MyApp.Intents.inspect(:projections)
 ```
+
+Inspection views return `{:ok, value}` or normalized `IntentLedger.Error`
+exceptions for unsupported views and invalid options. Queue callbacks still use
+the raw `bedrock_job_queue` return protocol.
 
 Telemetry currently emits stop events for:
 
