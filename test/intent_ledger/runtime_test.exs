@@ -112,6 +112,52 @@ defmodule IntentLedger.RuntimeTest do
     assert {:ok, %{"default" => %{pending_count: 1, processing_count: 0}}} = TestIntents.stats(queue: "default")
   end
 
+  test "idempotency keys return the original Intent across payload topic and queue drift" do
+    assert {:ok, first} =
+             TestIntents.enqueue("invoice.send", %{invoice_id: 123},
+               key: "invoice:123:send",
+               queue: "tenant:acme"
+             )
+
+    assert {:ok, second} =
+             TestIntents.enqueue("invoice.fail", %{invoice_id: 999},
+               key: "invoice:123:send",
+               queue: "tenant:beta"
+             )
+
+    assert second.id == first.id
+    assert second.topic == "invoice.send"
+    assert second.payload == %{invoice_id: 123}
+    assert second.queue == "tenant:acme"
+
+    assert {:ok, queues} = TestIntents.stats()
+    assert queues["tenant:acme"].pending_count == 1
+    assert queues["tenant:beta"].pending_count == 0
+    assert queues["default"].pending_count == 0
+  end
+
+  test "idempotency keys collapse concurrent enqueue attempts" do
+    results =
+      1..20
+      |> Task.async_stream(
+        fn invoice_id ->
+          TestIntents.enqueue("invoice.send", %{invoice_id: invoice_id}, key: "invoice:concurrent:send")
+        end,
+        max_concurrency: 20,
+        timeout: 5_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.all?(results, &match?({:ok, _intent}, &1))
+
+    intent_ids =
+      Enum.map(results, fn {:ok, intent} -> intent.id end)
+      |> Enum.uniq()
+
+    assert [_intent_id] = intent_ids
+    assert {:ok, %{"default" => %{pending_count: 1, processing_count: 0}}} = TestIntents.stats(queue: "default")
+  end
+
   test "enqueue_many accepts string-keyed map entries" do
     assert {:ok, [intent]} =
              TestIntents.enqueue_many([
@@ -472,6 +518,68 @@ defmodule IntentLedger.RuntimeTest do
     assert still_ambiguous.status == :ambiguous
   end
 
+  test "cancel is idempotent once canceled and rejected after completion" do
+    assert {:ok, canceled} = TestIntents.enqueue("invoice.send", %{invoice_id: 123})
+    assert {:ok, canceled_once} = TestIntents.cancel(canceled.id, :not_needed)
+    assert canceled_once.status == :canceled
+
+    assert {:ok, canceled_twice} = TestIntents.cancel(canceled.id, :still_not_needed)
+    assert canceled_twice.status == :canceled
+    assert canceled_twice.cancel_reason == :not_needed
+    assert_history(TestIntents, canceled, ["intent.enqueued", "intent.canceled"])
+
+    assert {:ok, ambiguous} = TestIntents.enqueue("invoice.send", %{invoice_id: 321})
+    assert {:ok, _parked} = TestIntents.mark_ambiguous(ambiguous.id, :manual_review)
+    assert {:ok, canceled_ambiguous} = TestIntents.cancel(ambiguous.id, :resolved_by_cancel)
+    assert canceled_ambiguous.status == :canceled
+    assert_history(TestIntents, ambiguous, ["intent.enqueued", "intent.ambiguous", "intent.canceled"])
+
+    assert {:ok, completed} = TestIntents.enqueue("invoice.send", %{invoice_id: 456, test_pid: self()})
+    queue_payload = queue_payload(TestIntents, completed.id)
+
+    assert {:ok, %{sent: true}} =
+             result =
+             SendInvoice.perform(queue_payload, %{
+               topic: "invoice.send",
+               queue_id: "default",
+               item_id: completed.id,
+               attempt: 1
+             })
+
+    finalize_perform(TestIntents, completed, result)
+
+    assert {:error, %IntentLedger.Error.ConflictError{reason: :not_cancelable, details: %{status: :completed}}} =
+             TestIntents.cancel(completed.id, :too_late)
+  end
+
+  test "mark_ambiguous is idempotent once ambiguous and rejected after completion" do
+    assert {:ok, intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123})
+    assert {:ok, ambiguous_once} = TestIntents.mark_ambiguous(intent.id, :manual_review)
+    assert ambiguous_once.status == :ambiguous
+
+    assert {:ok, ambiguous_twice} = TestIntents.mark_ambiguous(intent.id, :still_manual_review)
+    assert ambiguous_twice.status == :ambiguous
+    assert ambiguous_twice.error == :manual_review
+    assert_history(TestIntents, intent, ["intent.enqueued", "intent.ambiguous"])
+
+    assert {:ok, completed} = TestIntents.enqueue("invoice.send", %{invoice_id: 456, test_pid: self()})
+    queue_payload = queue_payload(TestIntents, completed.id)
+
+    assert {:ok, %{sent: true}} =
+             result =
+             SendInvoice.perform(queue_payload, %{
+               topic: "invoice.send",
+               queue_id: "default",
+               item_id: completed.id,
+               attempt: 1
+             })
+
+    finalize_perform(TestIntents, completed, result)
+
+    assert {:error, %IntentLedger.Error.ConflictError{reason: :not_ambiguousable, details: %{status: :completed}}} =
+             TestIntents.mark_ambiguous(completed.id, :too_late)
+  end
+
   test "manual requeue only accepts failed intents" do
     assert {:ok, intent} = TestIntents.enqueue("invoice.fail", %{}, max_attempts: 1)
 
@@ -496,6 +604,9 @@ defmodule IntentLedger.RuntimeTest do
 
     assert {:ok, requeued} = TestIntents.requeue(failed.id)
     assert requeued.status == :retry_scheduled
+
+    assert {:error, %IntentLedger.Error.ConflictError{reason: :not_requeueable, details: %{status: :retry_scheduled}}} =
+             TestIntents.requeue(failed.id)
   end
 
   test "lifecycle commands emit stop telemetry for failures" do

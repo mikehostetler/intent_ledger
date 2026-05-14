@@ -83,8 +83,17 @@ defmodule IntentLedger.Runtime do
     start = System.monotonic_time()
 
     result =
-      BedrockStore.update_intent(ledger, intent_id, :canceled, %{reason: reason}, fn intent, now ->
-        %{intent | status: :canceled, cancel_reason: reason, updated_at: now, completed_at: now}
+      BedrockStore.transact(ledger, fn repo, root ->
+        with {:ok, intent} <- BedrockStore.fetch(repo, root, intent_id),
+             :ok <- ensure_cancelable(intent) do
+          if intent.status == :canceled do
+            {:ok, intent}
+          else
+            BedrockStore.update_intent(repo, root, ledger, intent_id, :canceled, %{reason: reason}, fn intent, now ->
+              %{intent | status: :canceled, cancel_reason: reason, updated_at: now, completed_at: now}
+            end)
+          end
+        end
       end)
 
     Telemetry.emit(:command, result, start, ledger, command: :cancel, intent_id: intent_id)
@@ -138,8 +147,17 @@ defmodule IntentLedger.Runtime do
     start = System.monotonic_time()
 
     result =
-      BedrockStore.update_intent(ledger, intent_id, :ambiguous, %{reason: reason}, fn intent, now ->
-        %{intent | status: :ambiguous, error: reason, updated_at: now}
+      BedrockStore.transact(ledger, fn repo, root ->
+        with {:ok, intent} <- BedrockStore.fetch(repo, root, intent_id),
+             :ok <- ensure_ambiguousable(intent) do
+          if intent.status == :ambiguous do
+            {:ok, intent}
+          else
+            BedrockStore.update_intent(repo, root, ledger, intent_id, :ambiguous, %{reason: reason}, fn intent, now ->
+              %{intent | status: :ambiguous, error: reason, updated_at: now}
+            end)
+          end
+        end
       end)
 
     Telemetry.emit(:command, result, start, ledger, command: :mark_ambiguous, intent_id: intent_id)
@@ -573,6 +591,16 @@ defmodule IntentLedger.Runtime do
 
   defp ensure_requeueable(%Intent{status: status}) when status in [:failed, :discarded], do: :ok
   defp ensure_requeueable(%Intent{status: status}), do: {:error, {:not_requeueable, status}}
+
+  defp ensure_cancelable(%Intent{status: status}) when status in [:completed, :failed, :discarded],
+    do: {:error, {:not_cancelable, status}}
+
+  defp ensure_cancelable(%Intent{}), do: :ok
+
+  defp ensure_ambiguousable(%Intent{status: status}) when status in [:completed, :failed, :discarded, :canceled],
+    do: {:error, {:not_ambiguousable, status}}
+
+  defp ensure_ambiguousable(%Intent{}), do: :ok
 
   defp result_count({:ok, values}) when is_list(values), do: length(values)
   defp result_count(_result), do: 0

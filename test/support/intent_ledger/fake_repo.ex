@@ -5,6 +5,8 @@ defmodule IntentLedger.FakeRepo do
 
   alias Bedrock.Keyspace
 
+  @tx_state {__MODULE__, :tx_state}
+
   def start_link(_opts \\ []) do
     Agent.start(fn -> %{} end, name: __MODULE__)
   end
@@ -14,27 +16,52 @@ defmodule IntentLedger.FakeRepo do
     Agent.update(__MODULE__, fn _state -> %{} end)
   end
 
-  def transact(fun, _opts \\ []) when is_function(fun, 0), do: fun.()
+  def transact(fun, _opts \\ []) when is_function(fun, 0) do
+    ensure_started()
+
+    Agent.get_and_update(__MODULE__, fn state ->
+      Process.put(@tx_state, state)
+
+      try do
+        result = fun.()
+        next_state = Process.get(@tx_state)
+        {{:ok, result}, next_state}
+      rescue
+        exception ->
+          {{:raised, exception, __STACKTRACE__}, state}
+      catch
+        kind, reason ->
+          {{:caught, kind, reason}, state}
+      after
+        Process.delete(@tx_state)
+      end
+    end)
+    |> case do
+      {:ok, result} -> result
+      {:raised, exception, stacktrace} -> reraise exception, stacktrace
+      {:caught, kind, reason} -> :erlang.raise(kind, reason, [])
+    end
+  end
 
   def get(%Keyspace{} = keyspace, key), do: keyspace |> Keyspace.pack(key) |> get()
 
   def get(key) when is_binary(key) do
     ensure_started()
-    Agent.get(__MODULE__, &Map.get(&1, key))
+    with_state(&Map.get(&1, key))
   end
 
   def put(%Keyspace{} = keyspace, key, value), do: keyspace |> Keyspace.pack(key) |> put(value)
 
   def put(key, value) when is_binary(key) and is_binary(value) do
     ensure_started()
-    Agent.update(__MODULE__, &Map.put(&1, key, value))
+    update_state(&Map.put(&1, key, value))
   end
 
   def clear(%Keyspace{} = keyspace, key), do: keyspace |> Keyspace.pack(key) |> clear()
 
   def clear(key) when is_binary(key) do
     ensure_started()
-    Agent.update(__MODULE__, &Map.delete(&1, key))
+    update_state(&Map.delete(&1, key))
   end
 
   def get_range(%Keyspace{} = keyspace, opts) do
@@ -43,7 +70,7 @@ defmodule IntentLedger.FakeRepo do
 
     ensure_started()
 
-    Agent.get(__MODULE__, fn state ->
+    with_state(fn state ->
       state
       |> Enum.filter(fn {key, _value} -> String.starts_with?(key, prefix) end)
       |> Enum.sort_by(fn {key, _value} -> key end)
@@ -57,7 +84,7 @@ defmodule IntentLedger.FakeRepo do
 
     ensure_started()
 
-    Agent.get(__MODULE__, fn state ->
+    with_state(fn state ->
       state
       |> Enum.filter(fn {key, _value} -> key >= start_key and key < end_key end)
       |> Enum.sort_by(fn {key, _value} -> key end)
@@ -68,20 +95,32 @@ defmodule IntentLedger.FakeRepo do
   def max(key, value) when is_binary(key) and is_binary(value) do
     ensure_started()
 
-    Agent.update(__MODULE__, fn state ->
-      Map.update(state, key, value, &max_binary(&1, value))
-    end)
+    update_state(fn state -> Map.update(state, key, value, &max_binary(&1, value)) end)
   end
 
   def add(key, <<delta::64-signed-little>>) when is_binary(key) do
     ensure_started()
 
-    Agent.update(__MODULE__, fn state ->
+    update_state(fn state ->
       Map.update(state, key, <<delta::64-signed-little>>, fn
         <<current::64-signed-little>> -> <<current + delta::64-signed-little>>
         _other -> <<delta::64-signed-little>>
       end)
     end)
+  end
+
+  defp with_state(fun) do
+    case Process.get(@tx_state) do
+      nil -> Agent.get(__MODULE__, fun)
+      state -> fun.(state)
+    end
+  end
+
+  defp update_state(fun) do
+    case Process.get(@tx_state) do
+      nil -> Agent.update(__MODULE__, fun)
+      state -> Process.put(@tx_state, fun.(state))
+    end
   end
 
   defp max_binary(left, right) when left >= right, do: left

@@ -163,6 +163,8 @@ defmodule IntentLedger.Error do
     do: invalid("Invalid datetime", field: :datetime, value: value, reason: reason)
 
   def from_reason({:not_requeueable, status}), do: conflict(:not_requeueable, status: status)
+  def from_reason({:not_cancelable, status}), do: conflict(:not_cancelable, status: status)
+  def from_reason({:not_ambiguousable, status}), do: conflict(:not_ambiguousable, status: status)
 
   def from_reason({:intent_lifecycle_update_failed, reason}),
     do: runtime("Intent lifecycle update failed", reason: reason)
