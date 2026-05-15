@@ -119,10 +119,16 @@ defmodule IntentLedger.Config do
   defp normalize_explicit_queues([]), do: []
 
   defp normalize_explicit_queues(queues) when is_map(queues) do
-    Enum.map(queues, fn {id, attrs} -> normalize_queue_definition!({id, attrs}) end)
+    queues
+    |> Enum.map(fn {id, attrs} -> normalize_queue_definition!({id, attrs}) end)
+    |> ensure_unique_explicit_queues!()
   end
 
-  defp normalize_explicit_queues(queues) when is_list(queues), do: Enum.map(queues, &normalize_queue_definition!/1)
+  defp normalize_explicit_queues(queues) when is_list(queues) do
+    queues
+    |> Enum.map(&normalize_queue_definition!/1)
+    |> ensure_unique_explicit_queues!()
+  end
 
   defp normalize_explicit_queues(queues) do
     raise ArgumentError, "invalid IntentLedger queues config: #{inspect(queues)}"
@@ -188,6 +194,8 @@ defmodule IntentLedger.Config do
       raise ArgumentError, "IntentLedger intent #{inspect(topic)} requires a handler module"
     end
 
+    validate_handler_topic!(topic, handler)
+
     attrs =
       attrs
       |> Map.delete(:topic)
@@ -225,6 +233,45 @@ defmodule IntentLedger.Config do
       [%{id: "default"} | queues]
     else
       queues
+    end
+  end
+
+  defp ensure_unique_explicit_queues!(configs) do
+    ids = Enum.map(configs, & &1.id)
+    duplicate_ids = ids -- Enum.uniq(ids)
+
+    case Enum.uniq(duplicate_ids) do
+      [] ->
+        configs
+
+      duplicates ->
+        raise ArgumentError, "IntentLedger queues config contains duplicate queue ids: #{inspect(duplicates)}"
+    end
+  end
+
+  defp validate_handler_topic!(topic, handler) do
+    with {:module, ^handler} <- Code.ensure_loaded(handler),
+         true <- function_exported?(handler, :__intent_handler__, 0) do
+      validate_loaded_handler_topic!(topic, handler, handler.__intent_handler__().topic)
+    else
+      _not_loaded_or_no_intent_handler -> :ok
+    end
+  end
+
+  defp validate_loaded_handler_topic!(_topic, _handler, nil), do: :ok
+
+  defp validate_loaded_handler_topic!(topic, handler, declared_topic) do
+    case normalize_topic(declared_topic) do
+      {:ok, ^topic} ->
+        :ok
+
+      {:ok, normalized} ->
+        raise ArgumentError,
+              "IntentLedger intent #{inspect(topic)} uses handler #{inspect(handler)} declared for topic #{inspect(normalized)}"
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "IntentLedger handler #{inspect(handler)} declares invalid topic: #{inspect(reason)}"
     end
   end
 

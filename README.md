@@ -253,6 +253,11 @@ execution, and dead-letter mechanics. Intent Ledger records the domain lifecycle
 around those mechanics so application code can inspect, replay, and project what
 happened.
 
+`intent.started` is an attempt observation. It can appear more than once for the
+same Intent when a worker crashes, a lease expires, or a stale worker races with
+a newer worker. Terminal facts such as `intent.completed`, `intent.failed`, and
+`intent.discarded` remain the lifecycle facts consumers should treat as final.
+
 Manual `requeue/2` is intentionally narrow in the current alpha: it accepts
 failed or discarded Intents. Ambiguous Intents are parked for reconciliation and
 should not be blindly requeued until the queue-state repair path is explicit.

@@ -439,7 +439,8 @@ Current coverage:
 - `mix test.multi_node` covers simulated node roles over shared Bedrock state;
 - `mix test.chaos` covers deterministic local partition-style edge cases;
 - internal repair verification rebuilds expected command-side Intent state,
-  status indexes, idempotency keys, and outbox mirror facts from replay.
+  status indexes, idempotency keys, queue consistency, queue stats, and outbox
+  mirror facts from replay.
 
 Missing coverage:
 

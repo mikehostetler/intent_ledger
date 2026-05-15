@@ -352,8 +352,43 @@ defmodule IntentLedger.Runtime.Commands do
     keyspaces = Store.queue_keyspaces(queue_root, intent.queue)
     limit = Keyword.get(opts, :queue_neutralization_scan_limit, @queue_neutralization_scan_limit)
 
-    keyspaces.items
-    |> repo.get_range(limit: limit)
+    case neutralize_known_pending_queue_item(repo, keyspaces, intent) do
+      :missing -> scan_pending_queue_item(repo, keyspaces, intent, limit)
+      status -> status
+    end
+  end
+
+  defp neutralize_known_pending_queue_item(repo, keyspaces, %Intent{} = intent) do
+    item_key = {intent.priority, DateTime.to_unix(intent.scheduled_at, :millisecond), intent.id}
+
+    case repo.get(keyspaces.items, item_key) do
+      nil ->
+        :missing
+
+      value ->
+        case :erlang.binary_to_term(value) do
+          %Item{id: id, lease_id: nil} when id == intent.id ->
+            repo.clear(keyspaces.items, item_key)
+            decrement_pending_stat(repo, keyspaces)
+            :removed
+
+          %Item{id: id} when id == intent.id ->
+            :leased
+
+          _other ->
+            :missing
+        end
+    end
+  end
+
+  defp scan_pending_queue_item(repo, keyspaces, %Intent{} = intent, limit) do
+    entries =
+      keyspaces.items
+      |> repo.get_range(limit: limit + 1)
+      |> Enum.to_list()
+
+    entries
+    |> Enum.take(limit)
     |> Enum.find_value(:missing, fn {item_key, value} ->
       case :erlang.binary_to_term(value) do
         %Item{id: id, lease_id: nil} when id == intent.id ->
@@ -368,6 +403,10 @@ defmodule IntentLedger.Runtime.Commands do
           false
       end
     end)
+    |> case do
+      :missing when length(entries) > limit -> :unknown
+      status -> status
+    end
   end
 
   defp decrement_pending_stat(repo, keyspaces) do
@@ -379,6 +418,7 @@ defmodule IntentLedger.Runtime.Commands do
   defp neutralization_status(:removed), do: :removed
   defp neutralization_status(:leased), do: :leased
   defp neutralization_status(:missing), do: :missing
+  defp neutralization_status(:unknown), do: :unknown
 
   defp ensure_requeueable(%Intent{status: status}) when status in [:failed, :discarded], do: :ok
   defp ensure_requeueable(%Intent{status: status}), do: {:error, {:not_requeueable, status}}

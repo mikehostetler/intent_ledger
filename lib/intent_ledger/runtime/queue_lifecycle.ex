@@ -56,8 +56,8 @@ defmodule IntentLedger.Runtime.QueueLifecycle do
     hook_result(mark_failed(repo, root, ledger, intent, reason))
   end
 
-  defp apply_lifecycle_after_queue_action(_repo, _root, _ledger, _intent, _action, _handler_result, _queue_result) do
-    :ok
+  defp apply_lifecycle_after_queue_action(_repo, _root, _ledger, _intent, action, handler_result, queue_result) do
+    {:error, {:unexpected_queue_action, action, handler_result, queue_result}}
   end
 
   defp hook_result({:ok, _intent}), do: :ok

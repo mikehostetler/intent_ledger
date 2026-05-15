@@ -81,7 +81,7 @@ defmodule IntentLedger.Command do
           {:ok, Jido.Signal.t()} | {:error, term()}
   def to_signal(ledger, command, attrs, opts \\ []) when is_atom(ledger) do
     with {:ok, type} <- normalize_type(command),
-         data <- attrs |> Map.new() |> normalize_data_keys(),
+         {:ok, data} <- attrs_to_data(attrs),
          {:ok, signal_type} <- signal_type(type) do
       Jido.Signal.new(signal_type, data,
         source: Keyword.get(opts, :source, source_for(ledger)),
@@ -167,6 +167,16 @@ defmodule IntentLedger.Command do
   defp signal_data(%Jido.Signal{data: data}) when is_map(data), do: {:ok, normalize_data_keys(data)}
   defp signal_data(%Jido.Signal{data: nil}), do: {:ok, %{}}
   defp signal_data(%Jido.Signal{data: data}), do: {:error, {:invalid_command_signal_data, data}}
+
+  defp attrs_to_data(attrs) when is_map(attrs), do: {:ok, normalize_data_keys(attrs)}
+
+  defp attrs_to_data(attrs) when is_list(attrs) do
+    {:ok, attrs |> Map.new() |> normalize_data_keys()}
+  rescue
+    ArgumentError -> {:error, {:invalid_command_attrs, attrs}}
+  end
+
+  defp attrs_to_data(attrs), do: {:error, {:invalid_command_attrs, attrs}}
 
   defp payload(data) do
     case fetch_field(data, :payload) do

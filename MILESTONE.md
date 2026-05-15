@@ -425,8 +425,8 @@ Landed:
 - Fast unit tests cover handler result, validation, telemetry, replay, and
   projection cursor edge cases.
 - Internal repair verification can rebuild expected Intent state, status
-  indexes, idempotency keys, and outbox mirror facts from lifecycle replay and
-  report drift.
+  indexes, idempotency keys, queue item/state consistency, queue stats, and
+  outbox mirror facts from lifecycle replay and report drift.
 
 Partial:
 

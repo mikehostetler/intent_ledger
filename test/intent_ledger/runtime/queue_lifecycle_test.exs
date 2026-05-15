@@ -65,6 +65,25 @@ defmodule IntentLedger.Runtime.QueueLifecycleTest do
     assert_history(TestIntents, intent, ["intent.enqueued", "intent.started"])
   end
 
+  test "unexpected runnable queue action combinations fail instead of silently no-oping" do
+    assert {:ok, intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123, test_pid: self()})
+    assert {:ok, %{sent: true}} = SendInvoice.perform(queue_payload(TestIntents, intent.id), job_meta(intent))
+
+    assert {:error, {:unexpected_queue_action, :complete, {:error, :boom}, :ok}} =
+             IntentLedger.Runtime.apply_queue_action(
+               TestIntents,
+               IntentLedger.FakeRepo,
+               lease_for(intent),
+               :complete,
+               {:error, :boom},
+               :ok
+             )
+
+    assert {:ok, started} = TestIntents.fetch(intent.id)
+    assert started.status == :started
+    assert_history(TestIntents, intent, ["intent.enqueued", "intent.started"])
+  end
+
   test "terminal Intents are immutable through repeated queue actions" do
     assert {:ok, intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 123, test_pid: self()})
     assert {:ok, %{sent: true}} = result = SendInvoice.perform(queue_payload(TestIntents, intent.id), job_meta(intent))

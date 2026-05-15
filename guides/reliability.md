@@ -20,6 +20,11 @@ Current guarantees:
   delivery;
 - projection cursors are monotonic by default and report lag through inspection.
 
+`intent.started` is deliberately an attempt observation rather than a unique
+state transition. Consumers should expect repeated started facts when a worker
+crashes, a lease expires, or stale execution races with recovery. Terminal facts
+are the final lifecycle boundary.
+
 Non-goals:
 
 - exactly-once external side effects;

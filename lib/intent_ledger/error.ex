@@ -144,6 +144,9 @@ defmodule IntentLedger.Error do
   def from_reason({:invalid_command_signal_data, data}),
     do: invalid("Invalid Intent command signal data", field: :data, value: data)
 
+  def from_reason({:invalid_command_attrs, attrs}),
+    do: invalid("Invalid Intent command attributes", field: :attrs, value: attrs)
+
   def from_reason({:missing_command_field, field}),
     do: invalid("Intent command signal is missing a required field", field: field)
 
@@ -178,6 +181,9 @@ defmodule IntentLedger.Error do
 
   def from_reason({:invalid_outbox_consumer, consumer}),
     do: invalid("Invalid outbox consumer reference", field: :consumer, value: consumer)
+
+  def from_reason({:invalid_outbox_cursor, cursor}),
+    do: invalid("Invalid outbox cursor", field: :cursor, value: cursor)
 
   def from_reason({:stale_outbox_ack, consumer, cursor, current}),
     do:
@@ -223,6 +229,14 @@ defmodule IntentLedger.Error do
 
   def from_reason({:intent_lifecycle_update_failed, reason}),
     do: runtime("Intent lifecycle update failed", reason: reason)
+
+  def from_reason({:unexpected_queue_action, action, handler_result, queue_result}),
+    do:
+      runtime("Unexpected queue action result",
+        action: action,
+        handler_result: handler_result,
+        queue_result: queue_result
+      )
 
   def from_reason({:unknown_ledger, ledger}), do: runtime("Unknown IntentLedger module", ledger: ledger)
   def from_reason(:invalid_queue_payload), do: runtime("Invalid queue payload")

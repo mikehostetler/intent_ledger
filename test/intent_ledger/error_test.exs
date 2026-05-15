@@ -18,8 +18,10 @@ defmodule IntentLedger.ErrorTest do
     assert %Error.InvalidInputError{field: :command, value: :bad} = Error.from_reason({:unsupported_command, :bad})
     assert %Error.InvalidInputError{field: :signal, value: :bad} = Error.from_reason({:invalid_command_signal, :bad})
     assert %Error.InvalidInputError{field: :data, value: :bad} = Error.from_reason({:invalid_command_signal_data, :bad})
+    assert %Error.InvalidInputError{field: :attrs, value: :bad} = Error.from_reason({:invalid_command_attrs, :bad})
     assert %Error.InvalidInputError{field: :intent_id} = Error.from_reason({:missing_command_field, :intent_id})
     assert %Error.InvalidInputError{field: :datetime, value: "bad"} = Error.from_reason({:invalid_datetime, "bad"})
+    assert %Error.InvalidInputError{field: :cursor, value: :bad} = Error.from_reason({:invalid_outbox_cursor, :bad})
 
     assert %Error.InvalidInputError{field: :datetime, value: "bad"} =
              Error.from_reason({:invalid_datetime, "bad", :bad})

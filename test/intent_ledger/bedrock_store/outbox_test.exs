@@ -56,6 +56,9 @@ defmodule IntentLedger.BedrockStore.OutboxTest do
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :cursor, value: 4}} =
              TestIntents.ack_outbox("webhook-dispatcher", 4)
 
+    assert {:error, %IntentLedger.Error.InvalidInputError{message: "Invalid outbox cursor", field: :cursor, value: -1}} =
+             TestIntents.ack_outbox("webhook-dispatcher", -1)
+
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :consumer, value: ""}} =
              TestIntents.read_outbox("")
   end

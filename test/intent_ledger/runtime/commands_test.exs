@@ -92,6 +92,11 @@ defmodule IntentLedger.Runtime.CommandsTest do
     assert signal.data.payload == %{invoice_id: 123}
   end
 
+  test "command_signal normalizes invalid attrs through public errors" do
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :attrs, value: [:bad_attr]}} =
+             TestIntents.command_signal(:enqueue, [:bad_attr])
+  end
+
   test "submit accepts signal-native enqueue commands and redelivery is idempotent" do
     assert {:ok, signal} =
              TestIntents.command_signal(:enqueue,

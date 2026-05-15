@@ -139,7 +139,7 @@ defmodule IntentLedger.BedrockStore.Outbox do
   defp consumer_key(consumer), do: {:error, {:invalid_outbox_consumer, consumer}}
 
   defp validate_cursor(cursor) when is_integer(cursor) and cursor >= 0, do: :ok
-  defp validate_cursor(cursor), do: {:error, {:invalid_projection_cursor, cursor}}
+  defp validate_cursor(cursor), do: {:error, {:invalid_outbox_cursor, cursor}}
 
   defp next_counter(repo, keyspace, key) do
     next =

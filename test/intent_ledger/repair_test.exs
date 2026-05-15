@@ -1,6 +1,7 @@
 defmodule IntentLedger.RepairTest do
   use IntentLedger.TestCase, async: false
 
+  alias Bedrock.JobQueue.{Internal, Store}
   alias IntentLedger.BedrockStore
   alias IntentLedger.BedrockStore.Keyspaces
   alias IntentLedger.Repair
@@ -29,7 +30,8 @@ defmodule IntentLedger.RepairTest do
                attempt: 1
              })
 
-    finalize_perform(TestIntents, successful, success_result)
+    success_lease = lease_intent(successful, "repair-success")
+    commit_queue_action(success_lease, :complete, success_result)
 
     assert {:ok, second} = TestIntents.enqueue("invoice.fail", %{invoice_id: 2}, max_attempts: 1)
     queue_payload = queue_payload(TestIntents, second.id)
@@ -43,7 +45,8 @@ defmodule IntentLedger.RepairTest do
                attempt: 1
              })
 
-    finalize_perform(TestIntents, second, result, action: :requeue, queue_result: {:ok, :dead_lettered})
+    failure_lease = lease_intent(second, "repair-failure")
+    commit_queue_action(failure_lease, :requeue, result)
 
     assert {:ok, report} = Repair.verify(TestIntents)
 
@@ -76,5 +79,65 @@ defmodule IntentLedger.RepairTest do
     assert check(report, :outbox_mirror).status == :ok
   end
 
+  test "verify reports drift when queue state is corrupted" do
+    assert {:ok, intent} =
+             TestIntents.enqueue("invoice.send", %{invoice_id: 1},
+               key: "invoice:queue-corrupt",
+               queue: "tenant:acme"
+             )
+
+    BedrockStore.transact(TestIntents, fn repo, _root ->
+      queue_root = Internal.root_keyspace(TestIntents.JobQueue)
+      keyspaces = Store.queue_keyspaces(queue_root, intent.queue)
+      [{item_key, _value}] = repo.get_range(keyspaces.items, limit: 1)
+      repo.clear(keyspaces.items, item_key)
+      :ok
+    end)
+
+    assert {:ok, report} = Repair.verify(TestIntents)
+
+    refute report.valid?
+    assert %{status: :drift, details: details} = check(report, :queue_consistency)
+    assert details.missing_runnable == [intent.id]
+    assert [%{queue: "tenant:acme"}] = details.stat_mismatches
+  end
+
   defp check(report, name), do: Enum.find(report.checks, &(&1.name == name))
+
+  defp lease_intent(intent, holder) do
+    queue_root = Internal.root_keyspace(TestIntents.JobQueue)
+
+    item =
+      IntentLedger.FakeRepo
+      |> Store.peek(queue_root, intent.queue, limit: 10)
+      |> Enum.find(&(&1.id == intent.id))
+
+    assert item
+    assert {:ok, lease} = Store.obtain_lease(IntentLedger.FakeRepo, queue_root, item, holder, 30_000)
+    lease
+  end
+
+  defp commit_queue_action(lease, action, handler_result) do
+    queue_root = Internal.root_keyspace(TestIntents.JobQueue)
+
+    assert :ok =
+             IntentLedger.FakeRepo.transact(fn ->
+               queue_result = apply_queue_action(queue_root, lease, action)
+
+               IntentLedger.JobQueueHook.apply(
+                 IntentLedger.FakeRepo,
+                 queue_root,
+                 lease,
+                 action,
+                 handler_result,
+                 queue_result,
+                 TestIntents
+               )
+             end)
+  end
+
+  defp apply_queue_action(queue_root, lease, :complete), do: Store.complete(IntentLedger.FakeRepo, queue_root, lease)
+
+  defp apply_queue_action(queue_root, lease, :requeue),
+    do: Store.requeue(IntentLedger.FakeRepo, queue_root, lease, backoff_fn: fn _attempt -> 60_000 end)
 end
