@@ -15,6 +15,8 @@ Current guarantees:
   key is supplied;
 - handler payloads are validated before execution when a Zoi schema is provided;
 - successful handler results are validated when a result schema is provided;
+- persisted handler results and failure reasons are summarized before they cross
+  lifecycle replay or outbox boundaries;
 - lifecycle transitions are replayable from ledger and per-intent streams.
 - outbox consumers record durable monotonic ack cursors for at-least-once
   delivery;
@@ -46,6 +48,11 @@ Handlers return one of:
 
 Intent Ledger maps those results to Intent lifecycle states. The queue layer maps
 the same result to complete, requeue, discard, or snooze behavior.
+
+The handler return itself is still the queue protocol value. The durable
+Intent/outbox/replay representation is bounded: unsafe structs, exceptions,
+functions, process references, and large binaries are redacted to summaries
+before persistence.
 
 Manual `requeue/2` currently accepts failed or discarded Intents only. That
 avoids duplicating live queue items for Intents that are still pending,

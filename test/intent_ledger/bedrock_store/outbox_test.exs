@@ -6,7 +6,7 @@ defmodule IntentLedger.BedrockStore.OutboxTest do
     assert {:ok, second} = TestIntents.enqueue("invoice.send", %{invoice_id: 2})
     assert {:ok, third} = TestIntents.enqueue("invoice.send", %{invoice_id: 3})
 
-    assert {:ok, entries} = TestIntents.inspect(:outbox, cursor: 0, limit: 3)
+    assert {:ok, entries} = TestIntents.view(:outbox, cursor: 0, limit: 3)
     assert Enum.map(entries, & &1.cursor) == [1, 2, 3]
     assert Enum.map(entries, & &1.signal.subject) == [first.id, second.id, third.id]
 

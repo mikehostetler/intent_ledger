@@ -82,24 +82,24 @@ defmodule IntentLedger.Runtime.InspectionTest do
     assert {:ok, _ambiguous} = TestIntents.mark_ambiguous(ambiguous.id, :manual_review)
     assert :ok = TestIntents.put_projection_cursor(StatusProjection, 2)
 
-    assert {:ok, intents} = TestIntents.inspect(:intents)
+    assert {:ok, intents} = TestIntents.view(:intents)
     intent_ids = intents |> Enum.map(& &1.id) |> MapSet.new()
     assert MapSet.subset?(MapSet.new([enqueued.id, retrying.id, ambiguous.id]), intent_ids)
 
-    assert {:ok, [filtered]} = TestIntents.inspect(:intents, queue: "tenant:acme")
+    assert {:ok, [filtered]} = TestIntents.view(:intents, queue: "tenant:acme")
     assert filtered.id == enqueued.id
 
-    assert {:ok, [retry_view]} = TestIntents.inspect(:retries)
+    assert {:ok, [retry_view]} = TestIntents.view(:retries)
     assert retry_view.id == retrying.id
 
-    assert {:ok, [ambiguous_view]} = TestIntents.inspect(:ambiguous)
+    assert {:ok, [ambiguous_view]} = TestIntents.view(:ambiguous)
     assert ambiguous_view.id == ambiguous.id
 
-    assert {:ok, outbox} = TestIntents.inspect(:outbox, limit: 20)
+    assert {:ok, outbox} = TestIntents.view(:outbox, limit: 20)
     assert Enum.any?(outbox, &(&1.signal.type == "intent.retry_scheduled"))
     assert Enum.any?(outbox, &(&1.signal.type == "intent.ambiguous"))
 
-    assert {:ok, [projection]} = TestIntents.inspect(:projections)
+    assert {:ok, [projection]} = TestIntents.view(:projections)
     assert projection.projection == "module:intent_ledger__test_fixtures__status_projection"
     assert projection.cursor == 2
     assert projection.head_cursor >= 2
@@ -108,19 +108,19 @@ defmodule IntentLedger.Runtime.InspectionTest do
 
   test "inspection views normalize invalid options through public errors" do
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :view, value: :missing}} =
-             TestIntents.inspect(:missing)
+             TestIntents.view(:missing)
 
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :cursor, value: -1}} =
-             TestIntents.inspect(:outbox, cursor: -1)
+             TestIntents.view(:outbox, cursor: -1)
 
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :limit, value: 0}} =
-             TestIntents.inspect(:projections, limit: 0)
+             TestIntents.view(:projections, limit: 0)
 
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :status, value: :unknown}} =
-             TestIntents.inspect(:intents, status: :unknown)
+             TestIntents.view(:intents, status: :unknown)
 
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :queue, value: ""}} =
-             TestIntents.inspect(:intents, queue: "")
+             TestIntents.view(:intents, queue: "")
   end
 
   test "health exposes the configured runtime" do

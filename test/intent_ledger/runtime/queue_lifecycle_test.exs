@@ -16,7 +16,7 @@ defmodule IntentLedger.Runtime.QueueLifecycleTest do
              })
 
     assert :ok =
-             IntentLedger.JobQueueHook.apply(
+             IntentLedger.Runtime.QueueLifecycle.apply(
                IntentLedger.FakeRepo,
                nil,
                lease_for(intent),
@@ -34,7 +34,7 @@ defmodule IntentLedger.Runtime.QueueLifecycleTest do
     finalize_perform(TestIntents, intent, result)
 
     assert :ok =
-             IntentLedger.Runtime.apply_queue_action(
+             IntentLedger.Runtime.QueueLifecycle.apply_queue_action(
                TestIntents,
                IntentLedger.FakeRepo,
                lease_for(intent),
@@ -51,7 +51,7 @@ defmodule IntentLedger.Runtime.QueueLifecycleTest do
     assert {:ok, %{sent: true}} = result = SendInvoice.perform(queue_payload(TestIntents, intent.id), job_meta(intent))
 
     assert {:error, :stale_lease} =
-             IntentLedger.Runtime.apply_queue_action(
+             IntentLedger.Runtime.QueueLifecycle.apply_queue_action(
                TestIntents,
                IntentLedger.FakeRepo,
                lease_for(intent),
@@ -70,7 +70,7 @@ defmodule IntentLedger.Runtime.QueueLifecycleTest do
     assert {:ok, %{sent: true}} = SendInvoice.perform(queue_payload(TestIntents, intent.id), job_meta(intent))
 
     assert {:error, {:unexpected_queue_action, :complete, {:error, :boom}, :ok}} =
-             IntentLedger.Runtime.apply_queue_action(
+             IntentLedger.Runtime.QueueLifecycle.apply_queue_action(
                TestIntents,
                IntentLedger.FakeRepo,
                lease_for(intent),
@@ -90,7 +90,7 @@ defmodule IntentLedger.Runtime.QueueLifecycleTest do
     finalize_perform(TestIntents, intent, result)
 
     assert :ok =
-             IntentLedger.Runtime.apply_queue_action(
+             IntentLedger.Runtime.QueueLifecycle.apply_queue_action(
                TestIntents,
                IntentLedger.FakeRepo,
                lease_for(intent),

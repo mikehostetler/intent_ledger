@@ -46,7 +46,7 @@ defmodule IntentLedger.Handler do
       @doc false
       @impl Bedrock.JobQueue.Job
       def perform(queue_payload, job_meta),
-        do: IntentLedger.Runtime.perform(__MODULE__, queue_payload, job_meta)
+        do: IntentLedger.Runtime.Execution.perform(__MODULE__, queue_payload, job_meta)
 
       @doc false
       @impl Bedrock.JobQueue.Job

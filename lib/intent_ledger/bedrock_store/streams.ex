@@ -2,8 +2,8 @@ defmodule IntentLedger.BedrockStore.Streams do
   @moduledoc false
 
   alias IntentLedger.BedrockStore
-  alias IntentLedger.BedrockStore.{Keyspaces, Options, Outbox}
-  alias IntentLedger.{Intent, ReplayEntry, Signal, Time}
+  alias IntentLedger.BedrockStore.{Codec, Keyspaces, Outbox}
+  alias IntentLedger.{Intent, ReplayEntry, Signal}
 
   @type stream_source :: :ledger | :outbox | {:intent, String.t()}
 
@@ -61,8 +61,8 @@ defmodule IntentLedger.BedrockStore.Streams do
 
   def replay_entries(ledger, source, opts) do
     with {:ok, stream} <- stream_name(source),
-         {:ok, cursor} <- Options.non_negative_integer(opts, :cursor, 0),
-         {:ok, limit} <- Options.positive_integer(opts, :limit, 100) do
+         {:ok, cursor} <- non_negative_integer(opts, :cursor, 0),
+         {:ok, limit} <- positive_integer(opts, :limit, 100) do
       BedrockStore.transact(ledger, fn repo, root ->
         keyspace = Keyspaces.stream(root, stream)
 
@@ -70,7 +70,7 @@ defmodule IntentLedger.BedrockStore.Streams do
           keyspace
           |> Keyspaces.range_from_cursor(cursor)
           |> repo.get_range(limit: limit)
-          |> Stream.map(fn {_key, value} -> Keyspaces.decode(value) end)
+          |> Stream.map(fn {_key, value} -> Codec.decode(value) end)
           |> Stream.map(&entry_from_stream/1)
           |> Enum.to_list()
 
@@ -84,7 +84,7 @@ defmodule IntentLedger.BedrockStore.Streams do
   def head(repo, root, stream) do
     case repo.get(Keyspaces.stream_version(root), stream) do
       nil -> 0
-      value -> Keyspaces.decode(value)
+      value -> Codec.decode(value)
     end
   end
 
@@ -98,7 +98,7 @@ defmodule IntentLedger.BedrockStore.Streams do
     repo.put(
       streams,
       cursor,
-      Keyspaces.encode(%{stream: stream, cursor: cursor, signal: signal, recorded_at: Time.utc_now()})
+      Codec.encode(%{stream: stream, cursor: cursor, signal: signal, recorded_at: DateTime.utc_now()})
     )
 
     cursor
@@ -108,16 +108,36 @@ defmodule IntentLedger.BedrockStore.Streams do
     next =
       case repo.get(keyspace, key) do
         nil -> 1
-        value -> Keyspaces.decode(value) + 1
+        value -> Codec.decode(value) + 1
       end
 
-    repo.put(keyspace, key, Keyspaces.encode(next))
+    repo.put(keyspace, key, Codec.encode(next))
     next
   end
 
   defp stream_name(:ledger), do: {:ok, "ledger"}
   defp stream_name({:intent, intent_id}) when is_binary(intent_id), do: {:ok, "intent:#{intent_id}"}
   defp stream_name(source), do: {:error, {:unsupported_replay_source, source}}
+
+  defp non_negative_integer(opts, key, default) do
+    value = Keyword.get(opts, key, default)
+
+    if is_integer(value) and value >= 0 do
+      {:ok, value}
+    else
+      {:error, {:invalid_option, key, value}}
+    end
+  end
+
+  defp positive_integer(opts, key, default) do
+    value = Keyword.get(opts, key, default)
+
+    if is_integer(value) and value > 0 do
+      {:ok, value}
+    else
+      {:error, {:invalid_option, key, value}}
+    end
+  end
 
   defp entry_from_stream(entry) do
     ReplayEntry.new(%{

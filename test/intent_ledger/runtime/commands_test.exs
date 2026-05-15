@@ -16,7 +16,7 @@ defmodule IntentLedger.Runtime.CommandsTest do
     assert {:ok, ^intent} = TestIntents.fetch(intent.id)
     assert {:ok, [signal]} = TestIntents.history(intent.id)
     assert signal.type == "intent.enqueued"
-    assert {:ok, [%{cursor: 1, signal: ^signal}]} = TestIntents.inspect(:outbox)
+    assert {:ok, [%{cursor: 1, signal: ^signal}]} = TestIntents.view(:outbox)
 
     assert {:ok, %{"tenant:acme" => %{pending_count: 1, processing_count: 0}}} =
              TestIntents.stats(queue: "tenant:acme")

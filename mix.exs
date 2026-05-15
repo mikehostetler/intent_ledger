@@ -60,8 +60,10 @@ defmodule IntentLedger.MixProject do
         "test.fast": :test,
         "test.integration": :test,
         "test.bedrock": :test,
+        "test.bedrock_restart": :test,
         "test.multi_node": :test,
-        "test.chaos": :test
+        "test.chaos": :test,
+        "test.job_queue_boundary": :test
       ]
     ]
   end
@@ -78,7 +80,6 @@ defmodule IntentLedger.MixProject do
   defp deps do
     [
       {:jido_signal, "~> 2.1"},
-      {:jason, "~> 1.4"},
       {:splode, "~> 0.3.0"},
       {:telemetry, "~> 1.0"},
       {:zoi, "~> 0.17.1"},
@@ -118,12 +119,16 @@ defmodule IntentLedger.MixProject do
     [
       setup: ["deps.get"],
       install_hooks: ["git_hooks.install"],
-      test: "test --exclude flaky --exclude integration --exclude bedrock --exclude multi_node --exclude chaos",
-      "test.fast": "test --exclude flaky --exclude integration --exclude bedrock --exclude multi_node --exclude chaos",
+      test:
+        "test --exclude flaky --exclude integration --exclude bedrock --exclude bedrock_restart --exclude multi_node --exclude chaos --exclude job_queue_boundary",
+      "test.fast":
+        "test --exclude flaky --exclude integration --exclude bedrock --exclude bedrock_restart --exclude multi_node --exclude chaos --exclude job_queue_boundary",
       "test.integration": "test --exclude flaky --only integration",
       "test.bedrock": "test --exclude flaky --only bedrock --exclude multi_node",
+      "test.bedrock_restart": "test --exclude flaky --only bedrock_restart",
       "test.multi_node": "test --exclude flaky --only multi_node",
       "test.chaos": "test --exclude flaky --only chaos",
+      "test.job_queue_boundary": "test --exclude flaky --only job_queue_boundary",
       q: ["quality"],
       quality: [
         "format --check-formatted",
@@ -157,7 +162,6 @@ defmodule IntentLedger.MixProject do
         ],
         Runtime: [
           IntentLedger.BedrockStore,
-          IntentLedger.Runtime,
           IntentLedger.Signal,
           IntentLedger.Telemetry
         ]

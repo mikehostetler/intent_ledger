@@ -2,15 +2,14 @@ defmodule IntentLedger.BedrockStore.Projections do
   @moduledoc false
 
   alias IntentLedger.BedrockStore
-  alias IntentLedger.BedrockStore.{Keyspaces, Options, Streams}
-  alias IntentLedger.Time
+  alias IntentLedger.BedrockStore.{Codec, Keyspaces, Streams}
 
   @type projection_ref :: module() | String.t()
 
   @spec projections(module(), keyword()) :: {:ok, [map()]} | {:error, term()}
   @doc false
   def projections(ledger, opts \\ []) do
-    with {:ok, limit} <- Options.positive_integer(opts, :limit, 100) do
+    with {:ok, limit} <- positive_integer(opts, :limit, 100) do
       BedrockStore.transact(ledger, fn repo, root ->
         head = Streams.head(repo, root, "ledger")
 
@@ -18,7 +17,7 @@ defmodule IntentLedger.BedrockStore.Projections do
           root
           |> Keyspaces.projection_offset()
           |> repo.get_range(limit: limit)
-          |> Stream.map(fn {_key, value} -> Keyspaces.decode(value) end)
+          |> Stream.map(fn {_key, value} -> Codec.decode(value) end)
           |> Stream.map(&Map.merge(&1, %{head_cursor: head, lag: max(head - &1.cursor, 0)}))
           |> Enum.to_list()
 
@@ -34,7 +33,7 @@ defmodule IntentLedger.BedrockStore.Projections do
       with {:ok, key} <- projection_key(projection) do
         case repo.get(Keyspaces.projection_offset(root), key) do
           nil -> {:ok, nil}
-          value -> {:ok, Keyspaces.decode(value).cursor}
+          value -> {:ok, Codec.decode(value).cursor}
         end
       end
     end)
@@ -50,8 +49,15 @@ defmodule IntentLedger.BedrockStore.Projections do
         head = Streams.head(repo, root, "ledger")
         force? = Keyword.get(opts, :force, false)
         allow_ahead? = Keyword.get(opts, :allow_ahead, false)
+        repair? = Keyword.get(opts, :repair, false)
 
         cond do
+          force? and not repair? ->
+            {:error, {:repair_option_required, :force}}
+
+          allow_ahead? and not repair? ->
+            {:error, {:repair_option_required, :allow_ahead}}
+
           cursor < current and not force? ->
             {:error, {:stale_projection_cursor, key, cursor, current}}
 
@@ -62,7 +68,7 @@ defmodule IntentLedger.BedrockStore.Projections do
             repo.put(
               Keyspaces.projection_offset(root),
               key,
-              Keyspaces.encode(%{projection: key, cursor: cursor, updated_at: Time.utc_now()})
+              Codec.encode(%{projection: key, cursor: cursor, updated_at: DateTime.utc_now()})
             )
 
             :ok
@@ -76,7 +82,7 @@ defmodule IntentLedger.BedrockStore.Projections do
   def read_cursor(repo, root, key) do
     case repo.get(Keyspaces.projection_offset(root), key) do
       nil -> nil
-      value -> Keyspaces.decode(value).cursor
+      value -> Codec.decode(value).cursor
     end
   end
 
@@ -90,4 +96,14 @@ defmodule IntentLedger.BedrockStore.Projections do
 
   defp validate_cursor(cursor) when is_integer(cursor) and cursor >= 0, do: :ok
   defp validate_cursor(cursor), do: {:error, {:invalid_projection_cursor, cursor}}
+
+  defp positive_integer(opts, key, default) do
+    value = Keyword.get(opts, key, default)
+
+    if is_integer(value) and value > 0 do
+      {:ok, value}
+    else
+      {:error, {:invalid_option, key, value}}
+    end
+  end
 end

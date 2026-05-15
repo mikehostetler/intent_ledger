@@ -124,7 +124,7 @@ defmodule IntentLedger.RepairTest do
              IntentLedger.FakeRepo.transact(fn ->
                queue_result = apply_queue_action(queue_root, lease, action)
 
-               IntentLedger.JobQueueHook.apply(
+               IntentLedger.Runtime.QueueLifecycle.apply(
                  IntentLedger.FakeRepo,
                  queue_root,
                  lease,

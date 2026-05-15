@@ -150,8 +150,7 @@ defmodule IntentLedger.Error do
   def from_reason({:missing_command_field, field}),
     do: invalid("Intent command signal is missing a required field", field: field)
 
-  def from_reason({:unsupported_inspection_view, view}),
-    do: invalid("Unsupported inspection view", field: :view, value: view)
+  def from_reason({:unsupported_view, view}), do: invalid("Unsupported view", field: :view, value: view)
 
   def from_reason({:unsupported_replay_source, source}),
     do: invalid("Unsupported replay source", field: :source, value: source)
@@ -201,6 +200,9 @@ defmodule IntentLedger.Error do
         consumer: consumer,
         head: head
       )
+
+  def from_reason({:repair_option_required, option}),
+    do: invalid("Repair option requires repair: true", field: option, value: true)
 
   def from_reason({:invalid_option, field, value}), do: invalid("Invalid option", field: field, value: value)
   def from_reason({:invalid_status, status}), do: invalid("Invalid Intent status", field: :status, value: status)

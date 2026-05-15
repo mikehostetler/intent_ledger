@@ -10,13 +10,13 @@ defmodule IntentLedger.ConfigTest do
     def __intent_handler__, do: %{topic: nil}
   end
 
-  test "normalizes intent definitions from supported shapes" do
+  test "normalizes canonical intent definitions" do
     intents =
-      Config.normalize_intents!([
-        {"invoice.send", SendInvoice},
-        {"invoice.fail", FailingIntent, queue: :critical, extra: true},
-        %{topic: "invoice.map", handler: GenericHandler, queue: "mapped"}
-      ])
+      Config.normalize_intents!(%{
+        "invoice.send" => [handler: SendInvoice],
+        "invoice.fail" => [handler: FailingIntent, queue: :critical, extra: true],
+        "invoice.map" => [handler: GenericHandler, queue: "mapped"]
+      })
 
     assert intents["invoice.send"].handler == SendInvoice
     assert intents["invoice.fail"].queue == "critical"
@@ -34,17 +34,17 @@ defmodule IntentLedger.ConfigTest do
 
     queues =
       Config.normalize_queues!(
-        [
-          :default,
-          {"bulk", [concurrency: 10]},
-          %{"id" => "json", "priority" => :high}
-        ],
+        %{
+          :default => %{},
+          "bulk" => [concurrency: 10],
+          "json" => %{priority: :high}
+        },
         intents
       )
 
     assert Config.queue_ids(queues) == ["billing", "bulk", "default", "json"]
     assert queues["bulk"].concurrency == 10
-    assert queues["json"]["priority"] == :high
+    assert queues["json"].priority == :high
     assert Config.normalize_default_queue!(nil, queues) == "default"
     assert Config.normalize_default_queue!(:billing, queues) == "billing"
   end
@@ -59,9 +59,8 @@ defmodule IntentLedger.ConfigTest do
     assert_raise ArgumentError, "IntentLedger requires :intents", fn -> Config.normalize_intents!(nil) end
     assert_raise ArgumentError, "IntentLedger requires at least one intent", fn -> Config.normalize_intents!([]) end
     assert_raise ArgumentError, fn -> Config.normalize_intents!(:bad) end
-    assert_raise ArgumentError, fn -> Config.normalize_intents!([{"invoice.send", nil}]) end
-    assert_raise ArgumentError, fn -> Config.normalize_intents!([{"same", SendInvoice}, {"same", FailingIntent}]) end
-    assert_raise ArgumentError, fn -> Config.normalize_intents!([{"invoice.mismatch", SendInvoice}]) end
+    assert_raise ArgumentError, fn -> Config.normalize_intents!(%{"invoice.send" => nil}) end
+    assert_raise ArgumentError, fn -> Config.normalize_intents!(%{"invoice.mismatch" => [handler: SendInvoice]}) end
     assert_raise ArgumentError, fn -> Config.normalize_queues!(:bad) end
     assert_raise ArgumentError, fn -> Config.normalize_queues!([:default, "default"]) end
     assert_raise ArgumentError, fn -> Config.normalize_queues!([%{}]) end

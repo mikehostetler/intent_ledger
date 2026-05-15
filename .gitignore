@@ -18,6 +18,7 @@
 
 # Generated files
 /doc/
+/priv/bedrock.cluster
 erl_crash.dump
 
 # OS

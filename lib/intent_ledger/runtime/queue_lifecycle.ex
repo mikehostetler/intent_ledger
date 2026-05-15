@@ -2,7 +2,13 @@ defmodule IntentLedger.Runtime.QueueLifecycle do
   @moduledoc false
 
   alias Bedrock.JobQueue.Lease
-  alias IntentLedger.{BedrockStore, Intent}
+  alias IntentLedger.{BedrockStore, DurableTerm, Intent}
+
+  @spec apply(module(), term(), Lease.t(), term(), term(), term(), module()) :: :ok | {:error, term()}
+  @doc false
+  def apply(repo, _queue_root, %Lease{} = lease, action, handler_result, queue_result, ledger) do
+    apply_queue_action(ledger, repo, lease, action, handler_result, queue_result)
+  end
 
   @spec apply_queue_action(module(), module(), Lease.t(), term(), term(), term()) :: :ok | {:error, term()}
   @doc false
@@ -68,6 +74,8 @@ defmodule IntentLedger.Runtime.QueueLifecycle do
   defp ensure_queue_result({:error, reason}), do: {:error, reason}
 
   defp mark_completed(repo, root, ledger, intent, result) do
+    result = DurableTerm.summarize(result)
+
     BedrockStore.update_intent(
       repo,
       root,
@@ -82,6 +90,8 @@ defmodule IntentLedger.Runtime.QueueLifecycle do
   end
 
   defp mark_failed(repo, root, ledger, intent, reason) do
+    reason = DurableTerm.summarize(reason)
+
     BedrockStore.update_intent(
       repo,
       root,
@@ -102,6 +112,8 @@ defmodule IntentLedger.Runtime.QueueLifecycle do
   end
 
   defp mark_retry_scheduled(repo, root, ledger, intent, reason) do
+    reason = DurableTerm.summarize(reason)
+
     BedrockStore.update_intent(
       repo,
       root,
@@ -116,6 +128,8 @@ defmodule IntentLedger.Runtime.QueueLifecycle do
   end
 
   defp mark_discarded(repo, root, ledger, intent, reason) do
+    reason = DurableTerm.summarize(reason)
+
     BedrockStore.update_intent(repo, root, ledger, intent.id, :discarded, %{reason: reason}, fn intent, now ->
       %{intent | status: :discarded, error: reason, updated_at: now, completed_at: now}
     end)

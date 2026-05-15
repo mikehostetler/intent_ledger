@@ -6,7 +6,7 @@ queue mechanics.
 
 ```text
 MyApp.Intents
-  -> IntentLedger.Runtime
+  -> IntentLedger runtime modules
   -> IntentLedger.BedrockStore
   -> Bedrock.JobQueue.Store
   -> Bedrock

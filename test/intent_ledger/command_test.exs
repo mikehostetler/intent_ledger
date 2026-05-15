@@ -4,16 +4,26 @@ defmodule IntentLedger.CommandTest do
   alias IntentLedger.Command
 
   test "constructors normalize direct commands" do
-    assert {:ok, %Command{type: :enqueue, topic: "invoice.send", payload: %{id: 1}, opts: [key: "k"]}} =
+    assert {:ok, %Command{type: :enqueue, topic: "invoice.send", payload: %{id: 1}, opts: opts} = enqueue} =
              Command.enqueue("invoice.send", %{id: 1}, key: "k")
 
-    assert {:ok, %Command{type: :cancel, intent_id: "intent-1", reason: :done}} =
+    assert enqueue.ingress == :direct
+    assert enqueue.source == "direct"
+    assert is_binary(enqueue.command_id)
+    assert opts[:key] == "k"
+    assert opts[:metadata].command_id == enqueue.command_id
+    assert opts[:command_metadata].command_id == enqueue.command_id
+
+    assert {:ok, %Command{type: :cancel, intent_id: "intent-1", reason: :done, ingress: :direct}} =
              Command.cancel("intent-1", :done)
 
-    assert {:ok, %Command{type: :requeue, intent_id: "intent-1", opts: [reason: :manual]}} =
+    assert {:ok, %Command{type: :requeue, intent_id: "intent-1", opts: requeue_opts}} =
              Command.requeue("intent-1", reason: :manual)
 
-    assert {:ok, %Command{type: :mark_ambiguous, intent_id: "intent-1", reason: :manual_review}} =
+    assert requeue_opts[:reason] == :manual
+    assert requeue_opts[:command_metadata].command_ingress == :direct
+
+    assert {:ok, %Command{type: :mark_ambiguous, intent_id: "intent-1", reason: :manual_review, ingress: :direct}} =
              Command.mark_ambiguous("intent-1", :manual_review)
 
     assert is_map(Command.schema())
@@ -57,6 +67,9 @@ defmodule IntentLedger.CommandTest do
     assert opts[:scheduled_at] == "2026-05-14T12:00:00Z"
     assert opts[:metadata].existing == true
     assert opts[:metadata].command_signal_id == requeue_signal.id
+    assert opts[:metadata].command_id == requeue_signal.id
+    assert opts[:metadata].command_ingress == :signal
+    assert opts[:command_metadata].command_signal_source == requeue_signal.source
 
     assert {:ok, ambiguous_signal} =
              Jido.Signal.new("intent.command.mark_ambiguous", %{"intent_id" => "intent-1", "reason" => "manual"})

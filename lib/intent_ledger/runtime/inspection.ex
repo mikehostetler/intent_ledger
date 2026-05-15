@@ -92,15 +92,15 @@ defmodule IntentLedger.Runtime.Inspection do
     result
   end
 
-  @spec inspect(module(), atom(), keyword()) :: {:ok, term()} | {:error, term()}
+  @spec view(module(), atom(), keyword()) :: {:ok, term()} | {:error, term()}
   @doc false
-  def inspect(ledger, :queues, opts), do: stats(ledger, opts)
-  def inspect(ledger, :intents, opts), do: inspect_intents(ledger, opts)
-  def inspect(ledger, :retries, opts), do: inspect_intents(ledger, Keyword.put(opts, :status, :retry_scheduled))
-  def inspect(ledger, :ambiguous, opts), do: inspect_intents(ledger, Keyword.put(opts, :status, :ambiguous))
-  def inspect(ledger, :outbox, opts), do: BedrockStore.outbox(ledger, opts)
-  def inspect(ledger, :projections, opts), do: BedrockStore.projections(ledger, opts)
-  def inspect(_ledger, view, _opts), do: {:error, {:unsupported_inspection_view, view}}
+  def view(ledger, :queues, opts), do: stats(ledger, opts)
+  def view(ledger, :intents, opts), do: inspect_intents(ledger, opts)
+  def view(ledger, :retries, opts), do: inspect_intents(ledger, Keyword.put(opts, :status, :retry_scheduled))
+  def view(ledger, :ambiguous, opts), do: inspect_intents(ledger, Keyword.put(opts, :status, :ambiguous))
+  def view(ledger, :outbox, opts), do: BedrockStore.outbox(ledger, opts)
+  def view(ledger, :projections, opts), do: BedrockStore.projections(ledger, opts)
+  def view(_ledger, view, _opts), do: {:error, {:unsupported_view, view}}
 
   @spec stats(module(), keyword()) :: {:ok, map()} | {:error, term()}
   @doc false

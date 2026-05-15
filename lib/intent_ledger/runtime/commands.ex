@@ -1,11 +1,8 @@
 defmodule IntentLedger.Runtime.Commands do
   @moduledoc false
 
-  alias Bedrock.Keyspace
-  alias Bedrock.JobQueue.{Internal, Item, Store}
-  alias IntentLedger.{BedrockStore, Command, Config, Intent, Telemetry, Time}
-
-  @queue_neutralization_scan_limit 10_000
+  alias IntentLedger.{BedrockStore, Command, DurableTerm, Intent, Telemetry}
+  alias IntentLedger.Runtime.Queue
 
   @spec submit(module(), Jido.Signal.t(), keyword()) :: {:ok, Intent.t()} | {:error, term()}
   @doc false
@@ -29,42 +26,7 @@ defmodule IntentLedger.Runtime.Commands do
 
   @spec enqueue_many(module(), Enumerable.t(), keyword()) :: {:ok, [Intent.t()]} | {:error, term()}
   @doc false
-  def enqueue_many(ledger, entries, opts \\ []) do
-    start = System.monotonic_time()
-
-    result =
-      with {:ok, normalized} <- normalize_entries(ledger, entries, opts) do
-        BedrockStore.transact(ledger, fn repo, root ->
-          now = Time.utc_now()
-          queue_root = queue_root(ledger)
-
-          normalized
-          |> Enum.reduce_while({:ok, []}, fn attrs, {:ok, acc} ->
-            case Intent.new(attrs, now: now) do
-              {:ok, intent} ->
-                case BedrockStore.create_intent(ledger, repo, root, intent, now: now) do
-                  {:ok, created, :created} ->
-                    enqueue_queue_item(repo, queue_root, created, ledger, now)
-                    {:cont, {:ok, [created | acc]}}
-
-                  {:ok, existing, :existing} ->
-                    {:cont, {:ok, [existing | acc]}}
-                end
-
-              {:error, reason} ->
-                {:halt, {:error, reason}}
-            end
-          end)
-          |> case do
-            {:ok, intents} -> {:ok, Enum.reverse(intents)}
-            error -> error
-          end
-        end)
-      end
-
-    Telemetry.emit(:enqueue, result, start, ledger, [count: result_count(result)] ++ telemetry_metadata(opts))
-    result
-  end
+  defdelegate enqueue_many(ledger, entries, opts \\ []), to: IntentLedger.Runtime.Enqueue, as: :many
 
   @spec cancel(module(), String.t(), term(), keyword()) :: {:ok, Intent.t()} | {:error, term()}
   @doc false
@@ -93,7 +55,8 @@ defmodule IntentLedger.Runtime.Commands do
   @spec execute(module(), Command.t()) :: {:ok, Intent.t()} | {:error, term()}
   @doc false
   def execute(ledger, %Command{type: :enqueue, topic: topic, payload: payload, opts: opts}) do
-    with {:ok, [intent]} <- enqueue_many(ledger, [{topic, payload, opts}], command_outer_opts(opts)) do
+    with {:ok, [intent]} <-
+           IntentLedger.Runtime.Enqueue.many(ledger, [{topic, payload, opts}], command_outer_opts(opts)) do
       {:ok, intent}
     end
   end
@@ -108,7 +71,8 @@ defmodule IntentLedger.Runtime.Commands do
           if intent.status == :canceled do
             {:ok, intent}
           else
-            now = Time.utc_now()
+            now = DateTime.utc_now()
+            reason = DurableTerm.summarize(reason)
 
             next = %{
               intent
@@ -122,8 +86,7 @@ defmodule IntentLedger.Runtime.Commands do
 
             neutralization =
               repo
-              |> neutralize_pending_queue_item(queue_root(ledger), intent, opts)
-              |> neutralization_status()
+              |> Queue.neutralize_pending_item(ledger, intent, opts)
 
             BedrockStore.record_lifecycle(
               repo,
@@ -158,7 +121,8 @@ defmodule IntentLedger.Runtime.Commands do
         with {:ok, intent} <- BedrockStore.fetch(repo, root, intent_id),
              :ok <- ensure_configured_queue(ledger.__intent_ledger__(), intent.queue),
              :ok <- ensure_requeueable(intent) do
-          now = Time.utc_now()
+          now = DateTime.utc_now()
+          reason = opts |> Keyword.get(:reason, :manual_requeue) |> DurableTerm.summarize()
 
           next = %{
             intent
@@ -173,9 +137,7 @@ defmodule IntentLedger.Runtime.Commands do
 
           BedrockStore.put_intent(repo, root, next)
 
-          Store.enqueue(repo, queue_root(ledger), queue_item(next, ledger, now),
-            now: DateTime.to_unix(now, :millisecond)
-          )
+          Queue.enqueue_intent(repo, ledger, next, now)
 
           BedrockStore.record_lifecycle(
             repo,
@@ -183,7 +145,7 @@ defmodule IntentLedger.Runtime.Commands do
             ledger,
             next,
             :retry_scheduled,
-            command_data(%{reason: Keyword.get(opts, :reason, :manual_requeue)}, opts)
+            command_data(%{reason: reason}, opts)
           )
 
           {:ok, next}
@@ -211,15 +173,15 @@ defmodule IntentLedger.Runtime.Commands do
           if intent.status == :ambiguous do
             {:ok, intent}
           else
-            now = Time.utc_now()
+            now = DateTime.utc_now()
+            reason = DurableTerm.summarize(reason)
             next = %{intent | status: :ambiguous, error: reason, updated_at: now}
 
             BedrockStore.put_intent(repo, root, next)
 
             neutralization =
               repo
-              |> neutralize_pending_queue_item(queue_root(ledger), intent, opts)
-              |> neutralization_status()
+              |> Queue.neutralize_pending_item(ledger, intent, opts)
 
             BedrockStore.record_lifecycle(
               repo,
@@ -246,179 +208,9 @@ defmodule IntentLedger.Runtime.Commands do
     result
   end
 
-  defp normalize_entries(ledger, entries, opts) do
-    entries
-    |> Enum.reduce_while({:ok, []}, fn entry, {:ok, acc} ->
-      case normalize_entry(ledger, entry, opts) do
-        {:ok, attrs} -> {:cont, {:ok, [attrs | acc]}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-    |> case do
-      {:ok, attrs} -> {:ok, Enum.reverse(attrs)}
-      error -> error
-    end
-  end
-
-  defp normalize_entry(ledger, {topic, payload}, opts), do: normalize_entry(ledger, {topic, payload, []}, opts)
-
-  defp normalize_entry(ledger, {topic, payload, entry_opts}, opts) when is_list(entry_opts) do
-    with {:ok, topic} <- Config.normalize_topic(topic),
-         {:ok, intent_config} <- intent_for(ledger, topic),
-         attrs =
-           opts
-           |> Keyword.merge(entry_opts)
-           |> Map.new()
-           |> Map.merge(%{topic: topic, payload: payload}),
-         {:ok, attrs} <- put_configured_queue(ledger, intent_config, attrs) do
-      {:ok, attrs}
-    end
-  end
-
-  defp normalize_entry(ledger, %{topic: topic, payload: payload} = entry, opts) do
-    normalize_map_entry(ledger, entry, topic, payload, opts)
-  end
-
-  defp normalize_entry(ledger, %{"topic" => topic, "payload" => payload} = entry, opts) do
-    normalize_map_entry(ledger, entry, topic, payload, opts)
-  end
-
-  defp normalize_entry(_ledger, entry, _opts), do: {:error, {:invalid_entry, entry}}
-
-  defp normalize_map_entry(ledger, entry, topic, payload, opts) do
-    entry_opts = Keyword.merge(Map.get(entry, :opts, []) || [], Map.get(entry, "opts", []) || [])
-
-    attrs =
-      opts
-      |> Keyword.merge(entry_opts)
-      |> Map.new()
-      |> Map.merge(Map.drop(entry, [:topic, "topic", :payload, "payload", :opts, "opts"]))
-      |> Map.merge(%{topic: topic, payload: payload})
-
-    with {:ok, topic} <- Config.normalize_topic(topic),
-         {:ok, intent_config} <- intent_for(ledger, topic),
-         {:ok, attrs} <- put_configured_queue(ledger, intent_config, attrs) do
-      {:ok, %{attrs | topic: topic}}
-    end
-  end
-
-  defp put_configured_queue(ledger, intent_config, attrs) do
-    config = ledger.__intent_ledger__()
-
-    attrs
-    |> Map.get(:queue, Map.get(attrs, "queue", Map.get(intent_config, :queue, config.default_queue)))
-    |> Config.normalize_queue_id()
-    |> case do
-      {:ok, queue} ->
-        with :ok <- ensure_configured_queue(config, queue) do
-          {:ok, attrs |> Map.delete("queue") |> Map.put(:queue, queue)}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
   defp ensure_configured_queue(%{queues: queues}, queue) do
     if Map.has_key?(queues, queue), do: :ok, else: {:error, {:unknown_queue, queue}}
   end
-
-  defp intent_for(ledger, topic) do
-    case Map.fetch(ledger.__intent_ledger__().intents, topic) do
-      {:ok, intent_config} -> {:ok, intent_config}
-      :error -> {:error, {:unknown_topic, topic}}
-    end
-  end
-
-  defp enqueue_queue_item(repo, queue_root, intent, ledger, now) do
-    Store.enqueue(repo, queue_root, queue_item(intent, ledger, now), now: DateTime.to_unix(now, :millisecond))
-  end
-
-  defp queue_item(%Intent{} = intent, ledger, now) do
-    Item.new(intent.queue, intent.topic, queue_payload(ledger, intent.id),
-      id: intent.id,
-      priority: intent.priority,
-      max_retries: intent.max_attempts,
-      vesting_time: DateTime.to_unix(intent.scheduled_at || now, :millisecond),
-      now: DateTime.to_unix(now, :millisecond)
-    )
-  end
-
-  defp queue_payload(ledger, intent_id), do: :erlang.term_to_binary(%{ledger: ledger, intent_id: intent_id})
-
-  defp queue_root(ledger), do: Internal.root_keyspace(ledger.__intent_ledger__().job_queue)
-
-  defp neutralize_pending_queue_item(repo, queue_root, %Intent{} = intent, opts) do
-    keyspaces = Store.queue_keyspaces(queue_root, intent.queue)
-    limit = Keyword.get(opts, :queue_neutralization_scan_limit, @queue_neutralization_scan_limit)
-
-    case neutralize_known_pending_queue_item(repo, keyspaces, intent) do
-      :missing -> scan_pending_queue_item(repo, keyspaces, intent, limit)
-      status -> status
-    end
-  end
-
-  defp neutralize_known_pending_queue_item(repo, keyspaces, %Intent{} = intent) do
-    item_key = {intent.priority, DateTime.to_unix(intent.scheduled_at, :millisecond), intent.id}
-
-    case repo.get(keyspaces.items, item_key) do
-      nil ->
-        :missing
-
-      value ->
-        case :erlang.binary_to_term(value) do
-          %Item{id: id, lease_id: nil} when id == intent.id ->
-            repo.clear(keyspaces.items, item_key)
-            decrement_pending_stat(repo, keyspaces)
-            :removed
-
-          %Item{id: id} when id == intent.id ->
-            :leased
-
-          _other ->
-            :missing
-        end
-    end
-  end
-
-  defp scan_pending_queue_item(repo, keyspaces, %Intent{} = intent, limit) do
-    entries =
-      keyspaces.items
-      |> repo.get_range(limit: limit + 1)
-      |> Enum.to_list()
-
-    entries
-    |> Enum.take(limit)
-    |> Enum.find_value(:missing, fn {item_key, value} ->
-      case :erlang.binary_to_term(value) do
-        %Item{id: id, lease_id: nil} when id == intent.id ->
-          repo.clear(keyspaces.items, item_key)
-          decrement_pending_stat(repo, keyspaces)
-          :removed
-
-        %Item{id: id} when id == intent.id ->
-          :leased
-
-        _other ->
-          false
-      end
-    end)
-    |> case do
-      :missing when length(entries) > limit -> :unknown
-      status -> status
-    end
-  end
-
-  defp decrement_pending_stat(repo, keyspaces) do
-    keyspaces.stats
-    |> Keyspace.pack("pending")
-    |> repo.add(<<-1::64-signed-little>>)
-  end
-
-  defp neutralization_status(:removed), do: :removed
-  defp neutralization_status(:leased), do: :leased
-  defp neutralization_status(:missing), do: :missing
-  defp neutralization_status(:unknown), do: :unknown
 
   defp ensure_requeueable(%Intent{status: status}) when status in [:failed, :discarded], do: :ok
   defp ensure_requeueable(%Intent{status: status}), do: {:error, {:not_requeueable, status}}
@@ -448,12 +240,15 @@ defmodule IntentLedger.Runtime.Commands do
   end
 
   defp command_outer_opts(opts) do
-    case Keyword.fetch(opts, :command_metadata) do
-      {:ok, command_metadata} -> [command_metadata: command_metadata]
-      :error -> []
-    end
+    opts
+    |> Keyword.take([:retry_limit, :timeout_in_ms, :transaction_system_layout])
+    |> maybe_put_command_metadata(opts)
   end
 
-  defp result_count({:ok, values}) when is_list(values), do: length(values)
-  defp result_count(_result), do: 0
+  defp maybe_put_command_metadata(outer_opts, opts) do
+    case Keyword.fetch(opts, :command_metadata) do
+      {:ok, command_metadata} -> Keyword.put(outer_opts, :command_metadata, command_metadata)
+      :error -> outer_opts
+    end
+  end
 end

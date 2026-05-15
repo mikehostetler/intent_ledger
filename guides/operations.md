@@ -16,13 +16,13 @@ MyApp.Intents.outbox_cursor("webhook-dispatcher")
 MyApp.Intents.ack_outbox("webhook-dispatcher", cursor)
 MyApp.Intents.projection_cursor(MyApp.IntentStatusProjection)
 MyApp.Intents.put_projection_cursor(MyApp.IntentStatusProjection, cursor)
-MyApp.Intents.inspect(:queues)
-MyApp.Intents.inspect(:queues, queue: "default")
-MyApp.Intents.inspect(:intents, status: :enqueued)
-MyApp.Intents.inspect(:retries)
-MyApp.Intents.inspect(:ambiguous)
-MyApp.Intents.inspect(:outbox, cursor: 0, limit: 100)
-MyApp.Intents.inspect(:projections)
+MyApp.Intents.view(:queues)
+MyApp.Intents.view(:queues, queue: "default")
+MyApp.Intents.view(:intents, status: :enqueued)
+MyApp.Intents.view(:retries)
+MyApp.Intents.view(:ambiguous)
+MyApp.Intents.view(:outbox, cursor: 0, limit: 100)
+MyApp.Intents.view(:projections)
 MyApp.Intents.stats()
 MyApp.Intents.stats(queue: "default")
 MyApp.Intents.health()
@@ -62,21 +62,23 @@ by the ledger instance. With `:queue`, it returns one configured queue.
 
 ## Inspection
 
-`inspect/2` is view-based and intended for operator-facing dashboards,
+`view/2` is view-based and intended for operator-facing dashboards,
 diagnostics, and repair tooling:
 
 ```elixir
-{:ok, intents} = MyApp.Intents.inspect(:intents, limit: 100)
-{:ok, retrying} = MyApp.Intents.inspect(:retries)
-{:ok, ambiguous} = MyApp.Intents.inspect(:ambiguous)
-{:ok, outbox} = MyApp.Intents.inspect(:outbox, cursor: 0, limit: 100)
-{:ok, cursors} = MyApp.Intents.inspect(:projections)
+{:ok, intents} = MyApp.Intents.view(:intents, limit: 100)
+{:ok, retrying} = MyApp.Intents.view(:retries)
+{:ok, ambiguous} = MyApp.Intents.view(:ambiguous)
+{:ok, outbox} = MyApp.Intents.view(:outbox, cursor: 0, limit: 100)
+{:ok, cursors} = MyApp.Intents.view(:projections)
 ```
 
 `:intents` accepts optional `:queue`, `:topic`, `:status`, and `:limit`
 filters. `:retries` is the `:retry_scheduled` Intent view. `:ambiguous` is the
 manual reconciliation view. `:projections` returns durable projection cursor
 records written by `put_projection_cursor/3`, including ledger head and lag.
+Cursor repair flags such as `force: true` and `allow_ahead: true` require
+`repair: true`.
 
 ## Lifecycle Replay
 

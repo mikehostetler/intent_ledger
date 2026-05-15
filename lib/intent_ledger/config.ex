@@ -43,12 +43,6 @@ defmodule IntentLedger.Config do
     |> build_intent_map()
   end
 
-  def normalize_intents!(intents) when is_list(intents) do
-    intents
-    |> Enum.map(&normalize_intent_definition!/1)
-    |> build_intent_map()
-  end
-
   def normalize_intents!(intents) do
     raise ArgumentError, "invalid IntentLedger intents config: #{inspect(intents)}"
   end
@@ -134,9 +128,6 @@ defmodule IntentLedger.Config do
     raise ArgumentError, "invalid IntentLedger queues config: #{inspect(queues)}"
   end
 
-  defp normalize_queue_definition!(%{id: id} = attrs), do: normalize_queue_map!(id, attrs)
-  defp normalize_queue_definition!(%{"id" => id} = attrs), do: normalize_queue_map!(id, attrs)
-
   defp normalize_queue_definition!({id, attrs}) when is_list(attrs) or is_map(attrs) do
     normalize_queue_map!(id, attrs)
   end
@@ -162,22 +153,8 @@ defmodule IntentLedger.Config do
     end
   end
 
-  defp normalize_intent_definition!(%{topic: topic} = attrs), do: normalize_intent_map!(topic, attrs)
-  defp normalize_intent_definition!(%{"topic" => topic} = attrs), do: normalize_intent_map!(topic, attrs)
-
-  defp normalize_intent_definition!({topic, handler}) when is_atom(handler) and not is_nil(handler),
-    do: normalize_intent_map!(topic, %{handler: handler})
-
   defp normalize_intent_definition!({topic, attrs}) when is_list(attrs) or is_map(attrs) do
     normalize_intent_map!(topic, attrs)
-  end
-
-  defp normalize_intent_definition!({topic, handler, attrs})
-       when is_atom(handler) and not is_nil(handler) and (is_list(attrs) or is_map(attrs)) do
-    attrs
-    |> Map.new()
-    |> Map.put(:handler, handler)
-    |> then(&normalize_intent_map!(topic, &1))
   end
 
   defp normalize_intent_definition!(definition) do

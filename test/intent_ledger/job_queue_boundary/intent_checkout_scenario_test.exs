@@ -1,7 +1,8 @@
 defmodule IntentLedger.IntentCheckoutScenarioTest do
   use ExUnit.Case, async: false
 
-  @moduletag :integration
+  @moduletag :bedrock
+  @moduletag :job_queue_boundary
 
   defmodule ReserveInventory do
     use IntentLedger.Handler,
@@ -19,7 +20,7 @@ defmodule IntentLedger.IntentCheckoutScenarioTest do
   defmodule WorkflowIntents do
     use IntentLedger,
       otp_app: :intent_ledger,
-      repo: IntentLedger.FakeRepo,
+      repo: IntentLedger.RealBedrock.Repo,
       intents: %{
         "inventory.reserve" => [handler: ReserveInventory, queue: "workflow"]
       }
@@ -33,40 +34,47 @@ defmodule IntentLedger.IntentCheckoutScenarioTest do
     def checkout_next(ledger, queue_id, opts \\ []) do
       holder = Keyword.get(opts, :holder, "workflow-system")
       lease_ms = Keyword.get(opts, :lease_ms, 30_000)
+      repo = ledger.__intent_ledger__().repo
       queue_root = Internal.root_keyspace(ledger.__intent_ledger__().job_queue)
 
-      case Store.peek(IntentLedger.FakeRepo, queue_root, queue_id, limit: 1) do
-        [] ->
-          {:error, :empty}
+      with {:ok, item, lease, pointer} <-
+             repo.transact(fn ->
+               case Store.peek(repo, queue_root, queue_id, limit: 1) do
+                 [] ->
+                   {:error, :empty}
 
-        [item] ->
-          with {:ok, pointer} <- decode_pointer(item, ledger),
-               {:ok, lease} <- Store.obtain_lease(IntentLedger.FakeRepo, queue_root, item, holder, lease_ms),
-               {:ok, intent} <- ledger.fetch(pointer.intent_id) do
-            {:ok,
-             %{
-               intent: intent,
-               item: item,
-               lease: lease,
-               ledger: ledger,
-               pointer: pointer,
-               queue_root: queue_root,
-               workers: ledger.__intent_ledger__().handlers
-             }}
-          end
+                 [item] ->
+                   with {:ok, pointer} <- decode_pointer(item, ledger),
+                        {:ok, lease} <- Store.obtain_lease(repo, queue_root, item, holder, lease_ms) do
+                     {:ok, item, lease, pointer}
+                   end
+               end
+             end),
+           {:ok, intent} <- ledger.fetch(pointer.intent_id) do
+        {:ok,
+         %{
+           intent: intent,
+           item: item,
+           lease: lease,
+           ledger: ledger,
+           pointer: pointer,
+           repo: repo,
+           queue_root: queue_root,
+           workers: ledger.__intent_ledger__().handlers
+         }}
       end
     end
 
     def perform(%{item: item, workers: workers}), do: Worker.execute(item, workers)
 
-    def commit(%{lease: lease, ledger: ledger, queue_root: queue_root}, result) do
+    def commit(%{lease: lease, ledger: ledger, queue_root: queue_root, repo: repo}, result) do
       action = action_for(result)
 
-      IntentLedger.FakeRepo.transact(fn ->
-        queue_result = apply_queue_action(queue_root, lease, action)
+      repo.transact(fn ->
+        queue_result = apply_queue_action(repo, queue_root, lease, action)
 
-        IntentLedger.JobQueueHook.apply(
-          IntentLedger.FakeRepo,
+        IntentLedger.Runtime.QueueLifecycle.apply(
+          repo,
           queue_root,
           lease,
           action,
@@ -90,13 +98,13 @@ defmodule IntentLedger.IntentCheckoutScenarioTest do
     defp action_for({:error, _reason}), do: :requeue
     defp action_for({:snooze, delay_ms}), do: {:snooze, delay_ms}
 
-    defp apply_queue_action(queue_root, lease, :complete), do: Store.complete(IntentLedger.FakeRepo, queue_root, lease)
+    defp apply_queue_action(repo, queue_root, lease, :complete), do: Store.complete(repo, queue_root, lease)
 
-    defp apply_queue_action(queue_root, lease, :requeue),
-      do: Store.requeue(IntentLedger.FakeRepo, queue_root, lease, backoff_fn: fn _attempt -> 60_000 end)
+    defp apply_queue_action(repo, queue_root, lease, :requeue),
+      do: Store.requeue(repo, queue_root, lease, backoff_fn: fn _attempt -> 60_000 end)
 
-    defp apply_queue_action(queue_root, lease, {:snooze, delay_ms}) do
-      Store.requeue(IntentLedger.FakeRepo, queue_root, lease,
+    defp apply_queue_action(repo, queue_root, lease, {:snooze, delay_ms}) do
+      Store.requeue(repo, queue_root, lease,
         base_delay: delay_ms,
         max_delay: delay_ms
       )
@@ -104,8 +112,7 @@ defmodule IntentLedger.IntentCheckoutScenarioTest do
   end
 
   setup do
-    IntentLedger.FakeRepo.reset!()
-    :ok
+    IntentLedger.RealBedrock.setup!()
   end
 
   @tag :intent_checkout

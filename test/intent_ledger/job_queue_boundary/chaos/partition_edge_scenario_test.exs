@@ -2,6 +2,7 @@ defmodule IntentLedger.Chaos.PartitionEdgeScenarioTest do
   use ExUnit.Case, async: false
 
   @moduletag :chaos
+  @moduletag :job_queue_boundary
 
   alias Bedrock.JobQueue.Consumer.Worker
   alias Bedrock.JobQueue.Internal
@@ -20,13 +21,12 @@ defmodule IntentLedger.Chaos.PartitionEdgeScenarioTest do
   defmodule ChaosIntents do
     use IntentLedger,
       otp_app: :intent_ledger,
-      repo: IntentLedger.FakeRepo,
-      intents: %{"payment.charge" => ChargePayment}
+      repo: IntentLedger.RealBedrock.Repo,
+      intents: %{"payment.charge" => [handler: ChargePayment]}
   end
 
   setup do
-    IntentLedger.FakeRepo.reset!()
-    :ok
+    IntentLedger.RealBedrock.setup!()
   end
 
   test "signal command redelivery across isolated subscribers converges to one visible Intent" do
@@ -78,11 +78,11 @@ defmodule IntentLedger.Chaos.PartitionEdgeScenarioTest do
     assert :ok = complete_with_hook(lease, :complete, first_result)
 
     assert {:error, :lease_not_found} =
-             IntentLedger.FakeRepo.transact(fn ->
-               queue_result = Store.complete(IntentLedger.FakeRepo, queue_root(), lease)
+             repo().transact(fn ->
+               queue_result = Store.complete(repo(), queue_root(), lease)
 
-               IntentLedger.JobQueueHook.apply(
-                 IntentLedger.FakeRepo,
+               IntentLedger.Runtime.QueueLifecycle.apply(
+                 repo(),
                  queue_root(),
                  lease,
                  :complete,
@@ -103,7 +103,7 @@ defmodule IntentLedger.Chaos.PartitionEdgeScenarioTest do
       "intent.completed"
     ])
 
-    assert {:ok, []} = ChaosIntents.inspect(:intents, status: :failed)
+    assert {:ok, []} = ChaosIntents.view(:intents, status: :failed)
 
     assert {:ok, %{"default" => %{pending_count: 0, processing_count: 0}}} =
              ChaosIntents.stats(queue: "default")
@@ -143,19 +143,19 @@ defmodule IntentLedger.Chaos.PartitionEdgeScenarioTest do
   defp queue_root, do: Internal.root_keyspace(ChaosIntents.JobQueue)
 
   defp visible_jobs do
-    Store.peek(IntentLedger.FakeRepo, queue_root(), "default", limit: 1)
+    repo().transact(fn -> Store.peek(repo(), queue_root(), "default", limit: 1) end)
   end
 
   defp obtain_lease(item, holder) do
-    Store.obtain_lease(IntentLedger.FakeRepo, queue_root(), item, holder, 30_000)
+    repo().transact(fn -> Store.obtain_lease(repo(), queue_root(), item, holder, 30_000) end)
   end
 
   defp complete_with_hook(lease, action, handler_result) do
-    IntentLedger.FakeRepo.transact(fn ->
-      queue_result = Store.complete(IntentLedger.FakeRepo, queue_root(), lease)
+    repo().transact(fn ->
+      queue_result = Store.complete(repo(), queue_root(), lease)
 
-      IntentLedger.JobQueueHook.apply(
-        IntentLedger.FakeRepo,
+      IntentLedger.Runtime.QueueLifecycle.apply(
+        repo(),
         queue_root(),
         lease,
         action,
@@ -167,6 +167,8 @@ defmodule IntentLedger.Chaos.PartitionEdgeScenarioTest do
   end
 
   defp workers, do: %{"payment.charge" => ChargePayment}
+
+  defp repo, do: IntentLedger.RealBedrock.Repo
 
   defp assert_history(intent_id, expected_types) do
     assert {:ok, signals} = ChaosIntents.history(intent_id)

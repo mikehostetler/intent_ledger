@@ -7,7 +7,6 @@ defmodule IntentLedger.Intent do
   only a minimal pointer to the Intent ID.
   """
 
-  alias IntentLedger.Time
   alias Jido.Signal.ID
 
   @type status ::
@@ -60,7 +59,6 @@ defmodule IntentLedger.Intent do
 
   @type t :: unquote(Zoi.type_spec(@schema))
   @enforce_keys Zoi.Struct.enforce_keys(@schema)
-  @derive Jason.Encoder
   defstruct Zoi.Struct.struct_fields(@schema)
 
   @fields MapSet.new([
@@ -102,7 +100,7 @@ defmodule IntentLedger.Intent do
   def new(attrs, opts) when is_list(attrs), do: attrs |> Map.new() |> new(opts)
 
   def new(attrs, opts) when is_map(attrs) do
-    now = Keyword.get(opts, :now, Time.utc_now())
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
     attrs = normalize_keys(attrs)
 
     with {:ok, topic} <- normalize_string(Map.get(attrs, :topic), :topic),
@@ -110,7 +108,7 @@ defmodule IntentLedger.Intent do
          {:ok, key} <- normalize_optional_string(Map.get(attrs, :key), :key),
          {:ok, context} <- normalize_map(Map.get(attrs, :context, %{}), :context),
          {:ok, metadata} <- normalize_map(Map.get(attrs, :metadata, %{}), :metadata),
-         {:ok, scheduled_at} <- Time.normalize(Map.get(attrs, :scheduled_at), now),
+         {:ok, scheduled_at} <- normalize_scheduled_at(Map.get(attrs, :scheduled_at), now),
          {:ok, priority} <- normalize_non_negative_integer(Map.get(attrs, :priority, 100), :priority),
          {:ok, max_attempts} <- normalize_positive_integer(Map.get(attrs, :max_attempts, 3), :max_attempts),
          {:ok, depth} <- normalize_non_negative_integer(lineage_attr(attrs, metadata, :depth, 0), :depth),
@@ -222,6 +220,18 @@ defmodule IntentLedger.Intent do
 
   defp normalize_map(value, _field) when is_map(value), do: {:ok, value}
   defp normalize_map(value, field), do: {:error, {:invalid_map, field, value}}
+
+  defp normalize_scheduled_at(nil, %DateTime{} = default), do: {:ok, default}
+  defp normalize_scheduled_at(%DateTime{} = datetime, _default), do: {:ok, datetime}
+
+  defp normalize_scheduled_at(value, _default) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> {:ok, datetime}
+      {:error, reason} -> {:error, {:invalid_datetime, value, reason}}
+    end
+  end
+
+  defp normalize_scheduled_at(value, _default), do: {:error, {:invalid_datetime, value}}
 
   defp normalize_positive_integer(value, _field) when is_integer(value) and value > 0, do: {:ok, value}
   defp normalize_positive_integer(value, field), do: {:error, {:invalid_positive_integer, field, value}}

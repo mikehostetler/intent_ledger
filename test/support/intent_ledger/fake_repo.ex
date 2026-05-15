@@ -45,6 +45,9 @@ defmodule IntentLedger.FakeRepo do
             exception ->
               {{:raised, exception, __STACKTRACE__}, state}
           catch
+            {__MODULE__, :rollback, reason} ->
+              {{:rollback, reason}, state}
+
             kind, reason ->
               {{:caught, kind, reason}, state}
           after
@@ -53,6 +56,7 @@ defmodule IntentLedger.FakeRepo do
         end)
         |> case do
           {:ok, result} -> result
+          {:rollback, reason} -> {:error, reason}
           {:raised, exception, stacktrace} -> reraise exception, stacktrace
           {:caught, kind, reason} -> :erlang.raise(kind, reason, [])
         end
@@ -61,6 +65,8 @@ defmodule IntentLedger.FakeRepo do
         fun.()
     end
   end
+
+  def rollback(reason), do: throw({__MODULE__, :rollback, reason})
 
   def get(%Keyspace{} = keyspace, key), do: keyspace |> Keyspace.pack(key) |> get()
 

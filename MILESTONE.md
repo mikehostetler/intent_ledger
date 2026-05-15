@@ -1,6 +1,6 @@
 # Intent Ledger Bedrock Job Queue Milestone
 
-Updated: 2026-05-14
+Updated: 2026-05-15
 
 This milestone replaces the earlier Store V1/Postgres/shard plan. The package
 is moving to a simpler release architecture:
@@ -123,7 +123,7 @@ Applications enqueue and inspect Intents:
 {:ok, intent} = MyApp.Intents.fetch(intent.id)
 {:ok, signals} = MyApp.Intents.history(intent.id)
 {:ok, window} = MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
-{:ok, queues} = MyApp.Intents.inspect(:queues)
+{:ok, queues} = MyApp.Intents.view(:queues)
 ```
 
 The intended public functions are:
@@ -147,7 +147,7 @@ MyApp.Intents.cancel(intent_id, reason, opts)
 MyApp.Intents.requeue(intent_id, opts)
 MyApp.Intents.mark_ambiguous(intent_id, reason, opts)
 
-MyApp.Intents.inspect(view, opts)
+MyApp.Intents.view(view, opts)
 MyApp.Intents.stats(opts)
 MyApp.Intents.health(opts)
 ```
@@ -326,7 +326,7 @@ fail together.
 Implemented upstream/fork change:
 
 ```elixir
-on_action: {IntentLedger.JobQueueHook, :apply}
+on_action: {IntentLedger.Runtime.QueueLifecycle, :apply, [MyApp.Intents]}
 ```
 
 The hook runs inside the same Bedrock transaction that completes,
@@ -373,12 +373,12 @@ Projection responsibilities:
 Inspection is view-based:
 
 ```elixir
-MyApp.Intents.inspect(:queues)
-MyApp.Intents.inspect(:intents)
-MyApp.Intents.inspect(:retries)
-MyApp.Intents.inspect(:ambiguous)
-MyApp.Intents.inspect(:outbox)
-MyApp.Intents.inspect(:projections)
+MyApp.Intents.view(:queues)
+MyApp.Intents.view(:intents)
+MyApp.Intents.view(:retries)
+MyApp.Intents.view(:ambiguous)
+MyApp.Intents.view(:outbox)
+MyApp.Intents.view(:projections)
 ```
 
 ## Current Implementation Status

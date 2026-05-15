@@ -2,8 +2,7 @@ defmodule IntentLedger.BedrockStore.Outbox do
   @moduledoc false
 
   alias IntentLedger.BedrockStore
-  alias IntentLedger.BedrockStore.{Keyspaces, Options}
-  alias IntentLedger.Time
+  alias IntentLedger.BedrockStore.{Codec, Keyspaces}
 
   @type consumer_ref :: module() | String.t()
 
@@ -15,7 +14,7 @@ defmodule IntentLedger.BedrockStore.Outbox do
     repo.put(
       Keyspaces.outbox(root),
       cursor,
-      Keyspaces.encode(%{cursor: cursor, signal: signal, recorded_at: Time.utc_now()})
+      Codec.encode(%{cursor: cursor, signal: signal, recorded_at: DateTime.utc_now()})
     )
 
     cursor
@@ -24,15 +23,15 @@ defmodule IntentLedger.BedrockStore.Outbox do
   @spec outbox(module(), keyword()) :: {:ok, [map()]} | {:error, term()}
   @doc false
   def outbox(ledger, opts \\ []) do
-    with {:ok, cursor} <- Options.non_negative_integer(opts, :cursor, 0),
-         {:ok, limit} <- Options.positive_integer(opts, :limit, 100) do
+    with {:ok, cursor} <- non_negative_integer(opts, :cursor, 0),
+         {:ok, limit} <- positive_integer(opts, :limit, 100) do
       BedrockStore.transact(ledger, fn repo, root ->
         entries =
           root
           |> Keyspaces.outbox()
           |> Keyspaces.range_from_cursor(cursor)
           |> repo.get_range(limit: limit)
-          |> Stream.map(fn {_key, value} -> Keyspaces.decode(value) end)
+          |> Stream.map(fn {_key, value} -> Codec.decode(value) end)
           |> Enum.to_list()
 
         {:ok, entries}
@@ -44,7 +43,7 @@ defmodule IntentLedger.BedrockStore.Outbox do
   @doc false
   def read(ledger, consumer, opts \\ []) do
     with {:ok, key} <- consumer_key(consumer),
-         {:ok, limit} <- Options.positive_integer(opts, :limit, 100) do
+         {:ok, limit} <- positive_integer(opts, :limit, 100) do
       BedrockStore.transact(ledger, fn repo, root ->
         acked_cursor = read_cursor(repo, root, key) || 0
         entries = read_entries(repo, root, acked_cursor, limit)
@@ -84,8 +83,15 @@ defmodule IntentLedger.BedrockStore.Outbox do
         head = head(repo, root)
         force? = Keyword.get(opts, :force, false)
         allow_ahead? = Keyword.get(opts, :allow_ahead, false)
+        repair? = Keyword.get(opts, :repair, false)
 
         cond do
+          force? and not repair? ->
+            {:error, {:repair_option_required, :force}}
+
+          allow_ahead? and not repair? ->
+            {:error, {:repair_option_required, :allow_ahead}}
+
           cursor < current and not force? ->
             {:error, {:stale_outbox_ack, key, cursor, current}}
 
@@ -93,8 +99,8 @@ defmodule IntentLedger.BedrockStore.Outbox do
             {:error, {:outbox_ack_past_head, key, cursor, head}}
 
           true ->
-            record = %{consumer: key, cursor: cursor, updated_at: Time.utc_now()}
-            repo.put(Keyspaces.outbox_consumer(root), key, Keyspaces.encode(record))
+            record = %{consumer: key, cursor: cursor, updated_at: DateTime.utc_now()}
+            repo.put(Keyspaces.outbox_consumer(root), key, Codec.encode(record))
             {:ok, record}
         end
       end)
@@ -106,7 +112,7 @@ defmodule IntentLedger.BedrockStore.Outbox do
   def head(repo, root) do
     case repo.get(Keyspaces.outbox_version(root), "global") do
       nil -> 0
-      value -> Keyspaces.decode(value)
+      value -> Codec.decode(value)
     end
   end
 
@@ -115,7 +121,7 @@ defmodule IntentLedger.BedrockStore.Outbox do
   def read_cursor(repo, root, key) do
     case repo.get(Keyspaces.outbox_consumer(root), key) do
       nil -> nil
-      value -> Keyspaces.decode(value).cursor
+      value -> Codec.decode(value).cursor
     end
   end
 
@@ -124,7 +130,7 @@ defmodule IntentLedger.BedrockStore.Outbox do
     |> Keyspaces.outbox()
     |> Keyspaces.range_from_cursor(cursor)
     |> repo.get_range(limit: limit)
-    |> Stream.map(fn {_key, value} -> Keyspaces.decode(value) end)
+    |> Stream.map(fn {_key, value} -> Codec.decode(value) end)
     |> Enum.to_list()
   end
 
@@ -141,14 +147,34 @@ defmodule IntentLedger.BedrockStore.Outbox do
   defp validate_cursor(cursor) when is_integer(cursor) and cursor >= 0, do: :ok
   defp validate_cursor(cursor), do: {:error, {:invalid_outbox_cursor, cursor}}
 
+  defp non_negative_integer(opts, key, default) do
+    value = Keyword.get(opts, key, default)
+
+    if is_integer(value) and value >= 0 do
+      {:ok, value}
+    else
+      {:error, {:invalid_option, key, value}}
+    end
+  end
+
+  defp positive_integer(opts, key, default) do
+    value = Keyword.get(opts, key, default)
+
+    if is_integer(value) and value > 0 do
+      {:ok, value}
+    else
+      {:error, {:invalid_option, key, value}}
+    end
+  end
+
   defp next_counter(repo, keyspace, key) do
     next =
       case repo.get(keyspace, key) do
         nil -> 1
-        value -> Keyspaces.decode(value) + 1
+        value -> Codec.decode(value) + 1
       end
 
-    repo.put(keyspace, key, Keyspaces.encode(next))
+    repo.put(keyspace, key, Codec.encode(next))
     next
   end
 end

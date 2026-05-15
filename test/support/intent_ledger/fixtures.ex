@@ -139,7 +139,7 @@ defmodule IntentLedger.TestSupport do
     queue_result = Keyword.get(opts, :queue_result, queue_result_for_action(action))
 
     assert :ok =
-             IntentLedger.Runtime.apply_queue_action(
+             IntentLedger.Runtime.QueueLifecycle.apply_queue_action(
                ledger,
                IntentLedger.FakeRepo,
                lease_for(intent),

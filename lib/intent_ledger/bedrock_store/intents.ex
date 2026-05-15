@@ -2,8 +2,8 @@ defmodule IntentLedger.BedrockStore.Intents do
   @moduledoc false
 
   alias IntentLedger.BedrockStore
-  alias IntentLedger.BedrockStore.{Keyspaces, Options, Streams}
-  alias IntentLedger.{Intent, Time}
+  alias IntentLedger.BedrockStore.{Codec, Keyspaces, Streams}
+  alias IntentLedger.Intent
 
   @intent_statuses [
     :enqueued,
@@ -29,10 +29,10 @@ defmodule IntentLedger.BedrockStore.Intents do
         {:ok, existing, :existing}
 
       :error ->
-        now = Keyword.get(opts, :now, Time.utc_now())
+        now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
         intent = %{intent | created_at: intent.created_at || now, updated_at: now}
 
-        repo.put(intents, intent.id, Keyspaces.encode(intent))
+        repo.put(intents, intent.id, Codec.encode(intent))
         put_status_index(repo, root, intent)
 
         if intent.key do
@@ -70,7 +70,7 @@ defmodule IntentLedger.BedrockStore.Intents do
   def fetch(repo, root, intent_id) when is_binary(intent_id) do
     case repo.get(Keyspaces.intent(root), intent_id) do
       nil -> {:error, :not_found}
-      value -> {:ok, Keyspaces.decode(value)}
+      value -> {:ok, Codec.decode(value)}
     end
   end
 
@@ -83,7 +83,7 @@ defmodule IntentLedger.BedrockStore.Intents do
         {:error, :not_found} -> nil
       end
 
-    repo.put(Keyspaces.intent(root), intent.id, Keyspaces.encode(intent))
+    repo.put(Keyspaces.intent(root), intent.id, Codec.encode(intent))
     update_status_index(repo, root, previous, intent)
   end
 
@@ -101,9 +101,9 @@ defmodule IntentLedger.BedrockStore.Intents do
   def update(repo, root, ledger, intent_id, event, data, update_fun)
       when is_atom(event) and is_map(data) and is_function(update_fun, 2) do
     with {:ok, intent} <- fetch(repo, root, intent_id) do
-      now = Time.utc_now()
+      now = DateTime.utc_now()
       next = update_fun.(intent, now)
-      repo.put(Keyspaces.intent(root), next.id, Keyspaces.encode(next))
+      repo.put(Keyspaces.intent(root), next.id, Codec.encode(next))
       update_status_index(repo, root, intent, next)
       Streams.append_lifecycle(repo, root, ledger, next, event, data)
       {:ok, next}
@@ -113,7 +113,7 @@ defmodule IntentLedger.BedrockStore.Intents do
   @spec all(module(), keyword()) :: {:ok, [Intent.t()]} | {:error, term()}
   @doc false
   def all(ledger, opts \\ []) do
-    with {:ok, limit} <- Options.positive_integer(opts, :limit, 100),
+    with {:ok, limit} <- positive_integer(opts, :limit, 100),
          {:ok, statuses} <- status_filter(Keyword.get(opts, :status)) do
       queue = Keyword.get(opts, :queue)
       topic = Keyword.get(opts, :topic)
@@ -122,7 +122,7 @@ defmodule IntentLedger.BedrockStore.Intents do
         intents =
           statuses
           |> sources(repo, root, limit)
-          |> Stream.map(&Keyspaces.decode/1)
+          |> Stream.map(&Codec.decode/1)
           |> Stream.filter(&matches_filter?(&1, :queue, queue))
           |> Stream.filter(&matches_filter?(&1, :topic, topic))
           |> Enum.take(limit)
@@ -133,7 +133,15 @@ defmodule IntentLedger.BedrockStore.Intents do
   end
 
   defp lifecycle_data(%Intent{} = intent, data) do
-    command_keys = [:command_signal_id, :command_signal_type, :command_signal_source]
+    command_keys = [
+      :command_id,
+      :command_ingress,
+      :command_source,
+      :command_submitted_at,
+      :command_signal_id,
+      :command_signal_type,
+      :command_signal_source
+    ]
 
     command_data =
       intent.metadata
@@ -156,7 +164,7 @@ defmodule IntentLedger.BedrockStore.Intents do
   defp put_status_index(repo, root, %Intent{} = intent) do
     root
     |> Keyspaces.status_index(intent.status)
-    |> repo.put(intent.id, Keyspaces.encode(intent))
+    |> repo.put(intent.id, Codec.encode(intent))
   end
 
   defp clear_status_index(repo, root, %Intent{} = intent) do
@@ -216,6 +224,16 @@ defmodule IntentLedger.BedrockStore.Intents do
 
   defp normalize_status(status), do: {:error, {:invalid_status, status}}
 
+  defp positive_integer(opts, key, default) do
+    value = Keyword.get(opts, key, default)
+
+    if is_integer(value) and value > 0 do
+      {:ok, value}
+    else
+      {:error, {:invalid_option, key, value}}
+    end
+  end
+
   defp existing_by_key(_repo, _keys, _intents, nil), do: :error
 
   defp existing_by_key(repo, keys, intents, key) do
@@ -226,7 +244,7 @@ defmodule IntentLedger.BedrockStore.Intents do
       intent_id ->
         case repo.get(intents, intent_id) do
           nil -> :error
-          value -> {:ok, Keyspaces.decode(value)}
+          value -> {:ok, Codec.decode(value)}
         end
     end
   end

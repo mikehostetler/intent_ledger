@@ -199,7 +199,7 @@ defmodule IntentLedger.Runtime.ExecutionTest do
 
     assert {:ok, failed_exception} = EdgeIntents.fetch(exception_intent.id)
     assert failed_exception.status == :failed
-    assert match?({:exception, %RuntimeError{}}, failed_exception.error)
+    assert failed_exception.error == {:exception, %{type: :exception, module: "RuntimeError", redacted: true}}
     assert_handler_telemetry(:error, exception_intent, error_kind: :exception)
 
     assert {:ok, throw_intent} = enqueue_edge(:throw, max_attempts: 1)

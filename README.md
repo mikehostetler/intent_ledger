@@ -136,9 +136,9 @@ Inspect and replay:
 
 {:ok, window} = MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
 {:ok, outbox_signals} = MyApp.Intents.replay(:outbox, cursor: 0, limit: 100)
-{:ok, queues} = MyApp.Intents.inspect(:queues)
+{:ok, queues} = MyApp.Intents.view(:queues)
 {:ok, tenant_queue} = MyApp.Intents.stats(queue: "tenant:acme")
-{:ok, outbox} = MyApp.Intents.inspect(:outbox)
+{:ok, outbox} = MyApp.Intents.view(:outbox)
 ```
 
 ## Public API Shape
@@ -167,7 +167,7 @@ MyApp.Intents.cancel(intent_id, reason, opts)
 MyApp.Intents.requeue(intent_id, opts)
 MyApp.Intents.mark_ambiguous(intent_id, reason, opts)
 
-MyApp.Intents.inspect(view, opts)
+MyApp.Intents.view(view, opts)
 MyApp.Intents.stats(opts)
 MyApp.Intents.health(opts)
 ```
@@ -233,6 +233,13 @@ Payloads should be treated as application data. For large files, store the file
 outside Intent Ledger and put references, checksums, size, and content type in
 the payload.
 
+Handler results and failure reasons are treated differently from payloads. They
+cross the replay/outbox boundary, so Intent Ledger records a durable summary
+instead of blindly persisting unsafe terms. Plain maps, lists, atoms, numbers,
+small binaries, and tuples survive. Exception structs, process references,
+functions, ports, references, large binaries, and arbitrary structs are redacted
+to bounded summaries before they are stored on the Intent or lifecycle signal.
+
 ## Lifecycle
 
 The public lifecycle is expressed through Intents and signals:
@@ -290,7 +297,7 @@ signal, and recorded timestamp.
 
 ## Durable Outbox
 
-`replay(:outbox, ...)` gives raw signal replay. Integrations that need durable
+`replay(:outbox, ...)` gives lifecycle signal replay. Integrations that need durable
 delivery should use named outbox consumers:
 
 ```elixir
@@ -336,9 +343,9 @@ cursor = cursor || 0
 ```
 
 Projection cursor writes are monotonic by default and cannot advance beyond the
-current ledger head. Use `force: true` only for explicit repair or rebuild
-workflows. `inspect(:projections)` includes each projection cursor, ledger head,
-and lag.
+current ledger head. `force: true` and `allow_ahead: true` require
+`repair: true`, so repair and rebuild workflows are explicit at the call site.
+`view(:projections)` includes each projection cursor, ledger head, and lag.
 
 ## Persistence
 
@@ -357,12 +364,12 @@ or object storage such as S3/MinIO as Bedrock support matures.
 The current inspection surface is view-based:
 
 ```elixir
-MyApp.Intents.inspect(:queues)
-MyApp.Intents.inspect(:intents, queue: "billing", status: :retry_scheduled)
-MyApp.Intents.inspect(:retries)
-MyApp.Intents.inspect(:ambiguous)
-MyApp.Intents.inspect(:outbox)
-MyApp.Intents.inspect(:projections)
+MyApp.Intents.view(:queues)
+MyApp.Intents.view(:intents, queue: "billing", status: :retry_scheduled)
+MyApp.Intents.view(:retries)
+MyApp.Intents.view(:ambiguous)
+MyApp.Intents.view(:outbox)
+MyApp.Intents.view(:projections)
 ```
 
 Inspection views return `{:ok, value}` or normalized `IntentLedger.Error`

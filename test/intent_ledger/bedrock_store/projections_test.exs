@@ -58,10 +58,16 @@ defmodule IntentLedger.BedrockStore.ProjectionsTest do
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :cursor, value: 3}} =
              TestIntents.put_projection_cursor(StatusProjection, 3)
 
-    assert :ok = TestIntents.put_projection_cursor(StatusProjection, 1, force: true)
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :force}} =
+             TestIntents.put_projection_cursor(StatusProjection, 1, force: true)
+
+    assert :ok = TestIntents.put_projection_cursor(StatusProjection, 1, force: true, repair: true)
     assert {:ok, 1} = TestIntents.projection_cursor(StatusProjection)
 
-    assert :ok = TestIntents.put_projection_cursor(StatusProjection, 3, allow_ahead: true)
+    assert {:error, %IntentLedger.Error.InvalidInputError{field: :allow_ahead}} =
+             TestIntents.put_projection_cursor(StatusProjection, 3, allow_ahead: true)
+
+    assert :ok = TestIntents.put_projection_cursor(StatusProjection, 3, allow_ahead: true, repair: true)
     assert {:ok, 3} = TestIntents.projection_cursor(StatusProjection)
 
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :cursor, value: -1}} =
