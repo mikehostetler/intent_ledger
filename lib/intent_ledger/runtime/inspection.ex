@@ -24,6 +24,15 @@ defmodule IntentLedger.Runtime.Inspection do
     result
   end
 
+  @spec replay_entries(module(), replay_source(), keyword()) :: {:ok, [IntentLedger.ReplayEntry.t()]} | {:error, term()}
+  @doc false
+  def replay_entries(ledger, source, opts \\ []) do
+    start = System.monotonic_time()
+    result = BedrockStore.replay_entries(ledger, source, opts)
+    Telemetry.emit(:replay, result, start, ledger, source: replay_source_metadata(source), count: result_count(result))
+    result
+  end
+
   @spec read_outbox(module(), outbox_consumer_ref(), keyword()) :: {:ok, map()} | {:error, term()}
   @doc false
   def read_outbox(ledger, consumer, opts \\ []) do

@@ -8,6 +8,7 @@ MyApp.Intents.submit(signal)
 MyApp.Intents.command_signal(:enqueue, topic: "invoice.send", payload: %{id: 1})
 MyApp.Intents.history(intent_id)
 MyApp.Intents.replay(:ledger, cursor: 0, limit: 100)
+MyApp.Intents.replay_entries(:ledger, cursor: 0, limit: 100)
 MyApp.Intents.replay({:intent, intent_id}, cursor: 0, limit: 100)
 MyApp.Intents.replay(:outbox, cursor: 0, limit: 100)
 MyApp.Intents.read_outbox("webhook-dispatcher", limit: 100)
@@ -86,6 +87,15 @@ projection rebuilds:
 {:ok, signals} = MyApp.Intents.replay(:ledger, cursor: 0, limit: 500)
 {:ok, outbox_signals} = MyApp.Intents.replay(:outbox, cursor: 0, limit: 500)
 ```
+
+The normal replay API returns bare lifecycle signals for a small consumer DX.
+Repair, projection, and forensic tooling can ask for stream metadata explicitly:
+
+```elixir
+{:ok, entries} = MyApp.Intents.replay_entries(:ledger, cursor: 0, limit: 500)
+```
+
+Each entry includes the stream name, cursor, signal, and recorded timestamp.
 
 ## Durable Outbox
 

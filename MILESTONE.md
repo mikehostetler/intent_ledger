@@ -399,6 +399,8 @@ Landed:
 - Command/idempotency tests cover duplicate keys across drift, concurrent
   duplicate enqueue, and repeated lifecycle commands.
 - Public replay supports `:ledger`, `{:intent, intent_id}`, and `:outbox`.
+- Public `replay_entries/2` preserves the simple replay API while exposing
+  stream cursor metadata for repair, projection, and forensic tooling.
 - Durable outbox consumers can read after their acknowledged cursor and ack
   delivery progress monotonically.
 - Projection cursor writes are monotonic by default, cannot move past the ledger
@@ -422,6 +424,9 @@ Landed:
 - Splode-backed public error normalization and telemetry stop events exist.
 - Fast unit tests cover handler result, validation, telemetry, replay, and
   projection cursor edge cases.
+- Internal repair verification can rebuild expected Intent state, status
+  indexes, idempotency keys, and outbox mirror facts from lifecycle replay and
+  report drift.
 
 Partial:
 
@@ -430,6 +435,8 @@ Partial:
 - Cancellation and ambiguity remove pending unleased queue items. Already leased
   or executing items are still neutralized when the worker observes the
   non-runnable Intent state.
+- Repair is intentionally internal/test-facing until the operational workflow
+  for safe public repair commands is proven.
 
 Missing:
 

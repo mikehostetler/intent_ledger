@@ -11,7 +11,13 @@ defmodule IntentLedger.BedrockStore.Outbox do
   @doc false
   def append(repo, root, signal) do
     cursor = next_counter(repo, Keyspaces.outbox_version(root), "global")
-    repo.put(Keyspaces.outbox(root), cursor, Keyspaces.encode(%{cursor: cursor, signal: signal}))
+
+    repo.put(
+      Keyspaces.outbox(root),
+      cursor,
+      Keyspaces.encode(%{cursor: cursor, signal: signal, recorded_at: Time.utc_now()})
+    )
+
     cursor
   end
 

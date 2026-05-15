@@ -3,7 +3,7 @@ defmodule IntentLedger.BedrockStore.Streams do
 
   alias IntentLedger.BedrockStore
   alias IntentLedger.BedrockStore.{Keyspaces, Options, Outbox}
-  alias IntentLedger.{Intent, Signal}
+  alias IntentLedger.{Intent, ReplayEntry, Signal, Time}
 
   @type stream_source :: :ledger | :outbox | {:intent, String.t()}
 
@@ -42,6 +42,24 @@ defmodule IntentLedger.BedrockStore.Streams do
   end
 
   def replay(ledger, source, opts) do
+    with {:ok, entries} <- replay_entries(ledger, source, opts) do
+      {:ok, Enum.map(entries, & &1.signal)}
+    end
+  end
+
+  @spec replay_entries(module(), stream_source(), keyword()) :: {:ok, [ReplayEntry.t()]} | {:error, term()}
+  @doc false
+  def replay_entries(ledger, source, opts \\ [])
+
+  def replay_entries(ledger, :outbox, opts) do
+    with {:ok, entries} <- Outbox.outbox(ledger, opts) do
+      entries
+      |> Enum.map(&entry_from_outbox/1)
+      |> collect_entries()
+    end
+  end
+
+  def replay_entries(ledger, source, opts) do
     with {:ok, stream} <- stream_name(source),
          {:ok, cursor} <- Options.non_negative_integer(opts, :cursor, 0),
          {:ok, limit} <- Options.positive_integer(opts, :limit, 100) do
@@ -53,9 +71,10 @@ defmodule IntentLedger.BedrockStore.Streams do
           |> Keyspaces.range_from_cursor(cursor)
           |> repo.get_range(limit: limit)
           |> Stream.map(fn {_key, value} -> Keyspaces.decode(value) end)
+          |> Stream.map(&entry_from_stream/1)
           |> Enum.to_list()
 
-        {:ok, Enum.map(entries, & &1.signal)}
+        collect_entries(entries)
       end)
     end
   end
@@ -75,7 +94,13 @@ defmodule IntentLedger.BedrockStore.Streams do
     versions = Keyspaces.stream_version(root)
     streams = Keyspaces.stream(root, stream)
     cursor = next_counter(repo, versions, stream)
-    repo.put(streams, cursor, Keyspaces.encode(%{stream: stream, cursor: cursor, signal: signal}))
+
+    repo.put(
+      streams,
+      cursor,
+      Keyspaces.encode(%{stream: stream, cursor: cursor, signal: signal, recorded_at: Time.utc_now()})
+    )
+
     cursor
   end
 
@@ -93,4 +118,33 @@ defmodule IntentLedger.BedrockStore.Streams do
   defp stream_name(:ledger), do: {:ok, "ledger"}
   defp stream_name({:intent, intent_id}) when is_binary(intent_id), do: {:ok, "intent:#{intent_id}"}
   defp stream_name(source), do: {:error, {:unsupported_replay_source, source}}
+
+  defp entry_from_stream(entry) do
+    ReplayEntry.new(%{
+      stream: entry.stream,
+      cursor: entry.cursor,
+      signal: entry.signal,
+      recorded_at: Map.get(entry, :recorded_at)
+    })
+  end
+
+  defp entry_from_outbox(entry) do
+    ReplayEntry.new(%{
+      stream: "outbox",
+      cursor: entry.cursor,
+      signal: entry.signal,
+      recorded_at: Map.get(entry, :recorded_at)
+    })
+  end
+
+  defp collect_entries(entries) do
+    Enum.reduce_while(entries, {:ok, []}, fn
+      {:ok, entry}, {:ok, acc} -> {:cont, {:ok, [entry | acc]}}
+      {:error, reason}, {:ok, _acc} -> {:halt, {:error, reason}}
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      error -> error
+    end
+  end
 end

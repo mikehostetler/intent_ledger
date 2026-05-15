@@ -139,9 +139,21 @@ defmodule IntentLedger do
       @doc """
       Replays durable lifecycle signals.
       """
-      @spec replay(IntentLedger.Runtime.replay_source(), keyword()) :: {:ok, [map()]} | {:error, term()}
+      @spec replay(IntentLedger.Runtime.replay_source(), keyword()) :: {:ok, [Jido.Signal.t()]} | {:error, term()}
       def replay(source, opts \\ []),
         do: __MODULE__ |> IntentLedger.Runtime.replay(source, opts) |> IntentLedger.Error.normalize_result()
+
+      @doc """
+      Replays durable lifecycle signals with stream cursor metadata.
+
+      Use `replay/2` for the simple signal list. Use this when repair,
+      projection catch-up, or forensic tooling needs the stream and cursor for
+      each signal.
+      """
+      @spec replay_entries(IntentLedger.Runtime.replay_source(), keyword()) ::
+              {:ok, [IntentLedger.ReplayEntry.t()]} | {:error, term()}
+      def replay_entries(source, opts \\ []),
+        do: __MODULE__ |> IntentLedger.Runtime.replay_entries(source, opts) |> IntentLedger.Error.normalize_result()
 
       @doc """
       Reads durable outbox entries after the consumer's last acknowledged cursor.

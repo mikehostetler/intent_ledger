@@ -22,6 +22,36 @@ defmodule IntentLedger.Runtime.InspectionTest do
     assert second.type == "intent.enqueued"
   end
 
+  test "replay_entries returns stream cursor metadata without replacing simple replay" do
+    assert {:ok, first_intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 1})
+    assert {:ok, second_intent} = TestIntents.enqueue("invoice.send", %{invoice_id: 2})
+
+    assert {:ok, [first_signal, second_signal]} = TestIntents.replay(:ledger, cursor: 0, limit: 2)
+    assert Enum.map([first_signal, second_signal], & &1.subject) == [first_intent.id, second_intent.id]
+
+    assert {:ok, [first_entry, second_entry]} = TestIntents.replay_entries(:ledger, cursor: 0, limit: 2)
+
+    assert %IntentLedger.ReplayEntry{} = first_entry
+    assert first_entry.stream == "ledger"
+    assert first_entry.cursor == 1
+    assert first_entry.signal.subject == first_intent.id
+    assert %DateTime{} = first_entry.recorded_at
+
+    assert second_entry.stream == "ledger"
+    assert second_entry.cursor == 2
+    assert second_entry.signal.subject == second_intent.id
+
+    assert {:ok, [intent_entry]} = TestIntents.replay_entries({:intent, first_intent.id})
+    assert intent_entry.stream == "intent:#{first_intent.id}"
+    assert intent_entry.cursor == 1
+    assert intent_entry.signal.subject == first_intent.id
+
+    assert {:ok, [outbox_entry]} = TestIntents.replay_entries(:outbox, cursor: 1, limit: 1)
+    assert outbox_entry.stream == "outbox"
+    assert outbox_entry.cursor == 2
+    assert outbox_entry.signal.subject == second_intent.id
+  end
+
   test "unsupported replay sources return public invalid input errors" do
     assert {:error, %IntentLedger.Error.InvalidInputError{field: :source, value: :unknown}} =
              TestIntents.replay(:unknown)

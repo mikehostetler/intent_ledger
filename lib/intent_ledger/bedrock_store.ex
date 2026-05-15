@@ -80,6 +80,10 @@ defmodule IntentLedger.BedrockStore do
   defdelegate replay(ledger, source, opts \\ []), to: Streams
 
   @doc false
+  @spec replay_entries(module(), stream_source(), keyword()) :: {:ok, [IntentLedger.ReplayEntry.t()]} | {:error, term()}
+  defdelegate replay_entries(ledger, source, opts \\ []), to: Streams
+
+  @doc false
   @spec outbox(module(), keyword()) :: {:ok, [map()]} | {:error, term()}
   defdelegate outbox(ledger, opts \\ []), to: Outbox
 

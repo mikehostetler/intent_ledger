@@ -34,6 +34,11 @@ defmodule IntentLedger.Runtime do
   defdelegate replay(ledger, source, opts \\ []), to: Inspection
 
   @doc false
+  @spec replay_entries(module(), replay_source(), keyword()) ::
+          {:ok, [IntentLedger.ReplayEntry.t()]} | {:error, term()}
+  defdelegate replay_entries(ledger, source, opts \\ []), to: Inspection
+
+  @doc false
   @spec read_outbox(module(), outbox_consumer_ref(), keyword()) :: {:ok, map()} | {:error, term()}
   defdelegate read_outbox(ledger, consumer, opts \\ []), to: Inspection
 

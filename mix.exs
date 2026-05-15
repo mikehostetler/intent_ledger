@@ -152,7 +152,8 @@ defmodule IntentLedger.MixProject do
           IntentLedger.Handler,
           IntentLedger.Intent,
           IntentLedger.Error,
-          IntentLedger.Projection
+          IntentLedger.Projection,
+          IntentLedger.ReplayEntry
         ],
         Runtime: [
           IntentLedger.BedrockStore,

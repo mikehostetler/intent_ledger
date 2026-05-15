@@ -154,6 +154,7 @@ MyApp.Intents.command_signal(command, attrs, opts)
 MyApp.Intents.fetch(intent_id)
 MyApp.Intents.history(intent_id, opts)
 MyApp.Intents.replay(source, opts)
+MyApp.Intents.replay_entries(source, opts)
 
 MyApp.Intents.read_outbox(consumer, opts)
 MyApp.Intents.outbox_cursor(consumer, opts)
@@ -271,6 +272,17 @@ MyApp.Intents.replay(:outbox, cursor: 0, limit: 100)
 Signals are the audit log and the source for rebuildable read models. They are
 also the boundary for integrations that need durable outbox delivery.
 
+The default replay API intentionally returns bare `Jido.Signal` structs. Repair,
+projection, and forensic tooling that need stream cursor metadata can opt into
+the richer shape:
+
+```elixir
+{:ok, entries} = MyApp.Intents.replay_entries(:ledger, cursor: 0, limit: 100)
+```
+
+Each `IntentLedger.ReplayEntry` includes the stream name, cursor, lifecycle
+signal, and recorded timestamp.
+
 ## Durable Outbox
 
 `replay(:outbox, ...)` gives raw signal replay. Integrations that need durable
@@ -375,9 +387,11 @@ The remaining implementation work is:
 
 1. Decide whether Intent Ledger should ship a managed outbox dispatcher process
    or keep the lower-level durable consumer cursor API only.
-2. Add real worker crash and lease-expiry scenarios once `bedrock_job_queue`
+2. Add real worker crash, lease-expiry, and net-split scenarios once `bedrock_job_queue`
    exposes a stable recovery path for those cases.
-3. Publish once `bedrock_job_queue` has a Hex release path.
+3. Promote the internal repair verifier into public operational tooling only
+   after the repair workflow is proven.
+4. Publish once `bedrock_job_queue` has a Hex release path.
 
 ## Development
 
