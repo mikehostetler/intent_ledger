@@ -65,3 +65,17 @@ Application handlers should remain idempotent and should record external
 side-effect evidence in the application domain whenever side effects matter.
 Worker crash and expired-lease recovery scenarios are still being hardened with
 `bedrock_job_queue` and are not part of the alpha contract yet.
+
+## Chaos Scenarios
+
+Failure-mode tests live behind the `:chaos` tag and run with:
+
+```sh
+mix test.chaos
+```
+
+The chaos suite is the right place for net splits, stale leases, duplicate queue
+callbacks, crash-before-commit and crash-after-commit boundaries, and outbox or
+projection recovery after restart. Deterministic simulations should come first;
+true distributed partition tests should only assert behavior that Bedrock and
+`bedrock_job_queue` expose as stable recovery contracts.

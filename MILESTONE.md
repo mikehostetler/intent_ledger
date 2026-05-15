@@ -414,6 +414,9 @@ Landed:
 - Opt-in `@tag :multi_node` integration scenario covers simulated node A
   enqueue/idempotency race, node B queue lease execution, and node C
   inspection/replay after storage process restart.
+- Opt-in `@tag :chaos` scenarios cover signal command redelivery, duplicate
+  stale worker completion after a simulated partition, and cancel-while-leased
+  queue neutralization.
 - Release gates pass for `mix quality`, `mix docs`, and `mix hex.build`; docs
   and package metadata reflect the alpha Bedrock-first runtime.
 - Splode-backed public error normalization and telemetry stop events exist.
@@ -432,7 +435,35 @@ Missing:
 
 - Worker crash and lease-expiry recovery scenarios once `bedrock_job_queue`
   exposes a stable expired-lease recovery path.
+- True distributed net-split scenarios that disconnect and reconnect Erlang
+  nodes around Bedrock/job_queue lease ownership.
 - Hex publish timing decision after Bedrock dependency availability is settled.
+
+## Failure-Mode Matrix
+
+The default suite should stay fast. Failure-mode tests belong in explicit
+opt-in aliases:
+
+- `mix test.bedrock` for single-node Bedrock/job_queue integration behavior;
+- `mix test.multi_node` for coordinated multi-role scenarios;
+- `mix test.chaos` for partitions, stale workers, crash boundaries, and
+  recovery edge cases.
+
+Initial chaos coverage is deterministic and local:
+
+| Failure mode | Current coverage | Release target |
+| --- | --- | --- |
+| command redelivery during bus partition | `:chaos` signal submit redelivery collapses to one Intent by signal id | keep direct and signal-native command paths equivalent |
+| stale worker completion after partition heal | `:chaos` duplicate worker execution produces one terminal lifecycle fact when only one queue commit wins | retain one terminal fact per Intent even when stale queue callbacks arrive late |
+| cancel while leased | `:chaos` canceled Intent is not handed to the handler; stale worker only clears queue state | preserve queue neutralization metadata and avoid handler side effects after cancel/ambiguous |
+| queue action succeeds but lifecycle hook fails | unit coverage around hook return normalization | add fault injection when Bedrock transaction conflict behavior is available |
+| lifecycle hook succeeds but queue action fails | unit coverage rejects failed queue action before lifecycle mutation | keep lifecycle immutable on stale/mismatched leases |
+| worker crashes before handler starts | not covered | add once job_queue exposes stable lease-expiry recovery |
+| worker crashes after handler side effect but before queue commit | not covered | prove retry behavior and document required handler idempotency |
+| lease expires and another worker obtains the item | not covered | add true job_queue recovery scenario |
+| Erlang net split isolates worker/consumer nodes | not covered | add real distributed harness that disconnects/reconnects nodes |
+| outbox consumer crashes before ack | unit and Bedrock restart coverage | add chaos dispatcher example with crash-before-ack and resume |
+| projection cursor attempts to move backward | unit coverage | keep monotonic cursor invariant under replay/restart |
 
 ## Release Gates
 

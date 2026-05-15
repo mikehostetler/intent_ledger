@@ -67,4 +67,10 @@ tagged and exposed through focused aliases:
 mix test.integration
 mix test.bedrock
 mix test.multi_node
+mix test.chaos
 ```
+
+`mix test.chaos` is for partition and failure-mode scenarios that should never
+run in the default suite. Early scenarios use deterministic local simulations;
+real distributed net-split coverage belongs there once the Bedrock and
+`bedrock_job_queue` recovery hooks are stable enough to exercise directly.

@@ -395,7 +395,13 @@ scenario you want:
 mix test.integration
 mix test.bedrock
 mix test.multi_node
+mix test.chaos
 ```
+
+`mix test.chaos` is reserved for heavier recovery and partition-style scenarios:
+stale queue callbacks, worker crash boundaries, lease recovery, duplicate
+execution races, and net-split behavior. These tests are intentionally opt-in
+while the Bedrock and `bedrock_job_queue` recovery APIs settle.
 
 The package is changing quickly. For design discussion, implementation status,
 or integration questions, join <https://jido.run/discord>.

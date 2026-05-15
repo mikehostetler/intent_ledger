@@ -60,7 +60,8 @@ defmodule IntentLedger.MixProject do
         "test.fast": :test,
         "test.integration": :test,
         "test.bedrock": :test,
-        "test.multi_node": :test
+        "test.multi_node": :test,
+        "test.chaos": :test
       ]
     ]
   end
@@ -117,11 +118,12 @@ defmodule IntentLedger.MixProject do
     [
       setup: ["deps.get"],
       install_hooks: ["git_hooks.install"],
-      test: "test --exclude flaky --exclude integration --exclude bedrock --exclude multi_node",
-      "test.fast": "test --exclude flaky --exclude integration --exclude bedrock --exclude multi_node",
+      test: "test --exclude flaky --exclude integration --exclude bedrock --exclude multi_node --exclude chaos",
+      "test.fast": "test --exclude flaky --exclude integration --exclude bedrock --exclude multi_node --exclude chaos",
       "test.integration": "test --exclude flaky --only integration",
       "test.bedrock": "test --exclude flaky --only bedrock --exclude multi_node",
       "test.multi_node": "test --exclude flaky --only multi_node",
+      "test.chaos": "test --exclude flaky --only chaos",
       q: ["quality"],
       quality: [
         "format --check-formatted",
